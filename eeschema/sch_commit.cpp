@@ -208,7 +208,9 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
         return;
     }
 
-    if( !frame )
+    // Without an editor frame there is nowhere to keep the history, unless the tool manager has
+    // an undo sink (a headless API session, since 11.0)
+    if( !frame && !m_toolMgr->GetUndoRedoSink() )
         aCommitFlags |= SKIP_UNDO;
 
     undoList.SetDescription( aMessage );

@@ -115,6 +115,9 @@ private:
 
     HANDLER_RESULT<commands::OpenDocumentResponse> openDocument( const commands::OpenDocument& aRequest );
 
+    /// Ask the editor handler serving aDoc whether it has unsaved changes
+    bool isDocumentModified( const OPEN_DOCUMENT& aDoc );
+
     /// Upstream's in-memory document creation: a new board or schematic that is not saved yet
     HANDLER_RESULT<commands::OpenDocumentResponse> createDocument( const commands::CreateDocument& aRequest );
 
