@@ -29,6 +29,13 @@
 #include <wildcards_and_files_ext.h>
 
 using namespace kiapi::common::commands;
+using kiapi::common::types::LibraryType;
+using kiapi::common::types::LibraryTableScope;
+using kiapi::common::types::LT_SYMBOL;
+using kiapi::common::types::LT_FOOTPRINT;
+using kiapi::common::types::LT_DESIGN_BLOCK;
+using kiapi::common::types::LTS_GLOBAL;
+using kiapi::common::types::LTS_PROJECT;
 using kiapi::common::ApiStatusCode;
 
 

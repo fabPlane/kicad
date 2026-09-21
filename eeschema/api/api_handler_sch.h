@@ -147,14 +147,8 @@ private:
 
     std::map<KICAD_T, uint32_t> countItems( const DocumentSpecifier& aDocument ) override;
 
-    HANDLER_RESULT<commands::SavedDocumentResponse>
-    handleSaveDocumentToString( const HANDLER_CONTEXT<commands::SaveDocumentToString>& aCtx );
-
     HANDLER_RESULT<commands::SavedSelectionResponse>
     handleSaveItemsToString( const HANDLER_CONTEXT<commands::SaveItemsToString>& aCtx );
-
-    HANDLER_RESULT<commands::CreateItemsResponse>
-    handleParseAndCreateItemsFromString( const HANDLER_CONTEXT<commands::ParseAndCreateItemsFromString>& aCtx );
 
     HANDLER_RESULT<commands::GetItemsResponse>
     handleGetItemsById( const HANDLER_CONTEXT<commands::GetItemsById>& aCtx );

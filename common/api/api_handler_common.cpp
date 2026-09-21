@@ -97,7 +97,7 @@ static std::vector<VECTOR2I> layOutTextBox( EDA_TEXT& aText, const TextBox& aBox
 
     if( KIFONT::FONT* font = aText.GetDrawFont( nullptr ) )
     {
-        wxString shown = aText.GetShownText( true );
+        wxString shown = aText.GetShownText( FOR_CANVAS );
         font->LinebreakText( shown, colWidth, aText.GetTextSize(), aText.GetEffectiveTextPenWidth(),
                              aText.IsBold(), aText.IsItalic() );
         aText.SetText( shown );

@@ -230,23 +230,6 @@ message PlaceFromLibraryResponse
  */
 
 
-// Since 11.0
-enum LibraryType
-{
-  LT_UNKNOWN = 0;
-  LT_SYMBOL = 1;
-  LT_FOOTPRINT = 2;
-  LT_DESIGN_BLOCK = 3;
-}
-
-// Since 11.0
-enum LibraryTableScope
-{
-  LTS_UNKNOWN = 0;
-  LTS_GLOBAL = 1;
-  LTS_PROJECT = 2;
-}
-
 // One row of a library table (sym-lib-table, fp-lib-table, design-block-lib-table)
 // Since 11.0
 message LibraryTableRow
@@ -264,7 +247,7 @@ message LibraryTableRow
 
   string description = 5;
 
-  LibraryTableScope scope = 6;
+  kiapi.common.types.LibraryTableScope scope = 6;
 
   // False when the row is disabled in the table
   bool enabled = 7;
@@ -286,10 +269,10 @@ message LibraryTableRow
 // Since 11.0
 message GetLibraryTables
 {
-  LibraryType type = 1;
+  kiapi.common.types.LibraryType type = 1;
 
   // Restrict to one scope; LTS_UNKNOWN (the default) returns both, global rows first
-  LibraryTableScope scope = 2;
+  kiapi.common.types.LibraryTableScope scope = 2;
 }
 
 // Since 11.0
@@ -354,7 +337,7 @@ message LibraryEntry
 // Since 11.0
 message ListLibraryEntries
 {
-  LibraryType type = 1;
+  kiapi.common.types.LibraryType type = 1;
 
   string nickname = 2;
 
@@ -373,7 +356,7 @@ message ListLibraryEntriesResponse
 // Since 11.0
 message GetLibraryItem
 {
-  LibraryType type = 1;
+  kiapi.common.types.LibraryType type = 1;
 
   kiapi.common.types.LibraryIdentifier id = 2;
 }
@@ -405,7 +388,7 @@ message GetLibraryItemResponse
 // Since 11.0
 message SaveLibraryItem
 {
-  LibraryType type = 1;
+  kiapi.common.types.LibraryType type = 1;
 
   kiapi.common.types.LibraryIdentifier id = 2;
 
@@ -426,7 +409,7 @@ message SaveLibraryItemResponse
 // Since 11.0
 message DeleteLibraryItem
 {
-  LibraryType type = 1;
+  kiapi.common.types.LibraryType type = 1;
 
   kiapi.common.types.LibraryIdentifier id = 2;
 }
@@ -439,13 +422,13 @@ message DeleteLibraryItem
 // Since 11.0
 message CreateLibrary
 {
-  LibraryType type = 1;
+  kiapi.common.types.LibraryType type = 1;
 
   string nickname = 2;
 
   string uri = 3;
 
-  LibraryTableScope scope = 4;
+  kiapi.common.types.LibraryTableScope scope = 4;
 
   string description = 5;
 }
@@ -456,9 +439,9 @@ message CreateLibrary
 // Since 11.0
 message AddLibraryTableRow
 {
-  LibraryType type = 1;
+  kiapi.common.types.LibraryType type = 1;
 
-  LibraryTableScope scope = 2;
+  kiapi.common.types.LibraryTableScope scope = 2;
 
   // scope, ok and error are ignored; type defaults to "KiCad" when empty
   LibraryTableRow row = 3;
@@ -471,9 +454,9 @@ message AddLibraryTableRow
 // Since 11.0
 message RemoveLibraryTableRow
 {
-  LibraryType type = 1;
+  kiapi.common.types.LibraryType type = 1;
 
-  LibraryTableScope scope = 2;
+  kiapi.common.types.LibraryTableScope scope = 2;
 
   string nickname = 3;
 }

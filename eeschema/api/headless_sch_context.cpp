@@ -43,7 +43,7 @@ HEADLESS_SCH_CONTEXT::HEADLESS_SCH_CONTEXT( SCHEMATIC** aSchematicSlot, PROJECT*
     m_toolManager->SetEnvironment( *m_schematicSlot, nullptr, nullptr,
                                    Kiface().KifaceSettings(), nullptr );
 
-    m_undoStack = MakeSchematicUndoStack( m_schematic, m_toolManager.get() );
+    m_undoStack = MakeSchematicUndoStack( *m_schematicSlot, m_toolManager.get() );
     m_toolManager->SetUndoRedoSink( m_undoStack.get() );
 }
 
@@ -115,9 +115,17 @@ bool HEADLESS_SCH_CONTEXT::RevertToSaved()
     if( !reloaded )
         return false;
 
+    // The undo history owns copies of items of the schematic about to go; free them first, then
+    // start a fresh history on the reloaded document (a revert is not undoable)
+    m_toolManager->SetUndoRedoSink( nullptr );
+    m_undoStack.reset();
+
     delete schematic;
     *m_schematicSlot = reloaded;
     m_toolManager->SetEnvironment( reloaded, nullptr, nullptr, Kiface().KifaceSettings(), nullptr );
+
+    m_undoStack = MakeSchematicUndoStack( reloaded, m_toolManager.get() );
+    m_toolManager->SetUndoRedoSink( m_undoStack.get() );
 
     return true;
 }
