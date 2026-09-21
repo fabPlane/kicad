@@ -244,6 +244,19 @@ HANDLER_RESULT<PathResponse> API_HANDLER_COMMON::handleGetKiCadBinaryPath(
 tl::expected<bool, ApiResponseStatus> API_HANDLER_COMMON::validateProject( const ProjectSpecifier& aProject,
                                                                            bool aAllowEmpty )
 {
+    if( aProject.name().empty() && aProject.path().empty() )
+    {
+        // The proto says requests without a project are accepted (and deprecated) for now: they
+        // address the one open project rather than comparing an empty name against it
+        if( aAllowEmpty )
+            return true;
+
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "a project name and path must be specified" );
+        return tl::unexpected( e );
+    }
+
     if( !aAllowEmpty && ( aProject.name().empty() || aProject.path().empty() ) )
     {
         ApiResponseStatus e;

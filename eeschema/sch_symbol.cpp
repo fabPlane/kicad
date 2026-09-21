@@ -883,7 +883,15 @@ void SCH_SYMBOL::Serialize( kiapi::schematic::types::SchematicSymbolInstance& aS
     }
 
     if( m_part )
+    {
         m_part->Serialize( *aSymbol.mutable_definition(), /* aSkipPins = */ true );
+
+        // The definition carries the library id the symbol was placed from, not the id of the
+        // schematic-local copy it may be drawn with ("R_1"; that name travels in lib_id above).
+        // Deserialize restores m_lib_id from it, so an unchanged round trip keeps the file's
+        // lib_id / lib_name pair.
+        PackLibId( aSymbol.mutable_definition()->mutable_id(), m_lib_id );
+    }
 
     aSymbol.set_show_pin_names( GetShowPinNames() );
     aSymbol.set_show_pin_numbers( GetShowPinNumbers() );
