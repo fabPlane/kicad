@@ -28,6 +28,7 @@
 #include <api/common/commands/cross_probe_commands.pb.h>
 #include <api/common/commands/project_commands.pb.h>
 #include <api/common/commands/variant_commands.pb.h>
+#include <api/common/commands/library_commands.pb.h>
 #include <properties/property_mgr.h>
 
 using namespace kiapi::board::jobs;
@@ -185,6 +186,9 @@ private:
     HANDLER_RESULT<commands::CurrentVariantResponse>
     handleGetCurrentVariant( const HANDLER_CONTEXT<commands::GetCurrentVariant>& aCtx );
 
+    HANDLER_RESULT<kiapi::common::commands::PlaceFromLibraryResponse> handlePlaceFootprintFromLibrary(
+            const HANDLER_CONTEXT<kiapi::board::commands::PlaceFootprintFromLibrary>& aCtx );
+
     HANDLER_RESULT<types::RunJobResponse> handleRunBoardJobExportRender(
             const HANDLER_CONTEXT<RunBoardJobExportRender>& aCtx );
 
@@ -199,6 +203,9 @@ private:
 
     HANDLER_RESULT<types::RunJobResponse> handleRunBoardJobExportPs(
             const HANDLER_CONTEXT<RunBoardJobExportPs>& aCtx );
+
+    HANDLER_RESULT<types::RunJobResponse> handleRunBoardJobExportPng(
+            const HANDLER_CONTEXT<RunBoardJobExportPng>& aCtx );
 
     HANDLER_RESULT<types::RunJobResponse> handleRunBoardJobExportGerbers(
             const HANDLER_CONTEXT<RunBoardJobExportGerbers>& aCtx );
@@ -296,6 +303,8 @@ protected:
     void setDrawingSheetFileName( const wxString& aFileName ) override;
 
     void onModified() override;
+
+    void onNetSettingsChanged() override;
 
     HANDLER_RESULT<commands::GetDocumentModifiedStateResponse>
     handleGetDocumentModifiedState( const HANDLER_CONTEXT<commands::GetDocumentModifiedState>& aCtx ) override;

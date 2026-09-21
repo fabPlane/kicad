@@ -41,6 +41,7 @@
 #include <geometry/eda_angle.h>
 #include <pad.h> // For PAD_DRILL_POST_MACHINING_MODE
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <stop_token>
@@ -78,6 +79,11 @@ public:
      * Load footprint models if they are not already loaded, i.e. if m_3dModelMap is empty
      */
     void Load3dModelsIfNeeded();
+
+    /**
+     * Rebuild the raytracing hit-test scene in the background after a visibility change.
+     */
+    void RebuildHitTestAsync();
 
     void                                handleGizmoMouseInput( int mouseX, int mouseY );
     void                                updateGizmoSelection( glm::mat4 aCameraRotationMatrix );
@@ -204,6 +210,9 @@ private:
     void renderExtrudedBodies();
 
     void renderOpaqueModels( const glm::mat4 &aCameraViewMatrix );
+
+    void renderExtrudedBodies( bool aTransparentPass );
+
     void renderTransparentModels( const glm::mat4 &aCameraViewMatrix );
 
     void renderModel( const glm::mat4 &aCameraViewMatrix, const MODELTORENDER &aModelToRender,
@@ -260,6 +269,7 @@ private:
 
     void startBgWorker();
     void bgWorker( std::stop_token aStop );
+    void runHitTestRebuild( std::stop_token aStop );
     void sendRefreshView();
 
     struct
@@ -277,6 +287,8 @@ private:
 
     EDA_3D_CANVAS*       m_canvas;
     std::jthread         m_bgWorkerThread;
+    std::atomic<bool>    m_bgWorkerBusy{ false };
+    std::atomic<bool>    m_hitTestDirty{ false };
     std::recursive_mutex m_renderMutex;
 
 private:

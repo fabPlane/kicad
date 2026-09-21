@@ -21,8 +21,11 @@
 #ifndef SCREEN_H
 #define SCREEN_H
 
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <stddef.h>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <wx/arrstr.h>
@@ -50,6 +53,8 @@
 class BUS_ALIAS;
 class EDA_ITEM;
 class LIB_SYMBOL;
+class LEGACY_SYMBOL_LIBS;
+class SYMBOL_LIBRARY_ADAPTER;
 class SCH_COMMIT;
 class SCH_PIN;
 class SCH_SYMBOL;
@@ -98,6 +103,7 @@ class SCH_SCREEN : public BASE_SCREEN
 {
 public:
     SCH_SCREEN( EDA_ITEM* aParent = nullptr );
+    SCH_SCREEN( const SCH_SCREEN& ) = delete;
 
     ~SCH_SCREEN();
 
@@ -168,7 +174,41 @@ public:
     void IncRefCount();
     int GetRefCount() const                                 { return m_refCount; }
 
-    void SetConnectivityDirty();
+    /**
+     * The only change signal that the connectivity engine reads from this screen. Every change to
+     * captured state must increment it, or the engine serves stale connectivity.
+     */
+    uint64_t ConnectivityRevision() const { return m_connectivityRevision; }
+
+    /** Changes with every bump except a wire-only bump, so wire edits keep cached text. */
+    uint64_t ConnectivitySymbolRevision() const { return m_connectivitySymbolRevision; }
+
+    /**
+     * Increment the connectivity revisions of this screen.
+     *
+     * @param aChangedType is the type of the changed item.  Pass SCH_LINE_T only when no other item
+     *                     changed, because a wire bump keeps the symbol revision.
+     */
+    void BumpConnectivityRevision( KICAD_T aChangedType = TYPE_NOT_INIT );
+
+    /**
+     * Markers, bitmaps, plain shapes, graphic lines and groups carry nothing captured by connectivity.
+     * Changes to these items do not bump the revision.
+     */
+    static bool IsConnectivitySource( const SCH_ITEM* aItem );
+
+    /// Process-local lifetime identity; file UUIDs can be shared by distinct screens.
+    uint64_t ConnectivityId() const { return m_connectivityId; }
+
+    struct CONNECTIVITY_SOURCE
+    {
+        SCH_SCREEN* screen = nullptr;
+    };
+
+    std::weak_ptr<const CONNECTIVITY_SOURCE> ConnectivitySource() const { return m_connectivitySource; }
+
+    /// Resolve a drawing item or a connectable child on this screen; ambiguous IDs return null.
+    SCH_ITEM* GetConnectivityItem( const KIID& aId ) const;
 
     /**
      * Return the number of times this screen is used.
@@ -239,8 +279,11 @@ public:
      *       symbols and should call #UpdateLocalLibSymbolLinks.
      *
      * @param[in] aReporter Optional #REPORTER object to write status and error messages into.
+     * @param[in] aLegacyLibs Optional caller-owned legacy libraries; avoids lazy project loading.
+     * @param[in] aLibraries Optional adapter for a caller-owned project context.
      */
-    void UpdateSymbolLinks( REPORTER* aReporter = nullptr );
+    void UpdateSymbolLinks( REPORTER* aReporter = nullptr, LEGACY_SYMBOL_LIBS* aLegacyLibs = nullptr,
+                            SYMBOL_LIBRARY_ADAPTER* aLibraries = nullptr );
 
     /**
      * Initialize the #LIB_SYMBOL reference for each #SCH_SYMBOL found in this schematic
@@ -279,12 +322,31 @@ public:
     bool Remove( SCH_ITEM* aItem, bool aUpdateLibSymbol = true );
 
     /**
-     * Update \a aItem's bounding box in the tree
+     * Refresh a changed item in the tree and invalidate connectivity.
      *
      * @param[in] aItem Item that needs to be updated.
      * @param aUpdateLibSymbol removes the library symbol as required when true.
      */
     void Update( SCH_ITEM* aItem, bool aUpdateLibSymbol = true );
+
+    /**
+     * Refresh display bounds only; the item's source and membership must be unchanged.
+     * This does not bump the connectivity revision.
+     */
+    void UpdateDisplayBounds( SCH_ITEM* aItem );
+
+    /**
+     * Remove the library symbol cached under \a aName if no symbol on this screen still
+     * references that name.
+     *
+     * Callers that change a symbol's library link must use this with the *previous* link name;
+     * the screen's normal Remove/Append maintenance only examines the link name the symbol has
+     * after the change.
+     *
+     * @param aName Library symbol name previously used by a symbol on this screen.
+     * @return True if an entry was found under \a aName and it had no remaining users.
+     */
+    bool PruneUnusedLibSymbol( const wxString& aName );
 
     /**
      * Remove \a aItem from the linked list and deletes the object.
@@ -677,6 +739,12 @@ public:
     double m_LastZoomLevel;
 
 private:
+    const uint64_t                                             m_connectivityId;
+    std::shared_ptr<CONNECTIVITY_SOURCE>                       m_connectivitySource;
+    uint64_t                                                   m_connectivityRevision = 1;
+    uint64_t                                                   m_connectivitySymbolRevision = 1;
+    mutable std::optional<std::unordered_map<KIID, SCH_ITEM*>> m_connectivityItems;
+
     wxString    m_fileName;                 // File used to load the screen.
     int         m_fileFormatVersionAtLoad;
     int         m_refCount;                 // Number of sheets referencing this screen.

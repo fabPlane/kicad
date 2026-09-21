@@ -17,6 +17,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <tool/tool_manager.h>
 #include "tools/ee_graphic_tool.h"
 
 #include <wx/msgdlg.h>
@@ -77,7 +78,7 @@ bool EE_GRAPHIC_TOOL::Init()
                 return m_mode == MODE::ARC;
             };
 
-    const auto canUndoPoint = [this]( const SELECTION& aSel )
+    const auto inManagedShape = [this]( const SELECTION& aSel )
             {
                 return m_mode == MODE::ARC || m_mode == MODE::BEZIER || m_mode == MODE::ELLIPSE_ARC;
             };
@@ -85,8 +86,9 @@ bool EE_GRAPHIC_TOOL::Init()
     CONDITIONAL_MENU& ctxMenu = m_menu->GetMenu();
 
     // clang-format off
-    ctxMenu.AddItem( ACTIONS::arcPosture,          inDrawingArc,    200 );
-    ctxMenu.AddItem( ACTIONS::deleteLastPoint,     canUndoPoint,    200 );
+    ctxMenu.AddItem( ACTIONS::arcPosture,          inDrawingArc,      200 );
+    ctxMenu.AddItem( ACTIONS::deleteLastPoint,     inManagedShape,    200 );
+    ctxMenu.AddItem( ACTIONS::finishInteractive,   inManagedShape,    200 );
     // clang-format on
 
     return true;
@@ -302,12 +304,14 @@ int EE_GRAPHIC_TOOL::DrawShape( const TOOL_EVENT& aEvent )
                           || evt->IsAction( &ACTIONS::finishInteractive ) ) )
         {
             bool finished = false;
+            bool doubleClick = false;
 
             if( evt->IsDblClick( BUT_LEFT )
                     || evt->IsAction( &ACTIONS::cursorDblClick )
                     || evt->IsAction( &ACTIONS::finishInteractive ) )
             {
                 finished = true;
+                doubleClick = true;
             }
             else
             {
@@ -316,7 +320,7 @@ int EE_GRAPHIC_TOOL::DrawShape( const TOOL_EVENT& aEvent )
 
             if( finished )
             {
-                item->EndEdit();
+                item->EndEdit( doubleClick );
                 item->SetFlags( IS_NEW );
 
                 if( isTextBox )
@@ -376,7 +380,8 @@ int EE_GRAPHIC_TOOL::DrawShape( const TOOL_EVENT& aEvent )
             evt->SetPassEvent();
             break;
         }
-        else if( item && ( evt->IsAction( &ACTIONS::refreshPreview ) || evt->IsMotion() ) )
+        else if( item && (   evt->IsAction( &ACTIONS::refreshPreview )
+                          || evt->IsMotion() ) )
         {
             item->CalcEdit( cursorPos );
             m_view->ClearPreview();
@@ -384,7 +389,8 @@ int EE_GRAPHIC_TOOL::DrawShape( const TOOL_EVENT& aEvent )
 
             frame()->SetMsgPanel( item.get() );
         }
-        else if( evt->IsDblClick( BUT_LEFT ) && !item )
+        else if( !item && (   evt->IsDblClick( BUT_LEFT )
+                           || evt->IsAction( &ACTIONS::cursorDblClick ) ) )
         {
             m_toolMgr->RunAction( SCH_ACTIONS::properties );
         }
@@ -436,7 +442,8 @@ int EE_GRAPHIC_TOOL::DrawArc( const TOOL_EVENT& aEvent )
     const auto makeNewArc =
             [&]()
             {
-                std::unique_ptr<SCH_SHAPE> arc = std::make_unique<SCH_SHAPE>( SHAPE_T::ARC, shapeLayer, 0, m_lastFillStyle );
+                std::unique_ptr<SCH_SHAPE> arc = std::make_unique<SCH_SHAPE>( SHAPE_T::ARC, shapeLayer, 0,
+                                                                              m_lastFillStyle );
                 arc->SetStroke( m_lastStroke );
                 arc->SetFillColor( m_lastFillColor );
                 arc->SetParent( parent );
@@ -460,8 +467,12 @@ int EE_GRAPHIC_TOOL::DrawArc( const TOOL_EVENT& aEvent )
 
     ARC_DRAW_BEHAVIOR arcBehavior( schIUScale, frame()->GetUserUnits() );
 
-    while( drawManagedShape( originalEvent, arc, arcBehavior, initialPts ) )
+    SHAPE_DRAW_RESULT result = SHAPE_DRAW_RESULT::NEXT_SHAPE;
+
+    while( result == SHAPE_DRAW_RESULT::NEXT_SHAPE )
     {
+        result = drawManagedShape( originalEvent, arc, arcBehavior, initialPts );
+
         if( arc )
         {
             m_lastStroke = arc->GetStroke();
@@ -526,8 +537,12 @@ int EE_GRAPHIC_TOOL::DrawEllipseArc( const TOOL_EVENT& aEvent )
 
     ELLIPSE_ARC_DRAW_BEHAVIOR ellipseBehavior( schIUScale, frame()->GetUserUnits() );
 
-    while( drawManagedShape( originalEvent, arc, ellipseBehavior, initialPts ) )
+    SHAPE_DRAW_RESULT result = SHAPE_DRAW_RESULT::NEXT_SHAPE;
+
+    while( result == SHAPE_DRAW_RESULT::NEXT_SHAPE )
     {
+        result = drawManagedShape( originalEvent, arc, ellipseBehavior, initialPts );
+
         if( arc )
         {
             m_lastStroke = arc->GetStroke();
@@ -569,8 +584,8 @@ int EE_GRAPHIC_TOOL::DrawBezier( const TOOL_EVENT& aEvent )
     const auto makeNewBezier =
             [&]()
             {
-                std::unique_ptr<SCH_SHAPE> bezier = std::make_unique<SCH_SHAPE>(
-                    SHAPE_T::BEZIER, shapeLayer, 0, m_lastFillStyle );
+                std::unique_ptr<SCH_SHAPE> bezier = std::make_unique<SCH_SHAPE>( SHAPE_T::BEZIER, shapeLayer, 0,
+                                                                                 m_lastFillStyle );
                 bezier->SetStroke( m_lastStroke );
                 bezier->SetFillColor( m_lastFillColor );
                 bezier->SetParent( parent );
@@ -592,8 +607,12 @@ int EE_GRAPHIC_TOOL::DrawBezier( const TOOL_EVENT& aEvent )
 
     BEZIER_DRAW_BEHAVIOR bezierBehavior( schIUScale, frame()->GetUserUnits() );
 
-    while( drawManagedShape( originalEvent, bezier, bezierBehavior, initialPts ) )
+    SHAPE_DRAW_RESULT result = SHAPE_DRAW_RESULT::NEXT_SHAPE;
+
+    while( result == SHAPE_DRAW_RESULT::NEXT_SHAPE )
     {
+        result = drawManagedShape( originalEvent, bezier, bezierBehavior, initialPts );
+
         if( bezier )
         {
             m_lastStroke = bezier->GetStroke();
@@ -630,11 +649,12 @@ int EE_GRAPHIC_TOOL::DrawBezier( const TOOL_EVENT& aEvent )
 }
 
 
-bool EE_GRAPHIC_TOOL::drawManagedShape( const TOOL_EVENT& aTool, std::unique_ptr<SCH_SHAPE>& aShape,
-                                        SHAPE_DRAW_BEHAVIOR& aBehavior, const std::vector<VECTOR2D>& aInitialPts )
+SHAPE_DRAW_RESULT EE_GRAPHIC_TOOL::drawManagedShape( const TOOL_EVENT& aTool, std::unique_ptr<SCH_SHAPE>& aShape,
+                                                     SHAPE_DRAW_BEHAVIOR& aBehavior,
+                                                     const std::vector<VECTOR2D>& aInitialPts )
 {
     if( !aShape )
-        return false;
+        return SHAPE_DRAW_RESULT::CANCELLED;
 
     aBehavior.Reset();
 
@@ -666,6 +686,7 @@ bool EE_GRAPHIC_TOOL::drawManagedShape( const TOOL_EVENT& aTool, std::unique_ptr
 
     bool started = false;
     bool cancelled = false;
+    bool finished = false;
 
     m_toolMgr->PostAction( ACTIONS::refreshPreview );
 
@@ -684,8 +705,6 @@ bool EE_GRAPHIC_TOOL::drawManagedShape( const TOOL_EVENT& aTool, std::unique_ptr
 
         preview.Add( aShape.get() );
         frame()->SetMsgPanel( aShape.get() );
-
-        m_toolMgr->PrimeTool( aInitialPts.back() );
 
         started = true;
     }
@@ -734,7 +753,7 @@ bool EE_GRAPHIC_TOOL::drawManagedShape( const TOOL_EVENT& aTool, std::unique_ptr
             cancelled = true;
             break;
         }
-        else if( evt->IsClick( BUT_LEFT ) )
+        else if( evt->IsClick( BUT_LEFT ) || evt->IsAction( &ACTIONS::cursorClick ) )
         {
             if( !started )
             {
@@ -750,6 +769,17 @@ bool EE_GRAPHIC_TOOL::drawManagedShape( const TOOL_EVENT& aTool, std::unique_ptr
 
             aBehavior.AddPoint( cursorPos );
         }
+        else if( evt->IsDblClick( BUT_LEFT )
+                || evt->IsAction( &ACTIONS::cursorDblClick )
+                || evt->IsAction( &ACTIONS::finishInteractive ) )
+        {
+            // Keep whatever we have so far, and report that we're finished.
+            if( !started )
+                cleanup();
+
+            finished = true;
+            break;
+        }
         else if( evt->IsAction( &ACTIONS::arcPosture ) )
         {
             aBehavior.ToggleClockwise();
@@ -759,7 +789,7 @@ bool EE_GRAPHIC_TOOL::drawManagedShape( const TOOL_EVENT& aTool, std::unique_ptr
             aBehavior.RemoveLastPoint();
             grid.FullReset();
         }
-        else if( evt->IsMotion() )
+        else if( evt->IsMotion() || evt->IsAction( &ACTIONS::refreshPreview ) )
         {
             aBehavior.SetCursorPosition( cursorPos );
         }
@@ -816,9 +846,12 @@ bool EE_GRAPHIC_TOOL::drawManagedShape( const TOOL_EVENT& aTool, std::unique_ptr
     frame()->GetCanvas()->SetCurrentCursor( KICURSOR::ARROW );
 
     if( cancelled )
+    {
         aShape.reset();
+        return SHAPE_DRAW_RESULT::CANCELLED;
+    }
 
-    return !cancelled;
+    return finished ? SHAPE_DRAW_RESULT::FINISHED : SHAPE_DRAW_RESULT::NEXT_SHAPE;
 }
 
 
@@ -831,6 +864,14 @@ int EE_GRAPHIC_TOOL::ImportGraphics( const TOOL_EVENT& aEvent )
 
     if( !parent )
         return 0;
+
+    if( IsSymbolEditor() )
+    {
+        SYMBOL_EDIT_FRAME* symFrame = frame<SYMBOL_EDIT_FRAME>();
+
+        if( !symFrame->IsSymbolGraphicallyEditable() )
+            return 0;
+    }
 
     REENTRANCY_GUARD guard( &m_inDrawingTool );
 
@@ -958,7 +999,7 @@ int EE_GRAPHIC_TOOL::ImportGraphics( const TOOL_EVENT& aEvent )
 
             break;
         }
-        else if( evt->IsMotion() )
+        else if( evt->IsMotion() || evt->IsAction( &ACTIONS::refreshPreview ) )
         {
             delta = cursorPos - currentOffset;
 

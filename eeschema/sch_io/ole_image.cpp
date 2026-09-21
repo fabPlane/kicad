@@ -98,39 +98,6 @@ bool isWmf( const uint8_t* aData, size_t aSize )
     return aSize >= 4 && ( readU16( aData ) == 1 || readU16( aData ) == 2 ) && readU16( aData + 2 ) == 9;
 }
 
-
-wxString wmfFontDirectory()
-{
-    wxFileName fontDir;
-    fontDir.AssignDir( PATHS::GetStockDataPath() );
-    fontDir.AppendDir( wxS( "libwmf" ) );
-    fontDir.AppendDir( wxS( "fonts" ) );
-
-    if( fontDir.DirExists() )
-        return fontDir.GetPath();
-
-    wxFileName buildDir;
-    buildDir.AssignDir( PATHS::GetExecutablePath() );
-
-    for( int depth = 0; depth < 4; ++depth )
-    {
-        wxFileName candidate = buildDir;
-        candidate.AppendDir( wxS( "libwmf" ) );
-        candidate.AppendDir( wxS( "fonts" ) );
-
-        if( candidate.DirExists() )
-            return candidate.GetPath();
-
-        buildDir.RemoveLastDir();
-    }
-
-    wxLogTrace( traceSchPlugin, wxS( "libwmf fonts missing (looked for %s); WMF rendering will fail" ),
-                fontDir.GetPath() );
-
-    return fontDir.GetPath();
-}
-
-
 OLE_IMAGE_PAYLOAD classifyContents( std::vector<uint8_t> aData, std::string aName )
 {
     if( ( aData.size() >= 2 && aData[0] == 'B' && aData[1] == 'M' )
@@ -245,6 +212,37 @@ OLE_IMAGE_PAYLOAD classifyNative( const std::vector<uint8_t>& aData )
 
 
 } // namespace
+
+wxString OleLibWmfFontDirectory()
+{
+    wxFileName fontDir;
+    fontDir.AssignDir( PATHS::GetStockDataPath() );
+    fontDir.AppendDir( wxS( "libwmf" ) );
+    fontDir.AppendDir( wxS( "fonts" ) );
+
+    if( fontDir.DirExists() )
+        return fontDir.GetPath();
+
+    wxFileName buildDir;
+    buildDir.AssignDir( PATHS::GetExecutablePath() );
+
+    for( int depth = 0; depth < 4; ++depth )
+    {
+        wxFileName candidate = buildDir;
+        candidate.AppendDir( wxS( "libwmf" ) );
+        candidate.AppendDir( wxS( "fonts" ) );
+
+        if( candidate.DirExists() )
+            return candidate.GetPath();
+
+        buildDir.RemoveLastDir();
+    }
+
+    wxLogTrace( traceSchPlugin, wxS( "libwmf fonts missing (looked for %s); WMF rendering will fail" ),
+                fontDir.GetPath() );
+
+    return fontDir.GetPath();
+}
 
 
 std::optional<std::pair<size_t, size_t>> OleEmbeddedCompoundFile( const std::vector<uint8_t>& aPayload )
@@ -406,13 +404,10 @@ std::vector<uint8_t> OleExtractEmbeddedEmf( const std::vector<uint8_t>& aWmf )
     {
         uint32_t sizeWords = readU32( aWmf.data() + offset );
 
-        if( sizeWords < 3 || sizeWords > std::numeric_limits<size_t>::max() / 2 )
+        if( sizeWords < 3 || sizeWords > ( aWmf.size() - offset ) / 2 )
             return {};
 
         size_t recordSize = static_cast<size_t>( sizeWords ) * 2;
-
-        if( recordSize > aWmf.size() - offset )
-            return {};
 
         uint16_t function = readU16( aWmf.data() + offset + 4 );
 
@@ -606,7 +601,7 @@ bool OleRenderWmf( const std::vector<uint8_t>& aWmf, int aMaxWidth, int aMaxHeig
 
     wmfAPI*        api = nullptr;
     wmfAPI_Options options{};
-    wxCharBuffer   fontDir = wmfFontDirectory().utf8_str();
+    wxCharBuffer   fontDir = OleLibWmfFontDirectory().utf8_str();
     char*          fontDirs[] = { fontDir.data(), nullptr };
     options.function = wmf_gd_function;
     options.fontdirs = fontDirs;

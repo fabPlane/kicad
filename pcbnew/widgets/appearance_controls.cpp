@@ -172,8 +172,16 @@ void NET_GRID_TABLE::SetValueAsBool( int aRow, int aCol, bool aValue )
     wxASSERT( static_cast<size_t>( aRow ) < m_nets.size() );
     wxASSERT( aCol == COL_VISIBILITY );
 
-    m_nets[aRow].visible = aValue;
+    SetVisibilityState( aRow, aValue );
     updateNetVisibility( m_nets[aRow] );
+}
+
+
+void NET_GRID_TABLE::SetVisibilityState( int aRow, bool aVisible )
+{
+    wxASSERT( static_cast<size_t>( aRow ) < m_nets.size() );
+
+    m_nets[aRow].visible = aVisible;
 }
 
 
@@ -198,7 +206,7 @@ void NET_GRID_TABLE::SetValueAsCustom( int aRow, int aCol, const wxString& aType
 }
 
 
-NET_GRID_ENTRY& NET_GRID_TABLE::GetEntry( int aRow )
+const NET_GRID_ENTRY& NET_GRID_TABLE::GetEntry( int aRow ) const
 {
     wxASSERT( static_cast<size_t>( aRow ) < m_nets.size() );
     return m_nets[aRow];
@@ -207,16 +215,8 @@ NET_GRID_ENTRY& NET_GRID_TABLE::GetEntry( int aRow )
 
 int NET_GRID_TABLE::GetRowByNetcode( int aCode ) const
 {
-    auto it = std::find_if( m_nets.cbegin(), m_nets.cend(),
-            [aCode]( const NET_GRID_ENTRY& aEntry )
-            {
-                return aEntry.code == aCode;
-            } );
-
-    if( it == m_nets.cend() )
-        return -1;
-
-    return std::distance( m_nets.cbegin(), it );
+    auto it = m_netcodeToRow.find( aCode );
+    return it != m_netcodeToRow.end() ? it->second : -1;
 }
 
 
@@ -236,6 +236,7 @@ void NET_GRID_TABLE::Rebuild()
 
     int deleted = (int) m_nets.size();
     m_nets.clear();
+    m_netcodeToRow.clear();
 
     if( GetView() )
     {
@@ -264,6 +265,13 @@ void NET_GRID_TABLE::Rebuild()
                {
                  return a.name < b.name;
                } );
+
+    m_netcodeToRow.reserve( m_nets.size() );
+
+    for( size_t row = 0; row < m_nets.size(); ++row )
+    {
+        m_netcodeToRow.emplace( m_nets[row].code, static_cast<int>( row ) );
+    }
 
     if( GetView() )
     {
@@ -354,7 +362,7 @@ const APPEARANCE_CONTROLS::APPEARANCE_SETTING APPEARANCE_CONTROLS::s_objectSetti
     RR( _HKI( "DRC Exclusions" ),       LAYER_DRC_EXCLUSION,      _HKI( "DRC violations which have been individually excluded" ) ),
     RR( _HKI( "Anchors" ),              LAYER_ANCHOR,             _HKI( "Show footprint and text origins as a cross" ) ),
     RR( _HKI( "Points" ),               LAYER_POINTS,             _HKI( "Show explicit snap points as crosses" ) ),
-    RR( _HKI( "Grid Items" ),           LAYER_GRIDITEMS,          _HKI( "Show custom routing/placement grids" ) ),
+    RR( _HKI( "Grids" ),                LAYER_SUBGRIDS,           _HKI( "Show custom routing/placement grids" ) ),
     RR( _HKI( "Via Stitching" ),        LAYER_VIA_STITCHING,      _HKI( "Show via stitching generator outlines" ) ),
     RR( _HKI( "Locked Item Shadow" ),   LAYER_LOCKED_ITEM_SHADOW, _HKI( "Show a shadow on locked items" ) ),
     RR( _HKI( "Colliding Courtyards" ), LAYER_CONFLICTS_SHADOW,   _HKI( "Show colliding footprint courtyards" ) ),
@@ -472,10 +480,10 @@ APPEARANCE_CONTROLS::APPEARANCE_CONTROLS( PCB_BASE_FRAME* aParent, wxWindow* aFo
 
     createControls();
 
-    m_btnNetInspector->SetBitmap( KiBitmapBundle( BITMAPS::list_nets_16 ) );
+    m_btnNetInspector->SetBitmap( KiBitmapBundle( BITMAPS::list_nets, 16 ) );
     m_btnNetInspector->SetPadding( 2 );
 
-    m_btnConfigureNetClasses->SetBitmap( KiBitmapBundle( BITMAPS::options_generic_16 ) );
+    m_btnConfigureNetClasses->SetBitmap( KiBitmapBundle( BITMAPS::options_generic, 16 ) );
     m_btnConfigureNetClasses->SetPadding( 2 );
 
     m_txtNetFilter->SetHint( _( "Filter nets" ) );
@@ -996,7 +1004,7 @@ void APPEARANCE_CONTROLS::OnNetGridMouseEvent( wxMouseEvent& aEvent )
 
         m_hoveredCell = cell;
 
-        NET_GRID_ENTRY& net = m_netsTable->GetEntry( cell.GetRow() );
+        const NET_GRID_ENTRY& net = m_netsTable->GetEntry( cell.GetRow() );
 
         wxString name = net.name;
         wxString showOrHide = net.visible ? _( "Click to hide ratsnest for %s" )
@@ -1128,7 +1136,7 @@ void APPEARANCE_CONTROLS::OnNetVisibilityChanged( int aNetCode, bool aVisibility
 
     if( row >= 0 )
     {
-        m_netsTable->SetValueAsBool( row, NET_GRID_TABLE::COL_VISIBILITY, aVisibility );
+        m_netsTable->SetVisibilityState( row, aVisibility );
         m_netsGrid->ForceRefresh();
     }
 }
@@ -3266,7 +3274,7 @@ void APPEARANCE_CONTROLS::onNetContextMenu( wxCommandEvent& aEvent )
     wxASSERT( m_netsGrid->GetSelectedRows().size() == 1 );
 
     int row = m_netsGrid->GetSelectedRows()[0];
-    NET_GRID_ENTRY& net = m_netsTable->GetEntry( row );
+    const NET_GRID_ENTRY& net = m_netsTable->GetEntry( row );
 
     m_netsGrid->ClearSelection();
 
@@ -3349,7 +3357,7 @@ void APPEARANCE_CONTROLS::showNetclass( const wxString& aClassName, bool aShow )
             int row = m_netsTable->GetRowByNetcode( net->GetNetCode() );
 
             if( row >= 0 )
-                m_netsTable->SetValueAsBool( row, NET_GRID_TABLE::COL_VISIBILITY, aShow );
+                m_netsTable->SetVisibilityState( row, aShow );
         }
     }
 

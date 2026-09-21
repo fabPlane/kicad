@@ -372,7 +372,7 @@ BOOST_AUTO_TEST_CASE( RevertDocumentWithoutCommitPassesGuard )
     API_RESULT                result = handler.Handle( request );
 
     BOOST_REQUIRE( !result.has_value() );
-    BOOST_CHECK_EQUAL( result.error().status(), kiapi::common::ApiStatusCode::AS_UNIMPLEMENTED );
+    BOOST_CHECK_EQUAL( result.error().status(), kiapi::common::ApiStatusCode::AS_BAD_REQUEST );
 }
 
 

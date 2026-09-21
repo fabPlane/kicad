@@ -648,7 +648,7 @@ bool PAD::IsFlipped() const
 
 PCB_LAYER_ID PAD::GetLayer() const
 {
-    return BOARD_ITEM::GetLayer();
+    return GetPrincipalLayer();
 }
 
 
@@ -1579,37 +1579,37 @@ void PAD::BuildEffectivePolygon( ERROR_LOC aErrorLoc ) const
     PAD_DRAW_CACHE_DATA& drawCache = getDrawCache();
 
     Padstack().ForEachUniqueLayer(
-        [&]( PCB_LAYER_ID aLayer )
-        {
-            // Polygon
-            std::shared_ptr<SHAPE_POLY_SET>& effectivePolygon =
-                    drawCache.m_effectivePolygons[ aLayer ][ aErrorLoc ];
+            [&]( PCB_LAYER_ID aLayer )
+            {
+                // Polygon
+                std::shared_ptr<SHAPE_POLY_SET>& effectivePolygon =
+                        drawCache.m_effectivePolygons[ aLayer ][ aErrorLoc ];
 
-            effectivePolygon = std::make_shared<SHAPE_POLY_SET>();
-            TransformShapeToPolygon( *effectivePolygon, aLayer, 0, GetMaxError(), aErrorLoc );
-        } );
+                effectivePolygon = std::make_shared<SHAPE_POLY_SET>();
+                TransformShapeToPolygon( *effectivePolygon, aLayer, 0, GetMaxError(), aErrorLoc );
+            } );
 
     if( doBoundingRadius )
     {
         m_effectiveBoundingRadius = 0;
 
         Padstack().ForEachUniqueLayer(
-            [&]( PCB_LAYER_ID aLayer )
-            {
-                std::shared_ptr<SHAPE_POLY_SET>& effectivePolygon =
-                        drawCache.m_effectivePolygons[ aLayer ][ aErrorLoc ];
-
-                for( int cnt = 0; cnt < effectivePolygon->OutlineCount(); ++cnt )
+                [&]( PCB_LAYER_ID aLayer )
                 {
-                    const SHAPE_LINE_CHAIN& poly = effectivePolygon->COutline( cnt );
+                    std::shared_ptr<SHAPE_POLY_SET>& effectivePolygon =
+                            drawCache.m_effectivePolygons[ aLayer ][ aErrorLoc ];
 
-                    for( int ii = 0; ii < poly.PointCount(); ++ii )
+                    for( int cnt = 0; cnt < effectivePolygon->OutlineCount(); ++cnt )
                     {
-                        int dist = KiROUND( ( poly.CPoint( ii ) - GetPosition() ).EuclideanNorm() );
-                        m_effectiveBoundingRadius = std::max( m_effectiveBoundingRadius, dist );
+                        const SHAPE_LINE_CHAIN& poly = effectivePolygon->COutline( cnt );
+
+                        for( int ii = 0; ii < poly.PointCount(); ++ii )
+                        {
+                            int dist = KiROUND( ( poly.CPoint( ii ) - GetPosition() ).EuclideanNorm() );
+                            m_effectiveBoundingRadius = std::max( m_effectiveBoundingRadius, dist );
+                        }
                     }
-                }
-            } );
+                } );
 
         m_effectiveBoundingRadius = std::max( m_effectiveBoundingRadius, KiROUND( GetDrillSizeX() / 2.0 ) );
         m_effectiveBoundingRadius = std::max( m_effectiveBoundingRadius, KiROUND( GetDrillSizeY() / 2.0 ) );
@@ -1837,16 +1837,16 @@ void PAD::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
 void PAD::FlipPrimitives( FLIP_DIRECTION aFlipDirection )
 {
     Padstack().ForEachUniqueLayer(
-        [&]( PCB_LAYER_ID aLayer )
-        {
-            for( std::shared_ptr<PCB_SHAPE>& primitive : m_padStack.Primitives( aLayer ) )
+            [&]( PCB_LAYER_ID aLayer )
             {
-                // Ensure the primitive parent is up to date. Flip uses GetBoard() that
-                // imply primitive parent is valid
-                primitive->SetParent(this);
-                primitive->Flip( VECTOR2I( 0, 0 ), aFlipDirection );
-            }
-        } );
+                for( std::shared_ptr<PCB_SHAPE>& primitive : m_padStack.Primitives( aLayer ) )
+                {
+                    // Ensure the primitive parent is up to date. Flip uses GetBoard() that
+                    // imply primitive parent is valid
+                    primitive->SetParent(this);
+                    primitive->Flip( VECTOR2I( 0, 0 ), aFlipDirection );
+                }
+            } );
 
     SetDirty();
 }
@@ -1893,38 +1893,38 @@ bool PAD::IsOnCopperLayer() const
         bool hasAnnularRing = true;
 
         Padstack().ForEachUniqueLayer(
-            [&]( PCB_LAYER_ID aLayer )
-            {
-                switch( GetShape( aLayer ) )
+                [&]( PCB_LAYER_ID aLayer )
                 {
-                case PAD_SHAPE::CIRCLE:
-                    if( m_padStack.Offset( aLayer ) == VECTOR2I( 0, 0 )
-                        && m_padStack.Size( aLayer ).x <= m_padStack.Drill().size.x )
+                    switch( GetShape( aLayer ) )
                     {
-                        hasAnnularRing = false;
+                    case PAD_SHAPE::CIRCLE:
+                        if( m_padStack.Offset( aLayer ) == VECTOR2I( 0, 0 )
+                            && m_padStack.Size( aLayer ).x <= m_padStack.Drill().size.x )
+                        {
+                            hasAnnularRing = false;
+                        }
+
+                        break;
+
+                    case PAD_SHAPE::OVAL:
+                        if( m_padStack.Offset( aLayer ) == VECTOR2I( 0, 0 )
+                            && m_padStack.Size( aLayer ).x <= m_padStack.Drill().size.x
+                            && m_padStack.Size( aLayer ).y <= m_padStack.Drill().size.y )
+                        {
+                            hasAnnularRing = false;
+                        }
+
+                        break;
+
+                    default:
+                        // We could subtract the hole polygon from the shape polygon for these, but it
+                        // would be expensive and we're probably well out of the common use cases....
+                        break;
                     }
+                } );
 
-                    break;
-
-                case PAD_SHAPE::OVAL:
-                    if( m_padStack.Offset( aLayer ) == VECTOR2I( 0, 0 )
-                        && m_padStack.Size( aLayer ).x <= m_padStack.Drill().size.x
-                        && m_padStack.Size( aLayer ).y <= m_padStack.Drill().size.y )
-                    {
-                        hasAnnularRing = false;
-                    }
-
-                    break;
-
-                default:
-                    // We could subtract the hole polygon from the shape polygon for these, but it
-                    // would be expensive and we're probably well out of the common use cases....
-                    break;
-                }
-            } );
-
-            if( !hasAnnularRing )
-                return false;
+        if( !hasAnnularRing )
+            return false;
     }
 
     return ( m_padStack.LayerSet() & LSET::AllCuMask() ).any();
@@ -1956,6 +1956,16 @@ void PAD::SetLayerSet( const LSET& aLayers )
 {
     m_padStack.SetLayerSet( aLayers );
     SetDirty();
+
+    // In theory m_layer should never be read, but set it just to be safe.
+    if( m_layer == UNDEFINED_LAYER || !aLayers.test( m_layer ) )
+    {
+        auto seq = aLayers.Seq();
+        if( !seq.empty() )
+            m_layer = seq.front();
+        else
+            m_layer = UNDEFINED_LAYER;
+    }
 
     if( !( GetFlags() & ROUTER_TRANSIENT ) )
     {
@@ -2695,6 +2705,17 @@ std::vector<int> PAD::ViewGetLayers() const
     std::vector<int> layers;
     layers.reserve( 64 );
 
+    // A drill map on a layer asks the holes to draw their symbols there, so the symbols stay
+    // in the view index and one hole edit repaints one hole
+    if( m_attribute == PAD_ATTRIB::PTH || m_attribute == PAD_ATTRIB::NPTH )
+    {
+        if( const BOARD* drillBoard = GetBoard() )
+        {
+            for( PCB_LAYER_ID mapLayer : drillBoard->DrillSymbolLayers().Seq() )
+                layers.push_back( DRILL_SYMBOL_LAYER_FOR( mapLayer ) );
+        }
+    }
+
     // These 2 types of pads contain a hole
     if( m_attribute == PAD_ATTRIB::PTH )
     {
@@ -2779,6 +2800,14 @@ double PAD::ViewGetLOD( int aLayer, const KIGFX::VIEW* aView ) const
     PCB_PAINTER&         painter = static_cast<PCB_PAINTER&>( *aView->GetPainter() );
     PCB_RENDER_SETTINGS& renderSettings = *painter.GetSettings();
     const BOARD*         board = GetBoard();
+
+    // Reviewing a drill drawing with pads hidden is normal, so the symbols answer to the
+    // map's own layer rather than to the pads meta control
+    if( IsDrillSymbolLayer( aLayer ) )
+    {
+        return aView->IsLayerVisibleCached( aLayer - LAYER_DRILL_SYMBOL_START ) ? LOD_SHOW
+                                                                                : LOD_HIDE;
+    }
 
     // Meta control for hiding all pads
     if( !aView->IsLayerVisibleCached( LAYER_PADS ) )
@@ -2876,8 +2905,14 @@ const BOX2I PAD::ViewBBox() const
     int xMargin = std::max( solderMaskMargin, solderPasteMargin.x ) + clearance;
     int yMargin = std::max( solderMaskMargin, solderPasteMargin.y ) + clearance;
 
-    return BOX2I( VECTOR2I( bbox.GetOrigin() ) - VECTOR2I( xMargin, yMargin ),
-                  VECTOR2I( bbox.GetSize() ) + VECTOR2I( 2 * xMargin, 2 * yMargin ) );
+    BOX2I viewBox( VECTOR2I( bbox.GetOrigin() ) - VECTOR2I( xMargin, yMargin ),
+                   VECTOR2I( bbox.GetSize() ) + VECTOR2I( 2 * xMargin, 2 * yMargin ) );
+
+    // Only a hole draws a drill symbol, so an SMD pad would just be given an oversized box
+    if( HasHole() && GetBoard() )
+        return GetBoard()->ExpandBoundingBoxForDrillSymbols( viewBox );
+
+    return viewBox;
 }
 
 
@@ -3133,7 +3168,18 @@ std::vector<PCB_SHAPE*> PAD::Recombine( bool aIsDryRun, int maxError )
                     if( !other || ( other->GetFlags() & SKIP_STRUCT ) )
                         continue;
 
-                    if( GetLayerSet().test( other->GetLayer() ) && aShape->Compare( other ) == 0 )
+                    if( Padstack().Mode() == PADSTACK::MODE::NORMAL )
+                    {
+                        if( !GetLayerSet().test( other->GetLayer() ) )
+                            continue;
+                    }
+                    else
+                    {
+                        if( aShape->GetLayer() != other->GetLayer() )
+                            continue;
+                    }
+
+                    if( aShape->GetLayer() == other->GetLayer() && aShape->Compare( other ) == 0 )
                         matching.push_back( other );
                 }
 
@@ -3142,43 +3188,48 @@ std::vector<PCB_SHAPE*> PAD::Recombine( bool aIsDryRun, int maxError )
 
     std::vector<PCB_SHAPE*> mergedShapes;
 
-    Padstack().ForEachUniqueLayer(
-            [&]( PCB_LAYER_ID aLayer )
+    auto recombine =
+            [&]( PCB_LAYER_ID sourceBoardLayer, PCB_LAYER_ID padstackStorageLayer )
             {
-                PAD_SHAPE origShape = GetShape( aLayer );
+                PAD_SHAPE origShape = GetShape( sourceBoardLayer );
 
                 // If there are intersecting items to combine, we need to first make sure the pad is a
                 // custom-shape pad.
-                if( !aIsDryRun && findNext( aLayer ) && origShape != PAD_SHAPE::CUSTOM )
+                if( !aIsDryRun && findNext( sourceBoardLayer ) && origShape != PAD_SHAPE::CUSTOM )
                 {
                     if( origShape == PAD_SHAPE::CIRCLE || origShape == PAD_SHAPE::RECTANGLE )
                     {
                         // Use the existing pad as an anchor
-                        SetAnchorPadShape( aLayer, origShape );
-                        SetShape( aLayer, PAD_SHAPE::CUSTOM );
+                        SetAnchorPadShape( padstackStorageLayer, origShape );
+                        SetShape( padstackStorageLayer, PAD_SHAPE::CUSTOM );
                     }
                     else
                     {
                         // Create a new circular anchor and convert existing pad to a polygon primitive
                         SHAPE_POLY_SET existingOutline;
-                        TransformShapeToPolygon( existingOutline, aLayer, 0, maxError, ERROR_INSIDE );
+                        TransformShapeToPolygon( existingOutline, padstackStorageLayer, 0, maxError, ERROR_INSIDE );
 
-                        int minExtent = std::min( GetSize( aLayer ).x, GetSize( aLayer ).y );
-                        SetAnchorPadShape( aLayer, PAD_SHAPE::CIRCLE );
-                        SetSize( aLayer, VECTOR2I( minExtent, minExtent ) );
-                        SetShape( aLayer, PAD_SHAPE::CUSTOM );
+                        VECTOR2I      origin( ShapePos( padstackStorageLayer ) );
+                        VECTOR2I      nearestPoint, dummyPoint;
+                        SHAPE_SEGMENT originSeg( origin, origin );
+                        existingOutline.NearestPoints( &originSeg, nearestPoint, dummyPoint );
+                        int           radius = ( nearestPoint - origin ).EuclideanNorm();
+
+                        SetAnchorPadShape( padstackStorageLayer, PAD_SHAPE::CIRCLE );
+                        SetSize( padstackStorageLayer, VECTOR2I( radius * 2, radius * 2 ) );
+                        SetShape( padstackStorageLayer, PAD_SHAPE::CUSTOM );
 
                         PCB_SHAPE* shape = new PCB_SHAPE( nullptr, SHAPE_T::POLY );
                         shape->SetFilled( true );
                         shape->SetStroke( STROKE_PARAMS( 0, LINE_STYLE::SOLID ) );
                         shape->SetPolyShape( existingOutline );
-                        shape->Move( - ShapePos( aLayer ) );
+                        shape->Move( - ShapePos( padstackStorageLayer ) );
                         shape->Rotate( VECTOR2I( 0, 0 ), - GetOrientation() );
-                        AddPrimitive( aLayer, shape );
+                        AddPrimitive( padstackStorageLayer, shape );
                     }
                 }
 
-                while( PCB_SHAPE* fpShape = findNext( aLayer ) )
+                while( PCB_SHAPE* fpShape = findNext( sourceBoardLayer ) )
                 {
                     fpShape->SetFlags( SKIP_STRUCT );
 
@@ -3200,10 +3251,10 @@ std::vector<PCB_SHAPE*> PAD::Recombine( bool aIsDryRun, int maxError )
                         if( primitive->IsAnyFill() )
                             primitive->SetFillMode( FILL_T::FILLED_SHAPE );
 
-                        primitive->Move( - ShapePos( aLayer ) );
+                        primitive->Move( - ShapePos( padstackStorageLayer ) );
                         primitive->Rotate( VECTOR2I( 0, 0 ), - GetOrientation() );
 
-                        AddPrimitive( aLayer, primitive );
+                        AddPrimitive( padstackStorageLayer, primitive );
                     }
 
                     // See if there are other shapes that match and mark them for delete.  (KiCad won't
@@ -3214,7 +3265,20 @@ std::vector<PCB_SHAPE*> PAD::Recombine( bool aIsDryRun, int maxError )
                         mergedShapes.push_back( other );
                     }
                 }
-            } );
+            };
+
+    if( Padstack().Mode() == PADSTACK::MODE::NORMAL )
+    {
+        recombine( GetPrincipalLayer(), PADSTACK::ALL_LAYERS );
+    }
+    else
+    {
+        Padstack().ForEachUniqueLayer(
+                [&]( PCB_LAYER_ID aLayer )
+                {
+                    recombine( aLayer, aLayer );
+                } );
+    }
 
     for( BOARD_ITEM* item : footprint->GraphicalItems() )
         item->ClearFlags( SKIP_STRUCT );

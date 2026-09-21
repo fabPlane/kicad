@@ -421,6 +421,33 @@ set( EESCHEMA_SRCS
     bom_plugins.cpp
     bus-wire-junction.cpp
     connection_graph.cpp
+    connectivity/conn_bus.cpp
+    connectivity/conn_bindings.cpp
+    connectivity/conn_facade.cpp
+    connectivity/conn_netchain_manager.cpp
+    connectivity/conn_engine.cpp
+    connectivity/conn_engine_erc.cpp
+    connectivity/conn_preview.cpp
+    connectivity/conn_signals.cpp
+    connectivity/conn_publish.cpp
+    connectivity/conn_rows.cpp
+    connectivity/conn_indexes.cpp
+    connectivity/conn_auxiliary.cpp
+    connectivity/conn_text.cpp
+    connectivity/conn_keys.cpp
+    connectivity/conn_claims.cpp
+    connectivity/conn_records.cpp
+    connectivity/conn_partition.cpp
+    connectivity/conn_components.cpp
+    connectivity/conn_summary.cpp
+    connectivity/conn_navigation.cpp
+    connectivity/conn_presentation.cpp
+    connectivity/conn_pin_name.cpp
+    connectivity/conn_dump.cpp
+    connectivity/conn_facts.cpp
+    connectivity/conn_frame.cpp
+    connectivity/conn_inputs.cpp
+    connectivity/conn_islands.cpp
     cross-probing.cpp
     sch_design_block_utils.cpp
     eeschema_config.cpp
@@ -432,6 +459,7 @@ set( EESCHEMA_SRCS
     files-io.cpp
     generate_alias_info.cpp
     gfx_import_utils.cpp
+    import_net_map.cpp
     junction_helpers.cpp
     lib_fields_data_model.cpp
     lib_symbol.cpp
@@ -503,6 +531,7 @@ set( EESCHEMA_SRCS
 
     api/api_sch_enums.cpp
     api/api_sch_utils.cpp
+    api/api_handler_sch_libraries.cpp
     api/api_handler_sch.cpp
     api/api_handler_symbol.cpp
     api/api_handler_symbol_library.cpp
@@ -550,6 +579,7 @@ set( EESCHEMA_SRCS
     tools/sch_point_editor.cpp
     tools/sch_selection.cpp
     tools/sch_selection_tool.cpp
+    tools/sch_tool_base.cpp
     tools/sch_tool_utils.cpp
     tools/symbol_editor_control.cpp
     tools/symbol_editor_drawing_tools.cpp
@@ -984,11 +1014,17 @@ if( APPLE )
     get_filename_component( ABS_LIBNGSPICE ${NGSPICE_LIBRARY} ABSOLUTE )
     get_filename_component( LIBNGSPICE_PATH ${ABS_LIBNGSPICE} DIRECTORY )
 
-    install( DIRECTORY "${LIBNGSPICE_PATH}/"
-            DESTINATION "${OSX_BUNDLE_INSTALL_PLUGIN_DIR}/sim"
-            FILES_MATCHING PATTERN "*.dylib")
-    install( DIRECTORY "${LIBNGSPICE_PATH}/ngspice"
+    file( REAL_PATH "${LIBNGSPICE_PATH}/ngspice" REAL_NGSPICE_CODEMODELS )
+    install( DIRECTORY "${REAL_NGSPICE_CODEMODELS}"
              DESTINATION "${OSX_BUNDLE_INSTALL_PLUGIN_DIR}/sim" )
+
+    install( CODE "
+        include( \"${KICAD_CMAKE_MODULE_PATH}/InstallSteps/InstallMacOS.cmake\" )
+        install_runtime_file( \"${ABS_LIBNGSPICE}\"
+            \"${OSX_BUNDLE_INSTALL_LIB_DIR}\" )
+        install_runtime_deps( \"\" \"${ABS_LIBNGSPICE}\"
+            \"${OSX_BUNDLE_INSTALL_LIB_DIR}\" )
+    " )
 
     install( CODE [[
         include( ${KICAD_CMAKE_MODULE_PATH}/InstallSteps/InstallMacOS.cmake )

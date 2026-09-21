@@ -83,7 +83,7 @@
 #include <pcb_tablecell.h>
 #include <pcb_track.h>
 #include <pcb_dimension.h>
-#include <pcb_griditem.h>
+#include <pcb_grid_item.h>
 #include <constraints/board_constraint_adapter.h>
 #include <constraints/constraint_builder.h>
 #include <constraints/pcb_constraint.h>
@@ -337,6 +337,7 @@ bool DRAWING_TOOL::Init()
             [this]( const SELECTION& aSel )
             {
                 return (   m_mode == MODE::ARC
+                        || m_mode == MODE::ELLIPSE_ARC
                         || m_mode == MODE::ZONE
                         || m_mode == MODE::KEEPOUT
                         || m_mode == MODE::GRAPHIC_POLYGON
@@ -357,6 +358,15 @@ bool DRAWING_TOOL::Init()
             [this]( const SELECTION& aSel )
             {
                 return m_mode == MODE::ARC;
+            };
+
+    // managed shape loops (arc, ellipse arc, bezier) can be finished early
+    auto canFinishShape =
+            [this]( const SELECTION& aSel )
+            {
+                return (   m_mode == MODE::ARC
+                        || m_mode == MODE::ELLIPSE_ARC
+                        || m_mode == MODE::BEZIER );
             };
 
     auto viaToolActive =
@@ -389,6 +399,7 @@ bool DRAWING_TOOL::Init()
     // tool-specific actions
     ctxMenu.AddItem( PCB_ACTIONS::closeOutline,          canCloseOutline, 200 );
     ctxMenu.AddItem( ACTIONS::deleteLastPoint,           canUndoPoint, 200 );
+    ctxMenu.AddItem( ACTIONS::finishInteractive,         canFinishShape, 200 );
     ctxMenu.AddItem( ACTIONS::arcPosture,                arcToolActive, 200 );
     ctxMenu.AddItem( PCB_ACTIONS::spacingIncrease,       tuningToolActive, 200 );
     ctxMenu.AddItem( PCB_ACTIONS::spacingDecrease,       tuningToolActive, 200 );
@@ -648,8 +659,12 @@ int DRAWING_TOOL::DrawArc( const TOOL_EVENT& aEvent )
 
     ARC_DRAW_BEHAVIOR arcBehavior( pcbIUScale, m_frame->GetUserUnits() );
 
-    while( drawManagedShape( originalEvent, arc, arcBehavior, initialPts ) )
+    SHAPE_DRAW_RESULT result = SHAPE_DRAW_RESULT::NEXT_SHAPE;
+
+    while( result == SHAPE_DRAW_RESULT::NEXT_SHAPE )
     {
+        result = drawManagedShape( originalEvent, arc, arcBehavior, initialPts );
+
         if( arc )
         {
             PCB_SHAPE* committedArc = arc.get();
@@ -687,10 +702,11 @@ int DRAWING_TOOL::DrawEllipseArc( const TOOL_EVENT& aEvent )
 
     REENTRANCY_GUARD guard( &m_inDrawingTool );
 
-    BOARD_ITEM*             parent = m_frame->GetModel();
+    BOARD_ITEM*                parent = m_frame->GetModel();
     std::unique_ptr<PCB_SHAPE> arc = std::make_unique<PCB_SHAPE>( parent );
-    BOARD_COMMIT            commit( m_frame );
-    std::vector<VECTOR2D>   initialPts;
+    BOARD_COMMIT               commit( m_frame );
+    SCOPED_DRAW_MODE           scopedDrawMode( m_mode, MODE::ELLIPSE_ARC );
+    std::vector<VECTOR2D>      initialPts;
 
     arc->SetShape( SHAPE_T::ELLIPSE_ARC );
     arc->SetFlags( IS_NEW );
@@ -705,8 +721,12 @@ int DRAWING_TOOL::DrawEllipseArc( const TOOL_EVENT& aEvent )
 
     ELLIPSE_ARC_DRAW_BEHAVIOR ellipseBehavior( pcbIUScale, m_frame->GetUserUnits() );
 
-    while( drawManagedShape( originalEvent, arc, ellipseBehavior, initialPts ) )
+    SHAPE_DRAW_RESULT result = SHAPE_DRAW_RESULT::NEXT_SHAPE;
+
+    while( result == SHAPE_DRAW_RESULT::NEXT_SHAPE )
     {
+        result = drawManagedShape( originalEvent, arc, ellipseBehavior, initialPts );
+
         if( arc )
         {
             PCB_SHAPE* committedArc = arc.get();
@@ -763,8 +783,12 @@ int DRAWING_TOOL::DrawBezier( const TOOL_EVENT& aEvent )
 
     BEZIER_DRAW_BEHAVIOR bezierBehavior( pcbIUScale, m_frame->GetUserUnits() );
 
-    while( drawManagedShape( originalEvent, bezier, bezierBehavior, initialPts ) )
+    SHAPE_DRAW_RESULT result = SHAPE_DRAW_RESULT::NEXT_SHAPE;
+
+    while( result == SHAPE_DRAW_RESULT::NEXT_SHAPE )
     {
+        result = drawManagedShape( originalEvent, bezier, bezierBehavior, initialPts );
+
         if( bezier )
         {
             // Chain: next bezier starts at the end of this one
@@ -929,7 +953,8 @@ int DRAWING_TOOL::PlaceReferenceImage( const TOOL_EVENT& aEvent )
 
             break;
         }
-        else if( evt->IsClick( BUT_LEFT ) || evt->IsDblClick( BUT_LEFT ) )
+        else if( evt->IsClick( BUT_LEFT ) || evt->IsDblClick( BUT_LEFT )
+                    || evt->IsAction( &ACTIONS::cursorClick ) || evt->IsAction( &ACTIONS::cursorDblClick ) )
         {
             if( !image )
             {
@@ -1215,7 +1240,7 @@ int DRAWING_TOOL::PlaceText( const TOOL_EVENT& aEvent )
 
             m_menu->ShowContextMenu( selection() );
         }
-        else if( evt->IsClick( BUT_LEFT ) )
+        else if( evt->IsClick( BUT_LEFT ) || evt->IsAction( &ACTIONS::cursorClick ) )
         {
             bool placing = text != nullptr;
 
@@ -1325,9 +1350,8 @@ int DRAWING_TOOL::PlaceText( const TOOL_EVENT& aEvent )
             selection().SetReferencePoint( cursorPos );
             m_view->Update( &selection() );
         }
-        else if( text
-                 && ( ZONE_FILLER_TOOL::IsZoneFillAction( evt )
-                      || evt->IsAction( &ACTIONS::redo ) ) )
+        else if( text && (   ZONE_FILLER_TOOL::IsZoneFillAction( evt )
+                          || evt->IsAction( &ACTIONS::redo ) ) )
         {
             wxBell();
         }
@@ -1455,7 +1479,7 @@ int DRAWING_TOOL::DrawTable( const TOOL_EVENT& aEvent )
 
             m_menu->ShowContextMenu( selection() );
         }
-        else if( evt->IsClick( BUT_LEFT ) )
+        else if( evt->IsClick( BUT_LEFT ) || evt->IsAction( &ACTIONS::cursorClick ) )
         {
             if( !table )
             {
@@ -1684,7 +1708,7 @@ int DRAWING_TOOL::DrawBarcode( const TOOL_EVENT& aEvent )
 
             m_menu->ShowContextMenu( selection() );
         }
-        else if( evt->IsClick( BUT_LEFT ) )
+        else if( evt->IsClick( BUT_LEFT ) || evt->IsAction( &ACTIONS::cursorClick ) )
         {
             m_toolMgr->RunAction( ACTIONS::selectionClear );
 
@@ -1897,7 +1921,8 @@ int DRAWING_TOOL::DrawDimension( const TOOL_EVENT& aEvent )
 
             m_menu->ShowContextMenu( selection() );
         }
-        else if( evt->IsClick( BUT_LEFT ) || evt->IsDblClick( BUT_LEFT ) )
+        else if( evt->IsClick( BUT_LEFT ) || evt->IsDblClick( BUT_LEFT )
+                    || evt->IsAction( &ACTIONS::cursorClick ) || evt->IsAction( &ACTIONS::cursorDblClick ) )
         {
             switch( step )
             {
@@ -2021,12 +2046,12 @@ int DRAWING_TOOL::DrawDimension( const TOOL_EVENT& aEvent )
                 m_controls->SetAutoPan( false );
                 m_controls->CaptureCursor( false );
             }
-            else if( evt->IsDblClick( BUT_LEFT ) )
+            else if( evt->IsDblClick( BUT_LEFT ) || evt->IsAction( &ACTIONS::cursorDblClick ) )
             {
                 m_toolMgr->PostAction( PCB_ACTIONS::cursorClick );
             }
         }
-        else if( evt->IsMotion() )
+        else if( evt->IsMotion() || evt->IsAction( &ACTIONS::refreshPreview ) )
         {
             switch( step )
             {
@@ -2378,7 +2403,7 @@ int DRAWING_TOOL::PlaceImportedGraphics( const TOOL_EVENT& aEvent )
 
             break;
         }
-        else if( evt->IsMotion() )
+        else if( evt->IsMotion() || evt->IsAction( &ACTIONS::refreshPreview ) )
         {
             delta = cursorPos - preview.GetTopLeftItem()->GetPosition();
 
@@ -2391,7 +2416,8 @@ int DRAWING_TOOL::PlaceImportedGraphics( const TOOL_EVENT& aEvent )
         {
             m_menu->ShowContextMenu( selection() );
         }
-        else if( evt->IsClick( BUT_LEFT ) || evt->IsDblClick( BUT_LEFT ) )
+        else if( evt->IsClick( BUT_LEFT ) || evt->IsDblClick( BUT_LEFT )
+                    || evt->IsAction( &ACTIONS::cursorClick ) || evt->IsAction( &ACTIONS::cursorDblClick ) )
         {
             // Place the imported drawings
             for( BOARD_ITEM* item : newItems )
@@ -2466,7 +2492,8 @@ int DRAWING_TOOL::SetAnchor( const TOOL_EVENT& aEvent )
         VECTOR2I cursorPos = grid.ResolveSnap( m_controls->GetMousePosition(), LSET::AllLayersMask() ).position;
         m_controls->ForceCursorPosition( true, cursorPos );
 
-        if( evt->IsClick( BUT_LEFT ) || evt->IsDblClick( BUT_LEFT ) )
+        if( evt->IsClick( BUT_LEFT ) || evt->IsDblClick( BUT_LEFT )
+                || evt->IsAction( &ACTIONS::cursorClick ) || evt->IsAction( &ACTIONS::cursorDblClick ) )
         {
             FOOTPRINT*   footprint = (FOOTPRINT*) m_frame->GetModel();
             BOARD_COMMIT commit( m_frame );
@@ -2526,7 +2553,7 @@ int DRAWING_TOOL::PlaceGridItem( const TOOL_EVENT& aEvent )
 
     // Turn grid items on if they are off, so that the created object will be visible after
     // completion
-    m_frame->SetObjectVisible( LAYER_GRIDITEMS );
+    m_frame->SetObjectVisible( LAYER_SUBGRIDS );
 
     SCOPED_TOOL_PUSHER raii( m_frame, aEvent );
 
@@ -2545,8 +2572,8 @@ int DRAWING_TOOL::PlaceGridItem( const TOOL_EVENT& aEvent )
     // Set initial cursor
     setCursor();
 
-    BOARD*        board = getModel<BOARD>();
-    PCB_GRIDITEM* griditem = nullptr;
+    BOARD*         board = getModel<BOARD>();
+    PCB_GRID_ITEM* griditem = nullptr;
 
     auto sizeToCursor =
             [&]( const VECTOR2I& aCursor )
@@ -2567,13 +2594,14 @@ int DRAWING_TOOL::PlaceGridItem( const TOOL_EVENT& aEvent )
         VECTOR2I cursorPos = grid.ResolveSnap( m_controls->GetMousePosition(), LSET::AllLayersMask() ).position;
         m_controls->ForceCursorPosition( true, cursorPos );
 
-        if( evt->IsClick( BUT_LEFT ) || evt->IsDblClick( BUT_LEFT ) )
+        if( evt->IsClick( BUT_LEFT ) || evt->IsDblClick( BUT_LEFT )
+                || evt->IsAction( &ACTIONS::cursorClick ) || evt->IsAction( &ACTIONS::cursorDblClick ) )
         {
             if( step == SET_CENTER )
             {
                 // Only items on the board are picked up trough a GRID_SOURCE
                 // SetSelected highlights the grid and avoids snapping to itself
-                griditem = new PCB_GRIDITEM( board );
+                griditem = new PCB_GRID_ITEM( board );
                 griditem->SetPosition( cursorPos );
                 griditem->SetExtent( VECTOR2I( 0, 0 ) );
                 griditem->SetSelected();
@@ -2621,7 +2649,8 @@ int DRAWING_TOOL::PlaceGridItem( const TOOL_EVENT& aEvent )
             else
                 break;
         }
-        else if( griditem && evt->IsMotion() )
+        else if( griditem && (   evt->IsMotion()
+                              || evt->IsAction( &ACTIONS::refreshPreview ) ) )
         {
             sizeToCursor( cursorPos );
             view()->Update( griditem );
@@ -2809,7 +2838,9 @@ bool DRAWING_TOOL::drawShape( const TOOL_EVENT& aTool, PCB_SHAPE** aGraphic, std
 
         // Drawing rectangles and circles ignore the snap behavior by default, but constrains
         // when the modifier key is pressed
-        if( shape == SHAPE_T::RECTANGLE || shape == SHAPE_T::CIRCLE || shape == SHAPE_T::ELLIPSE
+        if( shape == SHAPE_T::RECTANGLE
+            || shape == SHAPE_T::CIRCLE
+            || shape == SHAPE_T::ELLIPSE
             || shape == SHAPE_T::ELLIPSE_ARC )
         {
             if( evt->Modifier( MD_CTRL ) )
@@ -2817,7 +2848,8 @@ bool DRAWING_TOOL::drawShape( const TOOL_EVENT& aTool, PCB_SHAPE** aGraphic, std
             else
                 angleSnap = LEADER_MODE::DIRECT;
         }
-        else {
+        else
+        {
             // All other drawing uses the snap mode, except that is disabled with the modifier key
             if( evt->Modifier( MD_CTRL ) )
                 angleSnap = LEADER_MODE::DIRECT;
@@ -2907,7 +2939,8 @@ bool DRAWING_TOOL::drawShape( const TOOL_EVENT& aTool, PCB_SHAPE** aGraphic, std
 
             m_menu->ShowContextMenu( selection() );
         }
-        else if( evt->IsClick( BUT_LEFT ) || evt->IsDblClick( BUT_LEFT ) )
+        else if( evt->IsClick( BUT_LEFT ) || evt->IsDblClick( BUT_LEFT )
+                    || evt->IsAction( &ACTIONS::cursorClick ) || evt->IsAction( &ACTIONS::cursorDblClick ) )
         {
             if( !graphic )
                 break;
@@ -3013,7 +3046,9 @@ bool DRAWING_TOOL::drawShape( const TOOL_EVENT& aTool, PCB_SHAPE** aGraphic, std
 
                         graphic = nullptr;
                     }
-                    else if( twoPointMgr.IsEmpty() || evt->IsDblClick( BUT_LEFT ) )
+                    else if( twoPointMgr.IsEmpty()
+                            || evt->IsDblClick( BUT_LEFT )
+                            || evt->IsAction( &ACTIONS::cursorDblClick ) )
                     {
                         // User has clicked twice in the same spot, meaning we're finished
                         delete graphic;
@@ -3028,7 +3063,7 @@ bool DRAWING_TOOL::drawShape( const TOOL_EVENT& aTool, PCB_SHAPE** aGraphic, std
 
             twoPointMgr.SetEnd( GetClampedCoords( cursorPos ) );
         }
-        else if( evt->IsMotion() )
+        else if( evt->IsMotion() || evt->IsAction( &ACTIONS::refreshPreview ) )
         {
             if( multiPhase )
             {
@@ -3192,11 +3227,12 @@ bool DRAWING_TOOL::drawShape( const TOOL_EVENT& aTool, PCB_SHAPE** aGraphic, std
 }
 
 
-bool DRAWING_TOOL::drawManagedShape( const TOOL_EVENT& aTool, std::unique_ptr<PCB_SHAPE>& aGraphic,
-                                     SHAPE_DRAW_BEHAVIOR& aBehavior, const std::vector<VECTOR2D>& aInitialPts )
+SHAPE_DRAW_RESULT DRAWING_TOOL::drawManagedShape( const TOOL_EVENT& aTool, std::unique_ptr<PCB_SHAPE>& aGraphic,
+                                                  SHAPE_DRAW_BEHAVIOR&         aBehavior,
+                                                  const std::vector<VECTOR2D>& aInitialPts )
 {
     if( !aGraphic )
-        return false;
+        return SHAPE_DRAW_RESULT::CANCELLED;
 
     PCB_SHAPE* graphic = aGraphic.get();
 
@@ -3236,6 +3272,7 @@ bool DRAWING_TOOL::drawManagedShape( const TOOL_EVENT& aTool, std::unique_ptr<PC
 
     bool started = false;
     bool cancelled = false;
+    bool finished = false;
 
     m_toolMgr->PostAction( ACTIONS::refreshPreview );
 
@@ -3263,8 +3300,6 @@ bool DRAWING_TOOL::drawManagedShape( const TOOL_EVENT& aTool, std::unique_ptr<PC
 
         preview.Add( graphic );
         frame()->SetMsgPanel( graphic );
-
-        m_toolMgr->PrimeTool( aInitialPts.back() );
 
         started = true;
     }
@@ -3326,7 +3361,7 @@ bool DRAWING_TOOL::drawManagedShape( const TOOL_EVENT& aTool, std::unique_ptr<PC
             cancelled = true;
             break;
         }
-        else if( evt->IsClick( BUT_LEFT ) )
+        else if( evt->IsClick( BUT_LEFT ) || evt->IsAction( &ACTIONS::cursorClick ) )
         {
             if( !started )
             {
@@ -3352,6 +3387,18 @@ bool DRAWING_TOOL::drawManagedShape( const TOOL_EVENT& aTool, std::unique_ptr<PC
 
             aBehavior.AddPoint( cursorPos );
         }
+        else if( evt->IsDblClick( BUT_LEFT )
+                || evt->IsAction( &ACTIONS::cursorDblClick )
+                || evt->IsAction( &ACTIONS::finishInteractive ) )
+        {
+            // Keep whatever we have so far, and bail.  The caller commits it, but does
+            // not start another shape in the chain.
+            if( !started )
+                cleanup();
+
+            finished = true;
+            break;
+        }
         else if( evt->IsAction( &ACTIONS::deleteLastPoint ) )
         {
             // Snap guides persist in the grid helper until the tool exits, so a mid-draw backup
@@ -3359,7 +3406,7 @@ bool DRAWING_TOOL::drawManagedShape( const TOOL_EVENT& aTool, std::unique_ptr<PC
             grid.FullReset();
             aBehavior.RemoveLastPoint();
         }
-        else if( evt->IsMotion() )
+        else if( evt->IsMotion() || evt->IsAction( &ACTIONS::refreshPreview ) )
         {
             // set angle snap
             aBehavior.SetAngleSnap( angleSnap != LEADER_MODE::DIRECT );
@@ -3492,12 +3539,13 @@ bool DRAWING_TOOL::drawManagedShape( const TOOL_EVENT& aTool, std::unique_ptr<PC
     m_controls->ForceCursorPosition( false );
 
     if( cancelled )
+    {
         aGraphic.reset();
+        return SHAPE_DRAW_RESULT::CANCELLED;
+    }
 
-    return !cancelled;
+    return finished ? SHAPE_DRAW_RESULT::FINISHED : SHAPE_DRAW_RESULT::NEXT_SHAPE;
 }
-
-
 
 
 bool DRAWING_TOOL::getSourceZoneForAction( ZONE_MODE aMode, ZONE** aZone )
@@ -3696,11 +3744,14 @@ int DRAWING_TOOL::DrawZone( const TOOL_EVENT& aEvent )
         }
         // events that lock in nodes
         else if( evt->IsClick( BUT_LEFT )
+                 || evt->IsAction( &ACTIONS::cursorClick )
                  || evt->IsDblClick( BUT_LEFT )
+                 || evt->IsAction( &ACTIONS::cursorDblClick )
                  || evt->IsAction( &PCB_ACTIONS::closeOutline ) )
         {
             // Check if it is double click / closing line (so we have to finish the zone)
             const bool endPolygon = evt->IsDblClick( BUT_LEFT )
+                                    || evt->IsAction( &PCB_ACTIONS::cursorDblClick )
                                     || evt->IsAction( &PCB_ACTIONS::closeOutline )
                                     || polyGeomMgr.NewPointClosesOutline( cursorPos );
 
@@ -3751,6 +3802,7 @@ int DRAWING_TOOL::DrawZone( const TOOL_EVENT& aEvent )
             }
         }
         else if( started && (   evt->IsMotion()
+                             || evt->IsAction( &ACTIONS::refreshPreview )
                              || evt->IsDrag( BUT_LEFT ) ) )
         {
             polyGeomMgr.SetCursorPosition( cursorPos );
@@ -3843,22 +3895,31 @@ static bool ItemHasDRCViolation( BOARD_CONNECTED_ITEM* aItem, BOARD_ITEM* aOther
     {
         if( via ? zone->GetDoNotAllowVias() : zone->GetDoNotAllowTracks() )
         {
-            SHAPE_POLY_SET zoneOutline = zone->GetBoardOutline();
+            SHAPE_POLY_SET  zoneOutlineStorage;
+            SHAPE_POLY_SET* zoneOutline = &zoneOutlineStorage;
+
+            if( zone->GetParentFootprint() )
+                zoneOutlineStorage = zone->GetBoardOutline();
+            else
+                zoneOutline = zone->Outline();
 
             if( !via )
-                return zoneOutline.Collide( aItem->GetEffectiveShape().get() );
+                return zoneOutline->Collide( aItem->GetEffectiveShape().get() );
 
             bool hit = false;
+            LSET common = via->GetLayerSet() & zone->GetLayerSet();
 
-            via->Padstack().ForEachUniqueLayer(
-                    [&]( PCB_LAYER_ID aLayer )
-                    {
-                        if( hit )
-                            return;
+            for( PCB_LAYER_ID layer : common )
+            {
+                if( !IsCopperLayer( layer ) )
+                    continue;
 
-                        if( zoneOutline.Collide( via->GetPosition(), via->GetWidth( aLayer ) / 2 ) )
-                            hit = true;
-                    } );
+                if( zoneOutline->Collide( via->GetPosition(), via->GetWidth( layer ) / 2 ) )
+                {
+                    hit = true;
+                    break;
+                }
+            }
 
             return hit;
         }
@@ -3866,30 +3927,39 @@ static bool ItemHasDRCViolation( BOARD_CONNECTED_ITEM* aItem, BOARD_ITEM* aOther
         return false;
     }
 
+    bool skipCopper = false;
+
     if( connectedItem )
     {
         int connectedItemNet = connectedItem->GetNetCode();
 
-        if( connectedItemNet == 0 || connectedItemNet == aItem->GetNetCode() )
+        if( connectedItemNet != 0 && connectedItemNet == aItem->GetNetCode() )
             return false;
+
+        // A netless item can take the via's net, but its hole still keeps the via out.
+        if( connectedItemNet == 0 )
+            skipCopper = true;
     }
 
-    for( PCB_LAYER_ID layer : aOther->GetLayerSet() )
+    if( !skipCopper )
     {
-        // Reference images are "on" a copper layer but are not actually part of it
-        if( !IsCopperLayer( layer ) || aOther->Type() == PCB_REFERENCE_IMAGE_T )
-            continue;
-
-        constraint = aEngine->EvalRules( CLEARANCE_CONSTRAINT, aItem, aOther, layer );
-        clearance = constraint.GetValue().Min();
-
-        if( clearance >= 0 )
+        for( PCB_LAYER_ID layer : aOther->GetLayerSet() )
         {
-            std::shared_ptr<SHAPE> itemShape = aItem->GetEffectiveShape( layer );
-            std::shared_ptr<SHAPE> otherShape = aOther->GetEffectiveShape( layer );
+            // Reference images are "on" a copper layer but are not actually part of it
+            if( !IsCopperLayer( layer ) || aOther->Type() == PCB_REFERENCE_IMAGE_T )
+                continue;
 
-            if( itemShape->Collide( otherShape.get(), sub_e( clearance ) ) )
-                return true;
+            constraint = aEngine->EvalRules( CLEARANCE_CONSTRAINT, aItem, aOther, layer );
+            clearance = constraint.GetValue().Min();
+
+            if( clearance >= 0 )
+            {
+                std::shared_ptr<SHAPE> itemShape = aItem->GetEffectiveShape( layer );
+                std::shared_ptr<SHAPE> otherShape = aOther->GetEffectiveShape( layer );
+
+                if( itemShape->Collide( otherShape.get(), sub_e( clearance ) ) )
+                    return true;
+            }
         }
     }
 

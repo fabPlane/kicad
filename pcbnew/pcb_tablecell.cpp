@@ -38,10 +38,11 @@ PCB_TABLECELL::PCB_TABLECELL( BOARD_ITEM* aParent ) :
         m_colSpan( 1 ),
         m_rowSpan( 1 )
 {
-    if( BOARD* board = GetBoard() )
-        SetMirrored( board->IsBackLayer( aParent->GetLayer() ) );
-    else
-        SetMirrored( IsBackLayer( aParent->GetLayer() ) );
+    if( FOOTPRINT* parentFP = dynamic_cast<FOOTPRINT*>( aParent ) )
+    {
+        if( parentFP->IsFlipped() )
+            SetMirrored( true );
+    }
 
     SetRectangleHeight( std::numeric_limits<int>::max() / 2 );
     SetRectangleWidth( std::numeric_limits<int>::max() / 2 );
@@ -154,7 +155,7 @@ wxString PCB_TABLECELL::GetAddr() const
 }
 
 
-wxString PCB_TABLECELL::GetShownText( bool aAllowExtraText, int aDepth ) const
+wxString PCB_TABLECELL::GetShownText( RESOLUTION_CONTEXT aContext, int aDepth ) const
 {
     const FOOTPRINT* parentFootprint = GetParentFootprint();
     const BOARD*     board = GetBoard();
@@ -192,12 +193,12 @@ wxString PCB_TABLECELL::GetShownText( bool aAllowExtraText, int aDepth ) const
                 return false;
             };
 
-    wxString text = EDA_TEXT::GetShownText( aAllowExtraText, aDepth );
+    wxString text = EDA_TEXT::GetShownText( aContext, aDepth );
 
-    if( HasTextVars() )
+    if( HasTextVars() && aContext != RAW_VALUE )
     {
         text = ResolveTextVars( text, &tableCellResolver, aDepth );
-        FinalizeTextVarExpansion( text, aAllowExtraText );
+        FinalizeTextVarExpansion( text, aContext );
     }
 
     KIFONT::FONT*         font = GetDrawFont( nullptr );
@@ -357,6 +358,16 @@ static struct PCB_TABLECELL_DESC
         propMgr.Mask( TYPE_HASH( PCB_TABLECELL ), TYPE_HASH( EDA_TEXT ), _HKI( "Orientation" ) );
         propMgr.Mask( TYPE_HASH( PCB_TABLECELL ), TYPE_HASH( EDA_TEXT ), _HKI( "Hyperlink" ) );
         propMgr.Mask( TYPE_HASH( PCB_TABLECELL ), TYPE_HASH( EDA_TEXT ), _HKI( "Color" ) );
+
+        // A chart reports the board, so cell contents are not the user's to edit but their
+        // formatting is. Scoped here, not on EDA_TEXT's descriptor, which eeschema shares
+        propMgr.OverrideWriteability( TYPE_HASH( PCB_TABLECELL ), TYPE_HASH( EDA_TEXT ), _HKI( "Text" ),
+                []( INSPECTABLE* aItem ) -> bool
+                {
+                    PCB_TABLECELL* cell = dynamic_cast<PCB_TABLECELL*>( aItem );
+
+                    return !cell || !cell->GetParent() || cell->GetParent()->Type() != PCB_DRILL_CHART_T;
+                } );
 
         const wxString tableProps = _( "Table" );
 

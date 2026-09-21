@@ -125,7 +125,6 @@ SCH_SHEET* SCH_IO_KICAD_SEXPR::LoadSchematicFile( const wxString& aFileName, SCH
 
     if( aAppendToMe )
     {
-        m_appending = true;
         wxLogTrace( traceSchPlugin, "Append \"%s\" to sheet \"%s\".",
                     aFileName, aAppendToMe->GetFileName() );
 
@@ -149,6 +148,7 @@ SCH_SHEET* SCH_IO_KICAD_SEXPR::LoadSchematicFile( const wxString& aFileName, SCH
 
     m_currentPath.push( m_path );
     init( aSchematic, aProperties );
+    m_appending = aAppendToMe != nullptr;
 
     if( aAppendToMe == nullptr )
     {
@@ -200,8 +200,8 @@ void SCH_IO_KICAD_SEXPR::loadHierarchy( const SCH_SHEET_PATH& aParentSheetPath, 
         // stores the file name and extension.  Add the project path to the file name and
         // extension to compare when calling SCH_SHEET::SearchHierarchy().
         // Resolve text variables in the filename. The field keeps the raw text for portability.
-        wxFileName fileName =
-                m_schematic ? ExpandTextVars( aSheet->GetFileName(), &m_schematic->Project() ) : aSheet->GetFileName();
+        wxFileName fileName = m_schematic ? ExpandTextVars( aSheet->GetFileName(), &m_schematic->Project(), INTERNAL )
+                                          : aSheet->GetFileName();
 
         if( !fileName.IsAbsolute() )
             fileName.MakeAbsolute( m_currentPath.top() );
@@ -328,7 +328,7 @@ void SCH_IO_KICAD_SEXPR::loadFile( const wxString& aFileName, SCH_SHEET* aSheet 
         m_progressReporter->Report( wxString::Format( _( "Loading %s..." ), aFileName ) );
 
         if( !m_progressReporter->KeepRefreshing() )
-            THROW_IO_ERROR( _( "Open canceled by user." ) );
+            THROW_IO_CANCELLED();
 
         while( reader.ReadLine() )
             lineCount++;
@@ -559,12 +559,14 @@ void SCH_IO_KICAD_SEXPR::Format( SCH_SHEET* aSheet )
         }
     }
 
-    // Net chains are schematic-wide state owned by the connection graph, so they must be written
+    // Net chains are schematic-wide state, so they must be written
     // by exactly one sheet file.  Anchor the write to the schematic's first top-level sheet to
     // match the embedded files convention below.
     if( m_schematic->GetTopLevelSheet( 0 ) == aSheet )
     {
-        for( const auto& sigPtr : m_schematic->ConnectionGraph()->GetCommittedNetChains() )
+        m_schematic->NetChains().RefreshTerminalReferences();
+
+        for( const auto& sigPtr : m_schematic->NetChains().GetCommittedNetChains() )
         {
             if( !sigPtr )
                 continue;
@@ -600,7 +602,7 @@ void SCH_IO_KICAD_SEXPR::Format( SCH_SHEET* aSheet )
 
             for( const wxString& n : sig.GetNets() )
             {
-                if( !n.IsEmpty() && !n.StartsWith( SCH_NETCHAIN::SYNTHETIC_NET_PREFIX ) )
+                if( SCH_NETCHAIN::IsPersistableNet( n ) )
                     persistableNets.push_back( n );
             }
 
@@ -1969,12 +1971,12 @@ LIB_SYMBOL* SCH_IO_KICAD_SEXPR::LoadSymbol( const wxString& aLibraryPath,
 }
 
 
-void SCH_IO_KICAD_SEXPR::SaveSymbol( const wxString& aLibraryPath, const LIB_SYMBOL* aSymbol,
+void SCH_IO_KICAD_SEXPR::SaveSymbol( const wxString& aLibraryPath, std::unique_ptr<LIB_SYMBOL> aSymbol,
                                      const std::map<std::string, UTF8>* aProperties )
 {
     cacheLib( aLibraryPath, aProperties );
 
-    m_cache->AddSymbol( aSymbol );
+    m_cache->AddSymbol( std::move( aSymbol ) );
 
     if( !isBuffering( aProperties ) )
         m_cache->Save();

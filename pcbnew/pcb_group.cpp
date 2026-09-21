@@ -84,6 +84,9 @@ bool PCB_GROUP::Deserialize( const google::protobuf::Any& aContainer )
     return DeserializeGroup( aContainer, nullptr );
 }
 
+
+// Note: this only records the group members in m_deserializedItems.  A proper AddItem() must
+// be done in a second pass (FinalizeGroupDeserialization()).
 bool PCB_GROUP::DeserializeGroup( const google::protobuf::Any& aContainer, COMMIT* aCommit )
 {
     kiapi::board::types::Group group;
@@ -94,6 +97,9 @@ bool PCB_GROUP::DeserializeGroup( const google::protobuf::Any& aContainer, COMMI
     SetUuidDirect( KIID( group.id().value() ) );
     SetName( wxString( group.name().c_str(), wxConvUTF8 ) );
     SetLocked( group.locked() == kiapi::common::types::LockedState::LS_LOCKED );
+
+    m_items.clear();
+    m_deserializedItems.clear();
 
     BOARD* board = GetBoard();
 
@@ -109,7 +115,7 @@ bool PCB_GROUP::DeserializeGroup( const google::protobuf::Any& aContainer, COMMI
             item = aCommit->ResolveItem( id );
 
         if( item )
-            AddItem( item );
+            m_deserializedItems.insert( item );
     }
 
     if( group.has_lib_id() )
@@ -119,6 +125,7 @@ bool PCB_GROUP::DeserializeGroup( const google::protobuf::Any& aContainer, COMMI
 
     return true;
 }
+
 
 std::unordered_set<BOARD_ITEM*> PCB_GROUP::GetBoardItems() const
 {
@@ -199,12 +206,11 @@ void PCB_GROUP::SetLocked( bool aLockState )
 {
     BOARD_ITEM::SetLocked( aLockState );
 
-    RunOnChildren(
-            [&]( BOARD_ITEM* child )
-            {
-                child->SetLocked( aLockState );
-            },
-            RECURSE_MODE::NO_RECURSE );
+    // Don't set locked flag on children.  BOARD_ITEM::IsLocked() checks the parent group for current
+    // lock status before exmaining its own flag.
+    //
+    // Setting the child flag just leands to endless problems when members get added-to/removed-from
+    // locked groups.
 }
 
 

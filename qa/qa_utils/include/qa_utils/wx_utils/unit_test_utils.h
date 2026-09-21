@@ -134,6 +134,22 @@ std::ostream& boost_test_print_type( std::ostream& os, std::pair<K, V> const& aP
     return os;
 }
 
+/**
+ * Boost print helper for generic sets
+ */
+template <typename T>
+std::ostream& boost_test_print_type( std::ostream& os, std::set<T> const& aSet )
+{
+    os << "set size " << aSet.size() << " [";
+    for( const auto& i : aSet )
+    {
+        os << "\n    " << i;
+    }
+
+    os << "]";
+    return os;
+}
+
 } // namespace std
 
 
@@ -167,6 +183,19 @@ std::ostream& boost_test_print_type( std::ostream& os, const wchar_t ( &ws )[N] 
 #endif
     return os;
 }
+
+
+namespace boost { namespace unit_test
+{
+/**
+ * wxString looks like a container to Boost.Test because it has begin()/end().
+ *
+ * But we actually want to treat it NOT like a container so that it prints the
+ * value in constructions like BOOST_TEST( strA == strB )
+ */
+template<> struct is_forward_iterable<wxString> : public mpl::false_ {};
+
+}} // namespace boost::unit_test
 
 
 namespace boost { namespace test_tools { namespace tt_detail {
@@ -431,6 +460,21 @@ std::string GetTestDataRootDir();
  * @param aLoadBytes the number of bytes to load, or all bytes if not specified
  */
 std::vector<uint8_t> LoadBinaryData( const std::string& aFilePath, std::optional<size_t> aLoadBytes = std::nullopt );
+
+/**
+ * Load the contents of a file into a string.
+ *
+ * The file is read in binary mode, so the string is byte-exact.
+ * This is a thin wrapper around #KI_TEST::LoadBinaryData(),
+ * so it fails in the same way.
+ *
+ * No assumptions are made about the encoding of the file: it is up
+ * to the caller to interpret the string as appropriate.
+ *
+ * @param aPath the path to the file to load
+ * @return the file's contents
+ */
+std::string LoadStringData( const wxString& aPath );
 
 void SetMockConfigDir();
 

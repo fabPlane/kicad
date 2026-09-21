@@ -26,6 +26,7 @@
 #include <footprint.h>
 #include <pad.h>
 #include <project.h>
+#include <pcb_drill_chart.h>
 #include <reporter.h>
 #include <pcbplot.h>
 #include <wx/filename.h>
@@ -80,9 +81,18 @@ bool PCB_PLOTTER::Plot( const wxString& aOutputPath, const LSEQ& aLayersToPlot,
     // sanity, ensure one layer to print
     if( aLayersToPlot.size() < 1 )
     {
-        m_reporter->Report( _( "No layers selected for plotting." ), RPT_SEVERITY_ERROR );
+        if( m_reporter )
+            m_reporter->Report( _( "No layers selected for plotting." ), RPT_SEVERITY_ERROR );
+
         return false;
     }
+
+    // The one path GUI plotting, PNG, PS and every CLI plot job share. Common layers are
+    // included or a chart plotted as one slips past the policy
+    LSET plotted( { aLayersToPlot } );
+    plotted |= LSET( { aCommonLayers } );
+
+    RefreshDrillCharts( *m_board );
 
     PAGE_INFO existingPageInfo = m_board->GetPageSettings();
     VECTOR2I  existingAuxOrigin = m_board->GetDesignSettings().GetAuxOrigin();
@@ -226,7 +236,7 @@ bool PCB_PLOTTER::Plot( const wxString& aOutputPath, const LSEQ& aLayersToPlot,
         if( plotter )
         {
             plotter->SetLayer( layer );
-            plotter->SetTitle( ExpandTextVars( m_board->GetTitleBlock().GetTitle(), &textResolver ) );
+            plotter->SetTitle( ExpandTextVars( m_board->GetTitleBlock().GetTitle(), &textResolver, FOR_GUI ) );
 
             if( m_plotOpts.m_PDFMetadata )
             {
@@ -297,8 +307,11 @@ bool PCB_PLOTTER::Plot( const wxString& aOutputPath, const LSEQ& aLayersToPlot,
                 delete plotter;
                 plotter = nullptr;
 
-                msg.Printf( _( "Plotted to '%s'." ), fn.GetFullPath() );
-                m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                if( m_reporter )
+                {
+                    m_reporter->Report( wxString::Format( _( "Plotted to '%s'." ), fn.GetFullPath() ),
+                                        RPT_SEVERITY_ACTION );
+                }
 
                 if( aOutputFiles )
                     aOutputFiles->push_back( fn.GetFullPath() );
@@ -306,8 +319,11 @@ bool PCB_PLOTTER::Plot( const wxString& aOutputPath, const LSEQ& aLayersToPlot,
         }
         else
         {
-            msg.Printf( _( "Failed to create file '%s'." ), fn.GetFullPath() );
-            m_reporter->Report( msg, RPT_SEVERITY_ERROR );
+            if( m_reporter )
+            {
+                m_reporter->Report( wxString::Format( _( "Failed to create file '%s'." ), fn.GetFullPath() ),
+                                    RPT_SEVERITY_ERROR );
+            }
 
             success = false;
         }
@@ -332,7 +348,8 @@ bool PCB_PLOTTER::Plot( const wxString& aOutputPath, const LSEQ& aLayersToPlot,
             aOutputFiles->push_back( fn.GetFullPath() );
     }
 
-    m_reporter->ReportTail( _( "Done." ), RPT_SEVERITY_INFO );
+    if( m_reporter )
+        m_reporter->ReportTail( _( "Done." ), RPT_SEVERITY_INFO );
 
     if( m_plotOpts.GetFormat() == PLOT_FORMAT::SVG && m_plotOpts.GetSvgFitPagetoBoard() )
     {

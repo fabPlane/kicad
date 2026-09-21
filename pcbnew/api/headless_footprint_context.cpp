@@ -59,6 +59,9 @@ HEADLESS_FOOTPRINT_CONTEXT::~HEADLESS_FOOTPRINT_CONTEXT()
     // The undo history owns copies of board items; free them while the board is still around
     m_toolManager->SetUndoRedoSink( nullptr );
     m_undoStack.reset();
+
+    if( m_board )
+        m_board->ClearProject();
 }
 
 
@@ -119,10 +122,17 @@ bool HEADLESS_FOOTPRINT_CONTEXT::SaveFootprintInLibrary( FOOTPRINT* aFootprint,
                 RECURSE_MODE::RECURSE );
 
         FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( m_project );
-        adapter->SaveFootprint( aLibraryName, aFootprint );
+
+        if( adapter->SaveFootprint( aLibraryName, aFootprint ) != FOOTPRINT_LIBRARY_ADAPTER::SAVE_OK )
+        {
+            aFootprint->SetFPID( LIB_ID( aLibraryName, aFootprint->GetFPID().GetLibItemName() ) );
+            return false;
+        }
 
         aFootprint->SetFPID( LIB_ID( aLibraryName, aFootprint->GetFPID().GetLibItemName() ) );
-        m_fpid = aFootprint->GetFPID();
+
+        if( aFootprint == m_board->GetFirstFootprint() )
+            m_fpid = aFootprint->GetFPID();
 
         return true;
     }

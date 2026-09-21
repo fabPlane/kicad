@@ -1,5 +1,5 @@
 ///////////////////////////////////////////////////////////////////////////
-// C++ code generated with wxFormBuilder (version 4.2.1-0-g80c4cb6)
+// C++ code generated with wxFormBuilder (version 4.2.1-0-g80c4cb6a)
 // http://www.wxformbuilder.org/
 //
 // PLEASE DO *NOT* EDIT THIS FILE!
@@ -18,9 +18,7 @@ PANEL_FP_PROPERTIES_3D_MODEL_BASE::PANEL_FP_PROPERTIES_3D_MODEL_BASE( wxWindow* 
 	bSizerMain3D = new wxBoxSizer( wxVERTICAL );
 
 	m_splitter1 = new wxSplitterWindow( this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxSP_3DSASH|wxSP_LIVE_UPDATE );
-	m_splitter1->SetSashGravity( 0.7 );
-	m_splitter1->Connect( wxEVT_IDLE, wxIdleEventHandler( PANEL_FP_PROPERTIES_3D_MODEL_BASE::m_splitter1OnIdle ), NULL, this );
-	m_splitter1->SetMinimumPaneSize( 300 );
+	m_splitter1->SetMinimumPaneSize( 60 );
 
 	m_upperPanel = new wxPanel( m_splitter1, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL );
 	wxBoxSizer* bSizer4;
@@ -75,6 +73,14 @@ PANEL_FP_PROPERTIES_3D_MODEL_BASE::PANEL_FP_PROPERTIES_3D_MODEL_BASE( wxWindow* 
 
 
 	bSizer3DButtons->Add( 0, 0, 1, wxEXPAND, 5 );
+
+	wxString m_configuredPathChoiceChoices[] = { _("Automatic") };
+	int m_configuredPathChoiceNChoices = sizeof( m_configuredPathChoiceChoices ) / sizeof( wxString );
+	m_configuredPathChoice = new wxChoice( m_upperPanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, m_configuredPathChoiceNChoices, m_configuredPathChoiceChoices, 0 );
+	m_configuredPathChoice->SetSelection( 0 );
+	m_configuredPathChoice->SetToolTip( _("Choose the folder used when opening the 3D model picker") );
+
+	bSizer3DButtons->Add( m_configuredPathChoice, 0, wxALL, 5 );
 
 	m_buttonConfig3DPaths = new wxButton( m_upperPanel, wxID_ANY, _("Configure Paths..."), wxDefaultPosition, wxDefaultSize, 0 );
 	bSizer3DButtons->Add( m_buttonConfig3DPaths, 0, wxALL, 5 );
@@ -206,8 +212,8 @@ PANEL_FP_PROPERTIES_3D_MODEL_BASE::PANEL_FP_PROPERTIES_3D_MODEL_BASE( wxWindow* 
 	m_lowerPanel->SetSizer( m_LowerSizer3D );
 	m_lowerPanel->Layout();
 	m_LowerSizer3D->Fit( m_lowerPanel );
-	m_splitter1->SplitHorizontally( m_upperPanel, m_lowerPanel, 300 );
-	bSizerMain3D->Add( m_splitter1, 0, wxEXPAND, 5 );
+	m_splitter1->SplitHorizontally( m_upperPanel, m_lowerPanel, -1 );
+	bSizerMain3D->Add( m_splitter1, 1, wxEXPAND, 5 );
 
 
 	this->SetSizer( bSizerMain3D );

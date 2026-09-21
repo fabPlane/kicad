@@ -70,6 +70,7 @@ public:
     void OnNetlistChanged( BOARD_NETLIST_UPDATER& aUpdater ) override;
 
     API_UNDO_STACK* GetUndoStack() const override { return m_undoStack.get(); }
+    bool RevertToSaved() override;
 
 private:
     std::unique_ptr<BOARD> m_board;

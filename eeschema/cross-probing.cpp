@@ -27,7 +27,11 @@
 #include <kiface_base.h>
 #include <kiway.h>
 #include <kiway_mail.h>
-#include <connection_graph.h>
+#include <import_net_map.h>
+#include <import_proj_properties.h>
+#include <reporter.h>
+#include <connectivity/conn_navigation.h>
+#include <connectivity/conn_netchain_manager.h>
 #include <sch_netchain.h>
 #include <sch_sheet.h>
 #include <sch_symbol.h>
@@ -39,7 +43,9 @@
 #include <project_sch.h>
 #include <richio.h>
 #include <tools/sch_actions.h>
+#include <tool/tool_manager.h>
 #include <tools/sch_editor_control.h>
+#include <tools/sch_selection_tool.h>
 #include <advanced_config.h>
 #include <api/api_handler_sch.h>
 
@@ -245,26 +251,7 @@ void SCH_EDIT_FRAME::ExecuteRemoteCommand( const char* cmdline )
         if( !crossProbingSettings.auto_highlight )
             return;
 
-        wxString netName = From_UTF8( text );
-
-        if( auto sg = Schematic().ConnectionGraph()->FindFirstSubgraphByName( netName ) )
-            SetHighlightedConnection( sg->GetDriverConnection()->Name(), nullptr, true );
-        else
-            SetHighlightedConnection( wxEmptyString, nullptr, true );
-
-        // If the incoming net belongs to a net chain, also turn on chain
-        // highlight so the schematic mirrors what the PCB editor is doing.
-        if( CONNECTION_GRAPH* graph = Schematic().ConnectionGraph() )
-        {
-            if( SCH_NETCHAIN* chain = graph->GetNetChainForNet( m_highlightedConn ) )
-                SetHighlightedNetChain( chain->GetName() );
-            else
-                SetHighlightedNetChain( wxEmptyString );
-        }
-
-        GetToolManager()->RunAction( SCH_ACTIONS::updateNetHighlighting );
-
-        SetStatusText( _( "Highlighted net:" ) + wxS( " " ) + UnescapeString( netName ) );
+        HandleRemoteNetHighlight( From_UTF8( text ) );
         return;
     }
     else if( strcmp( idcmd, "$CLEAR:" ) == 0 )
@@ -326,24 +313,16 @@ void SCH_EDIT_FRAME::ExecuteRemoteCommand( const char* cmdline )
 
 void SCH_EDIT_FRAME::HandleRemoteNetHighlight( const wxString& aNetName )
 {
-    if( auto sg = Schematic().ConnectionGraph()->FindFirstSubgraphByName( aNetName ) )
-        SetHighlightedConnection( sg->GetDriverConnection()->Name(), nullptr, true );
-    else
-        SetHighlightedConnection( wxEmptyString, nullptr, true );
+    const bool exists = SCH_CONNECTIVITY::NAVIGATION_QUERY( Schematic() ).HasNet( aNetName );
+    SetHighlightedConnection( exists ? aNetName : wxString(), nullptr, true );
 
-    // If the incoming net belongs to a net chain, also turn on chain
-    // highlight so the schematic mirrors what the PCB editor is doing.
-    if( CONNECTION_GRAPH* graph = Schematic().ConnectionGraph() )
-    {
-        if( SCH_NETCHAIN* chain = graph->GetNetChainForNet( m_highlightedConn ) )
-            SetHighlightedNetChain( chain->GetName() );
-        else
-            SetHighlightedNetChain( wxEmptyString );
-    }
+    if( SCH_NETCHAIN* chain = Schematic().NetChains().GetNetChainForNet( m_highlightedConn ) )
+        SetHighlightedNetChain( chain->GetName() );
+    else
+        SetHighlightedNetChain( wxEmptyString );
 
     GetToolManager()->RunAction( SCH_ACTIONS::updateNetHighlighting );
-
-    SetStatusText( _( "Highlighted net:" ) + wxS( " " ) + UnescapeString( aNetName ) );
+    UpdateNetHighlightStatus();
 }
 
 
@@ -419,70 +398,46 @@ void SCH_EDIT_FRAME::SendSelectItemsToPcb( const std::vector<EDA_ITEM*>& aItems,
 }
 
 
+static void sendHighlightNets( SCH_EDIT_FRAME* aFrame, const kiapi::common::commands::HighlightNets& aMessage )
+{
+    if( Kiface().IsSingle() )
+    {
+        CROSS_PROBE_CLIENT::SendToFrame( FRAME_PCB_EDITOR, aMessage );
+    }
+    else
+    {
+        std::string payload;
+        kiapi::common::PackKiwayApiMessage( aMessage, payload );
+        aFrame->Kiway().ExpressMail( FRAME_PCB_EDITOR, MAIL_CROSS_PROBE, payload, aFrame );
+    }
+}
+
+
 void SCH_EDIT_FRAME::SendCrossProbeNetName( const wxString& aNetName )
 {
     kiapi::common::commands::HighlightNets message;
 
     message.add_net_name( aNetName.ToUTF8() );
-
-    if( Kiface().IsSingle() )
-    {
-        CROSS_PROBE_CLIENT::SendToFrame( FRAME_PCB_EDITOR, message );
-    }
-    else
-    {
-        std::string payload;
-        kiapi::common::PackKiwayApiMessage( message, payload );
-        Kiway().ExpressMail( FRAME_PCB_EDITOR, MAIL_CROSS_PROBE, payload, this );
-    }
+    sendHighlightNets( this, message );
 }
 
 
-void SCH_EDIT_FRAME::SetCrossProbeConnection( const SCH_CONNECTION* aConnection )
+void SCH_EDIT_FRAME::SetCrossProbeConnection( const wxString& aName )
 {
-    if( !aConnection )
+    const auto names = SCH_CONNECTIVITY::NAVIGATION_QUERY( Schematic() ).SignalNames( aName );
+
+    if( names.empty() )
     {
         SendCrossProbeClearHighlight();
         return;
     }
 
-    if( aConnection->IsNet() )
-    {
-        SendCrossProbeNetName( aConnection->Name() );
-        return;
-    }
-
-    if( aConnection->Members().empty() )
-        return;
-
     kiapi::common::commands::HighlightNets message;
 
-    auto all_members = aConnection->AllMembers();
+    for( const wxString& name : names )
+        message.add_net_name( name.ToUTF8() );
 
-    if( all_members.size() == 1 )
-    {
-        SendCrossProbeNetName( all_members[0]->Name() );
-        return;
-    }
-
-    message.add_net_name( all_members[0]->Name().ToUTF8() );
-
-    // TODO: This could be replaced by just sending the bus name once we have bus contents
-    // included as part of the netlist sent from Eeschema to Pcbnew (and thus Pcbnew can
-    // natively keep track of bus membership)
-
-    for( size_t i = 1; i < all_members.size(); i++ )
-        message.add_net_name( all_members[i]->Name().ToUTF8() );
-
-    if( Kiface().IsSingle() )
-    {
-        CROSS_PROBE_CLIENT::SendToFrame( FRAME_PCB_EDITOR, message );
-    }
-    else
-    {
-        std::string data = message.SerializeAsString();
-        Kiway().ExpressMail( FRAME_PCB_EDITOR, MAIL_CROSS_PROBE, data, this );
-    }
+    sendHighlightNets( this, message );
 }
 
 
@@ -628,8 +583,7 @@ void SCH_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
             }
         }
 
-        if( ADVANCED_CFG::GetCfg().m_IncrementalConnectivity )
-            RecalculateConnections( nullptr, GLOBAL_CLEANUP );
+        PrepareForNetlist();
 
         NETLIST_EXPORTER_KICAD exporter( &Schematic() );
         STRING_FORMATTER formatter;
@@ -637,6 +591,7 @@ void SCH_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
         exporter.SetKiway( &Kiway() );
         exporter.Format( &formatter, GNL_ALL | GNL_OPT_KICAD );
 
+        RefreshConnectivity( true );
         payload = formatter.GetString();
         break;
     }
@@ -649,7 +604,7 @@ void SCH_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
         if( SCH_ITEM* item = m_schematic->ResolveItem( uuid, &path, true ) )
         {
             if( item->Type() == SCH_SHEET_T )
-                payload = static_cast<SCH_SHEET*>( item )->GetShownName( false );
+                payload = static_cast<SCH_SHEET*>( item )->GetShownName( INTERNAL );
             else if( item->Type() == SCH_SYMBOL_T )
                 payload = static_cast<SCH_SYMBOL*>( item )->GetRef( &path, true );
             else
@@ -719,8 +674,19 @@ void SCH_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
 
         } while( true );
 
-        if( importFormat >= 0 )
-            importFile( fnameStr, importFormat, props.empty() ? nullptr : &props );
+        payload.clear();
+
+        if( importFormat >= 0 && importFile( fnameStr, importFormat, props.empty() ? nullptr : &props )
+            && importFormat == SCH_IO_MGR::SCH_ORCAD )
+        {
+            const IMPORT_NET_MAP*        map = Schematic().GetImportNetMap();
+            std::map<wxString, wxString> names;
+
+            if( map )
+                names = GetBoardNetNameMap( *map, LOAD_INFO_REPORTER::GetInstance() );
+
+            payload = TO_UTF8( IMPORT_PROJ_PROPS::JoinNetNameMap( names ) );
+        }
 
         break;
     }

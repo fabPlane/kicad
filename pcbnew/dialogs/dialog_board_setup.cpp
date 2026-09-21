@@ -23,6 +23,7 @@
 #include <panel_setup_constraints.h>
 #include <panel_setup_tracks_and_vias.h>
 #include <panel_setup_via_stacks.h>
+#include <panel_setup_drill_chart.h>
 #include <panel_setup_mask_and_paste.h>
 #include <../board_stackup_manager/panel_board_stackup.h>
 #include <../board_stackup_manager/panel_board_finish.h>
@@ -130,6 +131,13 @@ DIALOG_BOARD_SETUP::DIALOG_BOARD_SETUP( PCB_EDIT_FRAME* aFrame, wxWindow* aParen
             {
                 return new PANEL_SETUP_MASK_AND_PASTE( aParent, m_frame );
             }, _( "Solder Mask/Paste" ) );
+
+    m_drillChartPage = m_treebook->GetPageCount();
+    m_treebook->AddLazySubPage(
+            [this]( wxWindow* aParent ) -> wxWindow*
+            {
+                return new PANEL_SETUP_DRILL_CHART( aParent, m_frame );
+            }, _( "Drill Chart" ) );
 
     m_treebook->AddPage( new wxPanel( GetTreebook() ), _( "Text & Graphics" ) );
 
@@ -402,6 +410,11 @@ void DIALOG_BOARD_SETUP::onAuxiliaryAction( wxCommandEvent& aEvent )
             okToProceed = m_layers->CheckCopperLayerCount( loadedBoard, otherBoard.get() );
         }
     }
+    catch( const IO_CANCELLED& )
+    {
+        // A user-cancelled load is not an error.
+        return;
+    }
     catch( const IO_ERROR& ioe )
     {
         // You wouldn't think boardFn.GetFullPath() would throw, but we get a stack buffer
@@ -409,11 +422,8 @@ void DIALOG_BOARD_SETUP::onAuxiliaryAction( wxCommandEvent& aEvent )
         // cost us much.
         try
         {
-            if( ioe.Problem() != wxT( "CANCEL" ) )
-            {
-                wxString msg = wxString::Format( _( "Error loading board file:\n%s" ), boardFn.GetFullPath() );
-                DisplayErrorMessage( this, msg, ioe.What() );
-            }
+            wxString msg = wxString::Format( _( "Error loading board file:\n%s" ), boardFn.GetFullPath() );
+            DisplayErrorMessage( this, msg, ioe.What() );
         }
         catch(...)
         {

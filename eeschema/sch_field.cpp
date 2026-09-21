@@ -18,6 +18,9 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <sch_render_settings.h>
+#include <scintilla_tricks.h>
+#include <netclass.h>
 #include <wx/log.h>
 #include <wx/menu.h>
 
@@ -157,10 +160,13 @@ SCH_FIELD::SCH_FIELD( SCH_ITEM* aParent, FIELD_T aFieldId, const wxString& aName
             m_ordinal = static_cast<SCH_SYMBOL*>( aParent )->GetNextFieldOrdinal();
         else if( aParent->Type() == LIB_SYMBOL_T )
             m_ordinal = static_cast<LIB_SYMBOL*>( aParent )->GetNextFieldOrdinal();
-        else if( aParent->Type() == SCH_SHEET_T )
-            m_ordinal = static_cast<SCH_SHEET*>( aParent )->GetNextFieldOrdinal();
         else if( SCH_LABEL_BASE* label = dynamic_cast<SCH_LABEL_BASE*>( aParent ) )
             m_ordinal = label->GetNextFieldOrdinal();
+    }
+    else if( aFieldId == FIELD_T::SHEET_USER && aParent )
+    {
+        if( aParent->Type() == SCH_SHEET_T )
+            m_ordinal = static_cast<SCH_SHEET*>( aParent )->GetNextFieldOrdinal();
     }
 }
 
@@ -194,7 +200,6 @@ SCH_FIELD::SCH_FIELD( const SCH_FIELD& aField ) :
 
 void SCH_FIELD::Serialize( kiapi::schematic::types::SchematicField& field, const EDA_IU_SCALE& aScale ) const
 {
-
     field.set_name( GetName( false ).ToUTF8() );
     field.set_visible( IsVisible() );
     field.set_show_name( IsNameShown() );
@@ -202,6 +207,11 @@ void SCH_FIELD::Serialize( kiapi::schematic::types::SchematicField& field, const
     field.set_is_private( IsPrivate() );
 
     EDA_TEXT::Serialize( *field.mutable_text(), aScale );
+
+    // Override the position from the above for symbols so that they are in the right reference frame
+    if( m_parent && m_parent->Type() == SCH_SYMBOL_T )
+        kiapi::common::PackVector2( *field.mutable_text()->mutable_position(), GetPosition(), aScale );
+
     kiapi::common::PackCustomProperties( field.mutable_custom_properties(), *this );
 }
 
@@ -222,7 +232,12 @@ bool SCH_FIELD::Deserialize( const kiapi::schematic::types::SchematicField& fiel
     SetCanAutoplace( field.allow_auto_place() );
     SetPrivate( field.is_private() );
 
-    return EDA_TEXT::Deserialize( field.text(), aScale );
+    bool result = EDA_TEXT::Deserialize( field.text(), aScale );
+
+    if( m_parent && m_parent->Type() == SCH_SYMBOL_T )
+        SetPosition( kiapi::common::UnpackVector2( field.text().position(), aScale ) );
+
+    return result;
 }
 
 
@@ -251,6 +266,7 @@ SCH_FIELD& SCH_FIELD::operator=( const SCH_FIELD& aField )
     m_lastResolvedColor = aField.m_lastResolvedColor;
 
     m_renderCache.reset();
+    invalidateConnectivity();
 
     return *this;
 }
@@ -281,28 +297,32 @@ wxString SCH_FIELD::GetShownName() const
 }
 
 
-wxString SCH_FIELD::GetShownText( const SCH_SHEET_PATH* aPath, bool aAllowExtraText, int aDepth,
-                                  const wxString& aVariantName ) const
+wxString SCH_FIELD::GetShownText( const SCH_SHEET_PATH* aPath, RESOLUTION_CONTEXT aContext,
+                                  const wxString& aVariantName, int aDepth ) const
 {
+    bool     hasTextVars = HasTextVars();
     wxString text = getUnescapedText( aPath, aVariantName );
 
-    if( IsNameShown() && aAllowExtraText )
+    if( !aVariantName.IsEmpty() )
+        hasTextVars = text.Contains( wxT( "${" ) ) || text.Contains( wxT( "@{" ) );
+
+    if( IsNameShown() && aContext == FOR_CANVAS )
         text = GetShownName() << wxS( ": " ) << text;
 
-    if( HasTextVars() || ( !aVariantName.IsEmpty() && text.Contains( wxT( "${" ) ) ) )
+    if( hasTextVars && aContext != RAW_VALUE )
     {
-        text = ResolveText( text, aPath, aDepth );
-        FinalizeTextVarExpansion( text, aAllowExtraText );
+        text = ResolveText( text, aPath, aDepth, aVariantName );
+        FinalizeTextVarExpansion( text, aContext );
     }
 
-    if( m_id == FIELD_T::SHEET_FILENAME && aAllowExtraText && !IsNameShown() )
+    if( m_id == FIELD_T::SHEET_FILENAME && aContext == FOR_CANVAS && !IsNameShown() )
         text = _( "File:" ) + wxS( " " ) + text;
 
     return text;
 }
 
 
-wxString SCH_FIELD::GetShownText( bool aAllowExtraText, int aDepth ) const
+wxString SCH_FIELD::GetShownText( RESOLUTION_CONTEXT aContext, int aDepth ) const
 {
     if( SCHEMATIC* schematic = Schematic() )
     {
@@ -319,11 +339,11 @@ wxString SCH_FIELD::GetShownText( bool aAllowExtraText, int aDepth ) const
                         currentSheet.empty() ? 1 : 0 );
         }
 
-        return GetShownText( &currentSheet, aAllowExtraText, aDepth, variantName );
+        return GetShownText( &currentSheet, aContext, variantName, aDepth );
     }
     else
     {
-        return GetShownText( nullptr, aAllowExtraText, aDepth );
+        return GetShownText( nullptr, aContext, wxEmptyString, aDepth );
     }
 }
 
@@ -998,16 +1018,12 @@ void SCH_FIELD::CalcEdit( const VECTOR2I& aPosition )
 
 wxString SCH_FIELD::GetItemDescription( UNITS_PROVIDER* aUnitsProvider, bool aFull ) const
 {
-    wxString content = aFull ? GetShownText( false ) : KIUI::EllipsizeMenuText( GetText() );
+    wxString content = aFull ? GetShownText( FOR_GUI ) : KIUI::EllipsizeMenuText( GetText() );
 
     if( content.IsEmpty() )
-    {
         return wxString::Format( _( "Field %s (empty)" ), UnescapeString( GetName() ) );
-    }
     else
-    {
         return wxString::Format( _( "Field %s '%s'" ), UnescapeString( GetName() ), content );
-    }
 }
 
 
@@ -1055,7 +1071,7 @@ bool SCH_FIELD::HasHypertext() const
     if( m_id == FIELD_T::INTERSHEET_REFS )
         return true;
 
-    return IsURL( GetShownText( false ) );
+    return IsURL( GetShownText( FOR_GUI ) );
 }
 
 
@@ -1091,9 +1107,9 @@ void SCH_FIELD::DoHypertextAction( EDA_DRAW_FRAME* aFrame, const VECTOR2I& aMous
         else if( sel == 999 )
             href = SCH_NAVIGATE_TOOL::g_BackLink;
     }
-    else if( IsURL( GetShownText( false ) ) || m_name == SIM_LIBRARY::LIBRARY_FIELD )
+    else if( IsURL( GetShownText( FOR_GUI ) ) || m_name == SIM_LIBRARY::LIBRARY_FIELD )
     {
-        href = GetShownText( false );
+        href = GetShownText( FOR_GUI );
     }
 
     if( !href.IsEmpty() )
@@ -1106,11 +1122,16 @@ void SCH_FIELD::DoHypertextAction( EDA_DRAW_FRAME* aFrame, const VECTOR2I& aMous
 
 void SCH_FIELD::SetName( const wxString& aName )
 {
+    const bool generated = ::IsGeneratedField( aName );
+    const bool changed = m_name != aName || ( generated && EDA_TEXT::GetText() != aName );
     m_name = aName;
-    m_isGeneratedField = ::IsGeneratedField( aName );
+    m_isGeneratedField = generated;
 
     if( m_isGeneratedField )
         EDA_TEXT::SetText( aName );
+
+    if( changed )
+        invalidateConnectivity();
 }
 
 
@@ -1121,10 +1142,12 @@ void SCH_FIELD::SetText( const wxString& aText )
         return;
 
     // Mandatory fields should not have leading or trailing whitespace.
-    if( IsMandatory() )
-        EDA_TEXT::SetText( aText.Strip( wxString::both ) );
-    else
-        EDA_TEXT::SetText( aText );
+    const wxString text = IsMandatory() ? aText.Strip( wxString::both ) : aText;
+    const bool changed = EDA_TEXT::GetText() != text;
+    EDA_TEXT::SetText( text );
+
+    if( changed )
+        invalidateConnectivity();
 }
 
 
@@ -1135,10 +1158,7 @@ void SCH_FIELD::SetText( const wxString& aText, const SCH_SHEET_PATH* aPath, con
     if( m_isGeneratedField )
         return;
 
-    wxString tmp = aText;
-
-    if( IsMandatory() )
-        tmp = aText.Strip( wxString::both ) ;
+    const wxString text = IsMandatory() ? aText.Strip( wxString::both ) : aText;
 
     switch( m_parent->Type() )
     {
@@ -1146,7 +1166,7 @@ void SCH_FIELD::SetText( const wxString& aText, const SCH_SHEET_PATH* aPath, con
     {
         SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( m_parent );
         wxCHECK( symbol, /* void */ );
-        symbol->SetFieldText( GetName(), aText, aPath, aVariantName );
+        symbol->SetFieldText( GetName( false ), text, aPath, aVariantName );
         break;
     }
 
@@ -1154,12 +1174,12 @@ void SCH_FIELD::SetText( const wxString& aText, const SCH_SHEET_PATH* aPath, con
     {
         SCH_SHEET* sheet = static_cast<SCH_SHEET*>( m_parent );
         wxCHECK( sheet, /* void */ );
-        sheet->SetFieldText( GetName(), aText, aPath, aVariantName );
+        sheet->SetFieldText( GetName( false ), text, aPath, aVariantName );
         break;
     }
 
     default:
-        SCH_FIELD::SetText( aText );
+        SCH_FIELD::SetText( text );
         break;
     }
 }
@@ -1248,7 +1268,7 @@ BITMAPS SCH_FIELD::GetMenuImage() const
 
 bool SCH_FIELD::HitTest( const VECTOR2I& aPosition, int aAccuracy ) const
 {
-    if( GetShownText( true ).IsEmpty() )
+    if( GetShownText( FOR_CANVAS ).IsEmpty() )
         return false;
 
     BOX2I rect = GetBoundingBox();
@@ -1275,7 +1295,7 @@ bool SCH_FIELD::HitTest( const VECTOR2I& aPosition, int aAccuracy ) const
 
 bool SCH_FIELD::HitTest( const BOX2I& aRect, bool aContained, int aAccuracy ) const
 {
-    if( GetShownText( true ).IsEmpty() )
+    if( GetShownText( FOR_CANVAS ).IsEmpty() )
         return false;
 
     if( m_flags & ( STRUCT_DELETED | SKIP_STRUCT ) )
@@ -1300,7 +1320,7 @@ bool SCH_FIELD::HitTest( const BOX2I& aRect, bool aContained, int aAccuracy ) co
 
 bool SCH_FIELD::HitTest( const SHAPE_LINE_CHAIN& aPoly, bool aContained ) const
 {
-    if( GetShownText( true ).IsEmpty() )
+    if( GetShownText( FOR_CANVAS ).IsEmpty() )
         return false;
 
     if( m_flags & ( STRUCT_DELETED | SKIP_STRUCT ) )
@@ -1324,9 +1344,9 @@ void SCH_FIELD::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS& 
     wxString text;
 
     if( Schematic() )
-        text = GetShownText( &Schematic()->CurrentSheet(), true, 0, Schematic()->GetCurrentVariant() );
+        text = GetShownText( &Schematic()->CurrentSheet(), FOR_CANVAS, Schematic()->GetCurrentVariant() );
     else
-        text = GetShownText( true );
+        text = GetShownText( FOR_CANVAS );
 
     if( ( !IsVisible() && !IsForceVisible() ) || text.IsEmpty() || aBackground )
         return;
@@ -1706,13 +1726,16 @@ int SCH_FIELD::compare( const SCH_ITEM& aOther, int aCompareFlags ) const
 wxString SCH_FIELD::getUnescapedText( const SCH_SHEET_PATH* aPath, const wxString& aVariantName ) const
 {
     // This is the default variant field text for all fields except the reference field.
-    wxString retv = EDA_TEXT::GetShownText( false );
+    wxString retv = EDA_TEXT::GetShownText( INTERNAL );
 
     // Special handling for parent object field instance and variant information.
     // Only use the path if it's non-empty; an empty path can't match any instances
     if( m_parent && aPath && !aPath->empty() )
     {
-        wxLogTrace( traceSchFieldRendering, "  Path is valid and non-empty, parent type=%d", m_parent->Type() );
+        const bool trace = wxLog::IsAllowedTraceMask( traceSchFieldRendering );
+
+        if( trace )
+            wxLogTrace( traceSchFieldRendering, "  Path is valid and non-empty, parent type=%d", m_parent->Type() );
 
         switch( m_parent->Type() )
         {
@@ -1721,12 +1744,16 @@ wxString SCH_FIELD::getUnescapedText( const SCH_SHEET_PATH* aPath, const wxStrin
             {
                 if( m_id == FIELD_T::REFERENCE )
                 {
-                    wxLogTrace( traceSchFieldRendering, "  Calling GetRef for symbol %s on path %s",
-                                symbol->m_Uuid.AsString(), aPath->Path().AsString() );
+                    if( trace )
+                    {
+                        wxLogTrace( traceSchFieldRendering, "  Calling GetRef for symbol %s on path %s",
+                                    symbol->m_Uuid.AsString(), aPath->Path().AsString() );
+                    }
 
                     retv = symbol->GetRef( aPath, true );
 
-                    wxLogTrace( traceSchFieldRendering, "  GetRef returned: '%s'", retv );
+                    if( trace )
+                        wxLogTrace( traceSchFieldRendering, "  GetRef returned: '%s'", retv );
                 }
                 else if( !aVariantName.IsEmpty() )
                 {

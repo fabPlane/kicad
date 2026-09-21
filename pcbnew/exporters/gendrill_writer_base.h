@@ -35,6 +35,7 @@
 #include <string>
 #include <vector>
 
+#include <drill/drill_operation.h>
 #include <layer_ids.h>
 #include <plotters/plotter.h>
 #include <padstack.h>
@@ -46,19 +47,6 @@ class OUTPUTFORMATTER;
 class PAGE_INFO;
 class REPORTER;
 
-// hole attribute, mainly to identify vias and pads and add this info as comment
-// in NC drill files
-enum class HOLE_ATTRIBUTE
-{
-    HOLE_UNKNOWN,           // uninitialized type
-    HOLE_VIA_THROUGH,       // a via hole (always plated) from top to bottom
-    HOLE_VIA_BURIED,        // a via hole (always plated) not through hole
-    HOLE_VIA_BACKDRILL,     // a via hole created by a backdrill operation
-    HOLE_PAD,               // a plated or not plated pad hole
-    HOLE_PAD_CASTELLATED,   // a plated castelleted pad hole
-    HOLE_PAD_PRESSFIT,      // a plated press-fit pad hole
-    HOLE_MECHANICAL         // a mechanical pad (provided, not used)
-};
 
 // Via Protection features according to IPC-4761.
 enum class IPC4761_FEATURES : int
@@ -99,165 +87,6 @@ public:
         m_IsBackdrill    = false;
         m_HasPostMachining = false;
     }
-};
-
-
-/**
- * Handle hole which must be drilled (diameter, position and layers).
- *
- * For buried or micro vias, the hole is not on all layers.  So we must generate a drill file
- * for each layer pair (adjacent layers).  Not plated holes are always through holes, and must
- * be output on a specific drill file because they are drilled after the PCB process is finished.
- */
-class HOLE_INFO
-{
-public:
-    HOLE_INFO()
-    {
-        m_ItemParent = nullptr;
-        m_Hole_NotPlated = false;
-        m_Hole_Diameter = 0;
-        m_Tool_Reference = 0;
-        m_Hole_Orient = ANGLE_0;
-        m_Hole_Shape = 0;
-        m_Hole_Bottom_Layer = B_Cu;
-        m_Hole_Top_Layer = F_Cu;
-        m_HoleAttribute = HOLE_ATTRIBUTE::HOLE_UNKNOWN;
-        m_Hole_Filled = false;
-        m_Hole_Capped = false;
-        m_Hole_Top_Covered = false;
-        m_Hole_Bot_Covered = false;
-        m_Hole_Top_Plugged = false;
-        m_Hole_Bot_Plugged = false;
-        m_Hole_Top_Tented = false;
-        m_Hole_Bot_Tented = false;
-        m_IsBackdrill = false;
-        m_FrontPostMachining = PAD_DRILL_POST_MACHINING_MODE::UNKNOWN;
-        m_FrontPostMachiningSize = 0;
-        m_FrontPostMachiningDepth = 0;
-        m_FrontPostMachiningAngle = 0;
-        m_BackPostMachining = PAD_DRILL_POST_MACHINING_MODE::UNKNOWN;
-        m_BackPostMachiningSize = 0;
-        m_BackPostMachiningDepth = 0;
-        m_BackPostMachiningAngle = 0;
-        m_DrillStart = UNDEFINED_LAYER;
-        m_DrillEnd = UNDEFINED_LAYER;
-    }
-
-public:
-    BOARD_ITEM*  m_ItemParent;           // The pad or via parent of this hole
-    int          m_Hole_Diameter;        // hole value, and for oblong: min(hole size x, hole
-                                         // size y).
-    int          m_Tool_Reference;       // Tool reference for this hole = 1 ... n (values <=0
-                                         // must not be used).
-    VECTOR2I     m_Hole_Size;            // hole size for oblong holes
-    EDA_ANGLE    m_Hole_Orient;          // Hole rotation (= pad rotation) for oblong holes
-    int          m_Hole_Shape;           // hole shape: round (0) or oval (1)
-    VECTOR2I     m_Hole_Pos;             // hole position
-    PCB_LAYER_ID m_Hole_Bottom_Layer;    // physically lowest layer reached by the hole
-    PCB_LAYER_ID m_Hole_Top_Layer;       // physically highest layer reached by the hole
-    bool         m_Hole_NotPlated;       // hole not plated. Must be in a specific drill file or
-                                         // section.
-    HOLE_ATTRIBUTE m_HoleAttribute;      // Attribute, used in Excellon drill file and to sort holes
-                                         // by type.
-    bool         m_Hole_Filled;          // True if the hole is filled
-    bool         m_Hole_Capped;          // True if the hole is capped
-    bool         m_Hole_Top_Covered;     // True if the hole is covered on the top layer
-    bool         m_Hole_Bot_Covered;     // True if the hole is covered on the bottom layer
-    bool         m_Hole_Top_Plugged;     // True if the hole is plugged on the top layer
-    bool         m_Hole_Bot_Plugged;     // True if the hole is plugged on the bottom layer
-    bool         m_Hole_Top_Tented;      // True if the hole is tented on the top layer
-    bool         m_Hole_Bot_Tented;      // True if the hole is tented on the bottom layer
-    bool         m_IsBackdrill;          // True if the hole is a backdrill
-    PAD_DRILL_POST_MACHINING_MODE m_FrontPostMachining; // Post-machining mode
-    int          m_FrontPostMachiningSize;    // Post-machining size
-    int          m_FrontPostMachiningDepth;   // Post-machining depth
-    int          m_FrontPostMachiningAngle;   // Post-machining angle
-    PAD_DRILL_POST_MACHINING_MODE m_BackPostMachining; // Post-machining mode
-    int          m_BackPostMachiningSize;    // Post-machining size
-    int          m_BackPostMachiningDepth;   // Post-machining depth
-    int          m_BackPostMachiningAngle;   // Post-machining angle
-    PCB_LAYER_ID m_DrillStart;           // Start layer for backdrills
-    PCB_LAYER_ID m_DrillEnd;             // End layer for backdrills
-    std::optional<int> m_StubLength;     // Stub length for backdrills
-
-
-};
-
-
-typedef std::pair<PCB_LAYER_ID, PCB_LAYER_ID>   DRILL_LAYER_PAIR;
-
-
-struct DRILL_SPAN
-{
-    DRILL_SPAN()
-    {
-        m_StartLayer = F_Cu;
-        m_EndLayer = B_Cu;
-        m_IsBackdrill = false;
-        m_IsNonPlatedFile = false;
-    }
-
-    DRILL_SPAN( PCB_LAYER_ID aStartLayer, PCB_LAYER_ID aEndLayer, bool aIsBackdrill,
-                bool aIsNonPlated )
-    {
-        m_StartLayer = aStartLayer;
-        m_EndLayer = aEndLayer;
-        m_IsBackdrill = aIsBackdrill;
-        m_IsNonPlatedFile = aIsNonPlated;
-    }
-
-    PCB_LAYER_ID TopLayer() const
-    {
-        // B_Cu (id=2) is numerically less than inner layers (id>=4), but is physically
-        // at the bottom of the stack. Use IsCopperLayerLowerThan for correct ordering.
-        return IsCopperLayerLowerThan( m_StartLayer, m_EndLayer ) ? m_EndLayer : m_StartLayer;
-    }
-
-    PCB_LAYER_ID BottomLayer() const
-    {
-        return IsCopperLayerLowerThan( m_StartLayer, m_EndLayer ) ? m_StartLayer : m_EndLayer;
-    }
-
-    PCB_LAYER_ID DrillStartLayer() const
-    {
-        return m_StartLayer;
-    }
-
-    PCB_LAYER_ID DrillEndLayer() const
-    {
-        return m_EndLayer;
-    }
-
-    DRILL_LAYER_PAIR Pair() const
-    {
-        return DRILL_LAYER_PAIR( TopLayer(), BottomLayer() );
-    }
-
-    bool operator<( const DRILL_SPAN& aOther ) const
-    {
-        if( TopLayer() != aOther.TopLayer() )
-            return TopLayer() < aOther.TopLayer();
-
-        if( BottomLayer() != aOther.BottomLayer() )
-            return BottomLayer() < aOther.BottomLayer();
-
-        if( m_IsBackdrill != aOther.m_IsBackdrill )
-            return m_IsBackdrill && !aOther.m_IsBackdrill;
-
-        if( m_IsNonPlatedFile != aOther.m_IsNonPlatedFile )
-            return m_IsNonPlatedFile && !aOther.m_IsNonPlatedFile;
-
-        if( m_StartLayer != aOther.m_StartLayer )
-            return m_StartLayer < aOther.m_StartLayer;
-
-        return m_EndLayer < aOther.m_EndLayer;
-    }
-
-    PCB_LAYER_ID m_StartLayer;
-    PCB_LAYER_ID m_EndLayer;
-    bool         m_IsBackdrill;
-    bool         m_IsNonPlatedFile;
 };
 
 
@@ -551,7 +380,10 @@ protected:
                                                         // inches or mm)
     VECTOR2I                 m_offset;                  // Drill offset coordinates
     bool                     m_merge_PTH_NPTH;          // True to generate only one drill file
-    std::vector<HOLE_INFO>   m_holeListBuffer;          // Buffer containing holes
+    std::vector<DRILL_OPERATION> m_holeListBuffer;
+
+    // One-based tool numbers, indexed by the sorted operation list.
+    std::vector<int>         m_holeToolReferences;
     std::vector<DRILL_TOOL>  m_toolListBuffer;          // Buffer containing tools
 
     PLOT_FORMAT m_mapFileFmt;                           // the format of the map drill file,

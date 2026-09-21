@@ -22,6 +22,7 @@
 
 #include <wx/filename.h>
 
+#include <qa_utils/file_utils.h>
 #include <qa_utils/wx_utils/unit_test_utils.h>
 #include <pcbnew_utils/board_file_utils.h>
 
@@ -59,14 +60,15 @@ struct VIA_STACK_DRC_FIXTURE
     wxFileName m_rulePath;
 
     // The temp dir has to outlive run(), so it is kept here rather than in each test.
-    std::unique_ptr<KI_TEST::TEMPORARY_DIRECTORY> m_ruleDir;
+    std::unique_ptr<KI_TEST::SCOPED_TEMP_DIR> m_ruleDir;
 
     // The limits these checks read come from rules, so a test states them the way a user would.
-    void setRule( const std::string& aConstraint, const std::string& aCondition = "" )
+    void setRule( const std::string& aConstraint, const std::string& aCondition = "",
+                  const std::string& aSeverity = "" )
     {
-        m_ruleDir = std::make_unique<KI_TEST::TEMPORARY_DIRECTORY>( "microvia_rule", "" );
+        m_ruleDir = std::make_unique<KI_TEST::SCOPED_TEMP_DIR>( "microvia_rule" );
 
-        wxFileName rulePath( m_ruleDir->GetPath().string(), "test.kicad_dru" );
+        wxFileName rulePath( m_ruleDir->PathStr(), "test.kicad_dru" );
 
         {
             std::ofstream dru( rulePath.GetFullPath().ToStdString() );
@@ -75,6 +77,9 @@ struct VIA_STACK_DRC_FIXTURE
 
             if( !aCondition.empty() )
                 dru << "    (condition \"" << aCondition << "\")\n";
+
+            if( !aSeverity.empty() )
+                dru << "    (severity " << aSeverity << ")\n";
 
             dru << "    (constraint " << aConstraint << ")\n"
                 << ")\n";
@@ -214,6 +219,28 @@ BOOST_FIXTURE_TEST_CASE( GoodStackNoViolations, VIA_STACK_DRC_FIXTURE )
 BOOST_FIXTURE_TEST_CASE( StackNotTilingItsSpanReported, VIA_STACK_DRC_FIXTURE )
 {
     loadBoard();
+
+    run();
+
+    BOOST_CHECK_EQUAL( m_malformedSpans, 1 );
+}
+
+
+BOOST_FIXTURE_TEST_CASE( DuplicateHopReported, VIA_STACK_DRC_FIXTURE )
+{
+    m_board = std::make_unique<BOARD>();
+    m_board->SetCopperLayerCount( 4 );
+    m_board->SetEnabledLayers( LSET::AllCuMask( 4 ) | LSET::AllTechMask() );
+
+    VECTOR2I pos( pcbIUScale.mmToIU( 10 ), pcbIUScale.mmToIU( 10 ) );
+
+    PCB_VIA_STACK* stack = makeStack( m_board.get(), F_Cu, In2_Cu );
+    stack->SetViaSize( pcbIUScale.mmToIU( 0.3 ) );
+    stack->SetViaDrill( pcbIUScale.mmToIU( 0.15 ) );
+    stack->SetPosition( pos );
+    stack->Regenerate( m_board.get(), nullptr );
+
+    stack->AddItem( makeMicrovia( m_board.get(), pos, F_Cu, In1_Cu, true ) );
 
     run();
 
@@ -460,6 +487,49 @@ BOOST_FIXTURE_TEST_CASE( MicroviaStackDepthRuleIsHonoured, VIA_STACK_DRC_FIXTURE
 
     run();
     BOOST_CHECK_MESSAGE( m_depth == 1, "the rule condition did not select the stack" );
+}
+
+
+BOOST_FIXTURE_TEST_CASE( IgnoredDepthRuleIsSilent, VIA_STACK_DRC_FIXTURE )
+{
+    m_board = std::make_unique<BOARD>();
+    m_board->SetCopperLayerCount( 4 );
+    m_board->SetEnabledLayers( LSET::AllCuMask( 4 ) | LSET::AllTechMask() );
+
+    PCB_VIA_STACK* stack = makeStack( m_board.get(), F_Cu, In2_Cu );
+    stack->SetPosition( VECTOR2I( pcbIUScale.mmToIU( 10 ), pcbIUScale.mmToIU( 10 ) ) );
+    stack->Regenerate( m_board.get(), nullptr );
+
+    setRule( "microvia_stack_depth (max 1)", "", "ignore" );
+
+    run();
+
+    BOOST_CHECK_EQUAL( m_depth, 0 );
+}
+
+
+BOOST_FIXTURE_TEST_CASE( IgnoredAspectRuleIsSilent, VIA_STACK_DRC_FIXTURE )
+{
+    m_board = std::make_unique<BOARD>();
+    m_board->SetCopperLayerCount( 4 );
+    m_board->SetEnabledLayers( LSET::AllCuMask( 4 ) | LSET::AllTechMask() );
+
+    BOARD_DESIGN_SETTINGS& bds = m_board->GetDesignSettings();
+    bds.GetStackupDescriptor().BuildDefaultStackupList( &bds, 4 );
+
+    for( BOARD_STACKUP_ITEM* item : bds.GetStackupDescriptor().GetList() )
+    {
+        if( item->GetType() == BS_ITEM_TYPE_DIELECTRIC )
+            item->SetThickness( pcbIUScale.mmToIU( 0.1 ) );
+    }
+
+    makeMicrovia( m_board.get(), VECTOR2I( pcbIUScale.mmToIU( 10 ), pcbIUScale.mmToIU( 10 ) ), F_Cu, In1_Cu, true );
+
+    setRule( "microvia_aspect_ratio (max 0.1)", "", "ignore" );
+
+    run();
+
+    BOOST_CHECK_EQUAL( m_aspect, 0 );
 }
 
 

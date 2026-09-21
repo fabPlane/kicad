@@ -18,6 +18,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <advanced_config.h>
+#include <sch_shape.h>
 #include <algorithm>
 #include <cmath>
 #include <memory>
@@ -711,8 +713,14 @@ bool SCH_MOVE_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, SCH_COMMIT* aComm
 
     refreshTraits();
 
-    if( !selection.Empty() )
+    const bool graphicsOnly = ADVANCED_CFG::GetCfg().m_ConnectivityEngine
+            && std::all_of( selection.begin(), selection.end(),
+                            []( EDA_ITEM* item )
+                            {
+                                return isGraphicItemForDrop( static_cast<SCH_ITEM*>( item ) );
+                            } );
 
+    if( !selection.Empty() && !graphicsOnly )
     {
         netCollisionMonitor = std::make_unique<SCH_DRAG_NET_COLLISION_MONITOR>( m_frame, m_view );
         netCollisionMonitor->Initialize( selection );
@@ -1007,7 +1015,9 @@ bool SCH_MOVE_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, SCH_COMMIT* aComm
         //------------------------------------------------------------------------
         // Handle drop
         //
-        else if( evt->IsMouseUp( BUT_LEFT ) || evt->IsClick( BUT_LEFT ) )
+        else if( evt->IsMouseUp( BUT_LEFT )
+                || evt->IsClick( BUT_LEFT )
+                || evt->IsAction( &ACTIONS::cursorClick ) )
         {
             if( m_mode != BREAK )
             {
@@ -1032,7 +1042,8 @@ bool SCH_MOVE_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, SCH_COMMIT* aComm
                 }
             }
         }
-        else if( evt->IsDblClick( BUT_LEFT ) )
+        else if( evt->IsDblClick( BUT_LEFT )
+                || evt->IsAction( &ACTIONS::cursorDblClick ) )
         {
             // Double click always finishes, even breaks
             break;
@@ -1914,7 +1925,7 @@ bool SCH_MOVE_TOOL::handleMoveToolActions( const TOOL_EVENT* aEvent, SCH_COMMIT*
 
             if( symbol )
             {
-                m_frame->SelectUnit( symbol, unit );
+                m_frame->SelectUnit( symbol, unit, aCommit );
                 m_toolMgr->PostAction( ACTIONS::refreshPreview );
             }
         }
@@ -1926,7 +1937,7 @@ bool SCH_MOVE_TOOL::handleMoveToolActions( const TOOL_EVENT* aEvent, SCH_COMMIT*
 
             if( symbol && symbol->GetBodyStyle() != bodyStyle )
             {
-                m_frame->SelectBodyStyle( symbol, bodyStyle );
+                m_frame->SelectBodyStyle( symbol, bodyStyle, aCommit );
                 m_toolMgr->PostAction( ACTIONS::refreshPreview );
             }
         }

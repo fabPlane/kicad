@@ -117,9 +117,6 @@ void CN_CONNECTIVITY_ALGO::markItemNetAsDirty( const BOARD_ITEM* aItem )
 
 bool CN_CONNECTIVITY_ALGO::Add( BOARD_ITEM* aItem )
 {
-    if( !aItem->IsOnCopperLayer() )
-        return false;
-
     auto alreadyAdded =
             [this]( BOARD_ITEM* item )
             {
@@ -145,6 +142,9 @@ bool CN_CONNECTIVITY_ALGO::Add( BOARD_ITEM* aItem )
 
         for( PAD* pad : static_cast<FOOTPRINT*>( aItem )->Pads() )
         {
+            if( !pad->IsOnCopperLayer() )
+                continue;
+
             if( alreadyAdded( pad ) )
                 return false;
 
@@ -156,6 +156,9 @@ bool CN_CONNECTIVITY_ALGO::Add( BOARD_ITEM* aItem )
 
     case PCB_PAD_T:
     {
+        if( !aItem->IsOnCopperLayer() )
+            return false;
+
         if( FOOTPRINT* fp = aItem->GetParentFootprint() )
         {
             if( fp->GetAttributes() & FP_JUST_ADDED )
@@ -191,6 +194,9 @@ bool CN_CONNECTIVITY_ALGO::Add( BOARD_ITEM* aItem )
         break;
 
     case PCB_SHAPE_T:
+        if( !aItem->IsOnCopperLayer() )
+            return false;
+
         if( alreadyAdded( aItem ) )
             return false;
 
@@ -202,6 +208,9 @@ bool CN_CONNECTIVITY_ALGO::Add( BOARD_ITEM* aItem )
 
     case PCB_ZONE_T:
     {
+        if( !aItem->IsOnCopperLayer() )
+            return false;
+
         ZONE* zone = static_cast<ZONE*>( aItem );
 
         if( alreadyAdded( aItem ) )
@@ -1124,11 +1133,11 @@ void CN_CONNECTIVITY_ALGO::updateJumperPads()
             }
         }
 
-        for( const std::set<wxString>& group : footprint->JumperPadGroups() )
+        for( const JUMPER_GROUP& group : footprint->JumperPadGroups().GetAll() )
         {
             std::vector<CN_ITEM*> toConnect;
 
-            for( const wxString& padNumber : group )
+            for( const wxString& padNumber : group.GetNames() )
                 std::ranges::copy( padsMap[padNumber], std::back_inserter( toConnect ) );
 
             for( size_t i = 0; i < toConnect.size(); ++i )

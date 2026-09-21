@@ -26,6 +26,7 @@
 #include <project.h>
 #include <env_vars.h>
 #include <common.h>
+#include <widgets/ui_common.h>
 #include <wx/regex.h>
 
 
@@ -39,6 +40,8 @@ DIALOG_EXECUTECOMMAND_JOB_SETTINGS::DIALOG_EXECUTECOMMAND_JOB_SETTINGS( wxWindow
 {
     m_textCtrlCommand->SetWrapMode( wxSTC_WRAP_CHAR );
 
+    m_textCtrlExpanded->SetFont( KIUI::GetMonospacedUIFont() );
+
     m_scintillaTricks = new SCINTILLA_TRICKS( m_textCtrlCommand, wxT( "{}" ), false,
             // onAcceptFn
             [this]( wxKeyEvent& aEvent )
@@ -51,10 +54,19 @@ DIALOG_EXECUTECOMMAND_JOB_SETTINGS::DIALOG_EXECUTECOMMAND_JOB_SETTINGS( wxWindow
             {
                 m_scintillaTricks->DoTextVarAutocomplete(
                         // getTokensFn
-                        []( const wxString& xRef, wxArrayString* tokens )
+                        [this]( const wxString& xRef, wxArrayString* tokens )
                         {
                             ENV_VAR::GetEnvVarAutocompleteTokens( tokens );
                             tokens->Add( OUTPUT_TMP_PATH_VAR_NAME );
+
+                            if( m_project )
+                            {
+                                for( const auto& [varName, varValue] : m_project->GetTextVars() )
+                                {
+                                    if( tokens->Index( varName ) == wxNOT_FOUND )
+                                        tokens->Add( varName );
+                                }
+                            }
                         } );
             } );
 
@@ -126,6 +138,7 @@ bool DIALOG_EXECUTECOMMAND_JOB_SETTINGS::TransferDataToWindow()
     m_textCtrlOutputPath->Enable( m_cbRecordOutput->GetValue() );
 
     populateEnvironReadOnlyTable();
+    updateExpandedPreview();
 
     return true;
 }
@@ -140,7 +153,14 @@ void DIALOG_EXECUTECOMMAND_JOB_SETTINGS::OnRecordOutputClicked( wxCommandEvent& 
 void DIALOG_EXECUTECOMMAND_JOB_SETTINGS::onCommandChanged( wxStyledTextEvent& aEvent )
 {
     populateEnvironReadOnlyTable();
+    updateExpandedPreview();
     aEvent.Skip();
+}
+
+
+void DIALOG_EXECUTECOMMAND_JOB_SETTINGS::updateExpandedPreview()
+{
+    m_textCtrlExpanded->ChangeValue( ExpandEnvVarSubstitutions( m_textCtrlCommand->GetValue(), m_project ) );
 }
 
 

@@ -18,13 +18,16 @@
  */
 
 #include <text_eval/text_eval_vcs.h>
+#include <text_eval/text_eval_environment.h>
 #include <git/project_git_utils.h>
 #include <git/git_backend.h>
 #include <git/kicad_git_common.h>
 #include <git/kicad_git_memory.h>
 #include <string_utils.h>
+#include <wx/filename.h>
 #include <wx/string.h>
 #include <wx/arrstr.h> // REQUIRED for wxString vector export on MSVC
+#include <algorithm>
 #include <map>
 
 namespace TEXT_EVAL_VCS
@@ -34,12 +37,15 @@ namespace TEXT_EVAL_VCS
 namespace
 {
     thread_local wxString tl_contextPath;
+    thread_local bool tl_contextIsFile = false;
 }
 
 
 void SetContextPath( const wxString& aPath )
 {
+    const bool isFile = !aPath.IsEmpty() && wxFileName( aPath ).FileExists();
     tl_contextPath = aPath;
+    tl_contextIsFile = isFile;
 }
 
 
@@ -49,30 +55,64 @@ wxString GetContextPath()
 }
 
 
-CONTEXT_PATH_SCOPE::CONTEXT_PATH_SCOPE( const wxString& aPath ) :
-        m_previous( tl_contextPath )
+bool GetContextIsFile()
 {
-    tl_contextPath = aPath;
+    return tl_contextIsFile;
+}
+
+
+CONTEXT_PATH_SCOPE::CONTEXT_PATH_SCOPE( const wxString& aPath ) :
+        m_previous( tl_contextPath ),
+        m_previousIsFile( tl_contextIsFile )
+{
+    SetContextPath( aPath );
 }
 
 
 CONTEXT_PATH_SCOPE::~CONTEXT_PATH_SCOPE()
 {
     tl_contextPath = m_previous;
+    tl_contextIsFile = m_previousIsFile;
 }
 
 
 // Private implementation details
 namespace
 {
-    // Resolve the effective path for repo discovery. Inputs of "." are replaced with the
-    // current context path (which itself falls back to ".").
     wxString ResolveEffectivePath( const std::string& aPath )
     {
         if( aPath.empty() || aPath == "." )
             return GetContextPath();
 
-        return wxString::FromUTF8( aPath );
+        wxFileName path( wxString::FromUTF8( aPath ) );
+
+        if( path.IsRelative() )
+        {
+            wxFileName context( GetContextPath() );
+            context.MakeAbsolute();
+            path.MakeAbsolute( tl_contextIsFile ? context.GetPath() : context.GetFullPath() );
+        }
+
+        return path.GetFullPath();
+    }
+
+
+    using VCS_QUERY = TEXT_EVAL::ENVIRONMENT::VCS_QUERY;
+    using VCS_VALUE = TEXT_EVAL::ENVIRONMENT::VCS_VALUE;
+
+    VCS_VALUE Capture( VCS_QUERY aQuery, const std::string& aPath, const std::string& aArgument,
+                       int aOptions, const std::function<VCS_VALUE()>& aRead )
+    {
+        if( auto* environment = TEXT_EVAL::ENVIRONMENT::Current() )
+        {
+            wxFileName path = wxFileName::DirName( ResolveEffectivePath( aPath ) );
+            path.MakeAbsolute();
+            const bool contextFile = tl_contextIsFile && ( aPath.empty() || aPath == "." );
+            return environment->VcsValue( { aQuery, path.GetPath( wxPATH_GET_VOLUME ), aArgument, aOptions,
+                                            contextFile }, aRead );
+        }
+
+        return aRead();
     }
 
 
@@ -81,8 +121,15 @@ namespace
         if( !GetGitBackend() )
             return nullptr;
 
-        const wxString effective = ResolveEffectivePath( aPath );
-        return KIGIT::PROJECT_GIT_UTILS::GetRepositoryForFile( TO_UTF8( effective ) );
+        wxFileName effective( ResolveEffectivePath( aPath ) );
+
+        if( ( !aPath.empty() && aPath != "." ) || tl_contextIsFile )
+        {
+            effective.MakeAbsolute();
+            return KIGIT::PROJECT_GIT_UTILS::GetRepositoryForFile( TO_UTF8( effective.GetPath() ) );
+        }
+
+        return KIGIT::PROJECT_GIT_UTILS::GetRepositoryForFile( TO_UTF8( effective.GetFullPath() ) );
     }
 
     void CloseRepo( git_repository* aRepo )
@@ -103,15 +150,32 @@ namespace
         if( !aRepo )
             return MakeZeroOid();
 
-        // Get HEAD commit
-        git_oid head_oid;
+        const git_oid head_oid = KIGIT::PROJECT_GIT_UTILS::GetCapturedHeadOid( aRepo );
 
-        if( git_reference_name_to_id( &head_oid, aRepo, "HEAD" ) != 0 )
+        if( git_oid_is_zero( &head_oid ) )
             return MakeZeroOid();
 
         // For repo-level query (empty or "."), just return HEAD
         if( aPath.empty() || aPath == "." )
             return head_oid;
+
+        const char* workdir = git_repository_workdir( aRepo );
+
+        if( !workdir )
+            return MakeZeroOid();
+
+        wxFileName file( ResolveEffectivePath( aPath ) );
+
+        const wxString base = KIGIT::PROJECT_GIT_UTILS::ComputeSymlinkPreservingWorkDir(
+                file.GetPath(), wxString::FromUTF8( workdir ) );
+
+        if( !file.MakeRelativeTo( base ) )
+            return MakeZeroOid();
+
+        const std::string treePath = file.GetFullPath( wxPATH_UNIX ).ToStdString( wxConvUTF8 );
+
+        if( treePath.empty() || treePath == "." || treePath == ".." || treePath.starts_with( "../" ) )
+            return MakeZeroOid();
 
         // For file-specific query, walk history to find last commit that touched this file
         git_revwalk* walker = nullptr;
@@ -120,7 +184,12 @@ namespace
             return MakeZeroOid();
 
         git_revwalk_sorting( walker, GIT_SORT_TIME );
-        git_revwalk_push( walker, &head_oid );
+
+        if( git_revwalk_push( walker, &head_oid ) != 0 )
+        {
+            git_revwalk_free( walker );
+            return MakeZeroOid();
+        }
 
         // Walk through commits to find when the file was last modified
         git_oid result = MakeZeroOid();
@@ -143,7 +212,7 @@ namespace
                 // Try to find the file in this tree
                 git_tree_entry* entry = nullptr;
 
-                if( git_tree_entry_bypath( &entry, tree, aPath.c_str() ) == 0 )
+                if( git_tree_entry_bypath( &entry, tree, treePath.c_str() ) == 0 )
                 {
                     const git_oid* blob_oid = git_tree_entry_id( entry );
 
@@ -195,16 +264,16 @@ namespace
         int         distance;
     };
 
-    DescribeInfo GetDescribeInfo( const std::string& aMatch, bool aAnyTags )
+    DescribeInfo ReadDescribeInfo( const std::string& aMatch, bool aAnyTags )
     {
         git_repository* repo = OpenRepo( "." );
 
         if( !repo )
             return { std::string(), 0 };
 
-        git_oid head_oid;
+        const git_oid head_oid = KIGIT::PROJECT_GIT_UTILS::GetCapturedHeadOid( repo );
 
-        if( git_reference_name_to_id( &head_oid, repo, "HEAD" ) != 0 )
+        if( git_oid_is_zero( &head_oid ) )
         {
             CloseRepo( repo );
             return { std::string(), 0 };
@@ -263,7 +332,13 @@ namespace
         }
 
         git_revwalk_sorting( walker, GIT_SORT_TOPOLOGICAL | GIT_SORT_TIME );
-        git_revwalk_push( walker, &head_oid );
+
+        if( git_revwalk_push( walker, &head_oid ) != 0 )
+        {
+            git_revwalk_free( walker );
+            CloseRepo( repo );
+            return { std::string(), 0 };
+        }
 
         DescribeInfo result{ std::string(), 0 };
         int          distance = 0;
@@ -288,7 +363,18 @@ namespace
         return result;
     }
 
-    std::string GetCommitSignatureField( const std::string& aPath, bool aUseCommitter, bool aGetEmail )
+    DescribeInfo GetDescribeInfo( const std::string& aMatch, bool aAnyTags )
+    {
+        const auto value = Capture( VCS_QUERY::DESCRIPTION, ".", aMatch, aAnyTags,
+                [&]() -> VCS_VALUE
+                {
+                    const auto description = ReadDescribeInfo( aMatch, aAnyTags );
+                    return { description.tag, description.distance };
+                } );
+        return { value.text, static_cast<int>( value.number ) };
+    }
+
+    std::string ReadCommitSignatureField( const std::string& aPath, bool aUseCommitter, bool aGetEmail )
     {
         git_repository* repo = OpenRepo( aPath );
 
@@ -325,10 +411,16 @@ namespace
         return result;
     }
 
+    std::string GetCommitSignatureField( const std::string& aPath, bool aUseCommitter, bool aGetEmail )
+    {
+        return Capture( VCS_QUERY::SIGNATURE, aPath, aPath, ( aUseCommitter ? 2 : 0 ) | ( aGetEmail ? 1 : 0 ),
+                [&]() -> VCS_VALUE { return { ReadCommitSignatureField( aPath, aUseCommitter, aGetEmail ) }; } ).text;
+    }
+
 } // anonymous namespace
 
 
-std::string GetCommitHash( const std::string& aPath, int aLength )
+static std::string ReadCommitHash( const std::string& aPath )
 {
     git_repository* repo = OpenRepo( aPath );
 
@@ -343,12 +435,19 @@ std::string GetCommitHash( const std::string& aPath, int aLength )
         return std::string();
     }
 
-    int  length = std::max( 4, std::min( aLength, GIT_OID_HEXSZ ) );
     char hash[GIT_OID_HEXSZ + 1];
-    git_oid_tostr( hash, length + 1, &oid );
+    git_oid_tostr( hash, sizeof( hash ), &oid );
 
     CloseRepo( repo );
     return hash;
+}
+
+
+std::string GetCommitHash( const std::string& aPath, int aLength )
+{
+    const auto value = Capture( VCS_QUERY::HASH, aPath, aPath, 0,
+            [&]() -> VCS_VALUE { return { ReadCommitHash( aPath ) }; } );
+    return value.text.substr( 0, std::clamp( aLength, 4, GIT_OID_HEXSZ ) );
 }
 
 
@@ -364,7 +463,7 @@ int GetDistanceFromTag( const std::string& aMatch, bool aAnyTags )
 }
 
 
-bool IsDirty( bool aIncludeUntracked )
+static bool ReadIsDirty( bool aIncludeUntracked )
 {
     git_repository* repo = OpenRepo( "." );
 
@@ -388,6 +487,13 @@ bool IsDirty( bool aIncludeUntracked )
 
     CloseRepo( repo );
     return isDirty;
+}
+
+
+bool IsDirty( bool aIncludeUntracked )
+{
+    return Capture( VCS_QUERY::DIRTY, ".", "", aIncludeUntracked,
+            [&]() -> VCS_VALUE { return { {}, ReadIsDirty( aIncludeUntracked ) }; } ).number != 0;
 }
 
 
@@ -415,7 +521,7 @@ std::string GetCommitterEmail( const std::string& aPath )
 }
 
 
-std::string GetBranch()
+static std::string ReadBranch()
 {
     git_repository* repo = OpenRepo( "." );
 
@@ -430,7 +536,14 @@ std::string GetBranch()
 }
 
 
-int64_t GetCommitTimestamp( const std::string& aPath )
+std::string GetBranch()
+{
+    return Capture( VCS_QUERY::BRANCH, ".", "", 0,
+            []() -> VCS_VALUE { return { ReadBranch() }; } ).text;
+}
+
+
+static int64_t ReadCommitTimestamp( const std::string& aPath )
 {
     git_repository* repo = OpenRepo( aPath );
 
@@ -459,10 +572,88 @@ int64_t GetCommitTimestamp( const std::string& aPath )
 }
 
 
+int64_t GetCommitTimestamp( const std::string& aPath )
+{
+    return Capture( VCS_QUERY::TIMESTAMP, aPath, aPath, 0,
+            [&]() -> VCS_VALUE { return { {}, ReadCommitTimestamp( aPath ) }; } ).number;
+}
+
+
 std::string GetCommitDate( const std::string& aPath )
 {
     int64_t timestamp = GetCommitTimestamp( aPath );
     return timestamp > 0 ? std::to_string( timestamp ) : std::string();
+}
+
+
+TEXT_EVAL::ENVIRONMENT::VCS_VALUE ReadSource( const TEXT_EVAL::ENVIRONMENT::VCS_KEY& aKey )
+{
+    const auto read = [&]() -> VCS_VALUE
+    {
+        const auto& [query, path, argument, options, contextFile] = aKey;
+
+        if( query == VCS_QUERY::HEAD )
+        {
+            if( !GetGitBackend() )
+                return {};
+
+            git_repository* raw = nullptr;
+
+            // Discovery could select the main repository instead of this linked worktree's HEAD.
+            if( git_repository_open( &raw, path.ToUTF8().data() ) != 0 )
+                return {};
+
+            KIGIT::GitRepositoryPtr repo( raw );
+            git_oid oid{};
+
+            if( git_reference_name_to_id( &oid, repo.get(), "HEAD" ) != 0 )
+                return {};
+
+            char hash[GIT_OID_HEXSZ + 1];
+            git_oid_tostr( hash, sizeof( hash ), &oid );
+            return { hash };
+        }
+
+        const bool fileQuery = ( query == VCS_QUERY::HASH || query == VCS_QUERY::SIGNATURE
+                                 || query == VCS_QUERY::TIMESTAMP )
+                               && !argument.empty() && argument != ".";
+        const CONTEXT_PATH_SCOPE context( fileQuery || contextFile ? wxFileName( path ).GetPath() : path );
+        const std::string file = fileQuery ? path.ToStdString( wxConvUTF8 ) : std::string();
+
+        switch( query )
+        {
+        case VCS_QUERY::HASH:
+            return { ReadCommitHash( file ) };
+
+        case VCS_QUERY::DESCRIPTION:
+        {
+            const auto description = ReadDescribeInfo( argument, options != 0 );
+            return { description.tag, description.distance };
+        }
+
+        case VCS_QUERY::SIGNATURE:
+            return { ReadCommitSignatureField( file, ( options & 2 ) != 0, ( options & 1 ) != 0 ) };
+
+        case VCS_QUERY::BRANCH:
+            return { ReadBranch() };
+
+        case VCS_QUERY::DIRTY:
+            return { {}, ReadIsDirty( options != 0 ) };
+
+        case VCS_QUERY::TIMESTAMP:
+            return { {}, ReadCommitTimestamp( file ) };
+
+        case VCS_QUERY::HEAD:
+            break;
+        }
+
+        return {};
+    };
+
+    if( auto* environment = TEXT_EVAL::ENVIRONMENT::Current() )
+        return environment->VcsValue( aKey, read );
+
+    return read();
 }
 
 } // namespace TEXT_EVAL_VCS

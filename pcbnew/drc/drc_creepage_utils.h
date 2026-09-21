@@ -263,7 +263,7 @@ public:
     enum class TYPE
     {
         UNDEFINED = 0,
-        POINT,
+        POINT_TYPE,
         CIRCLE,
         ARC
     };
@@ -628,7 +628,7 @@ public:
             BE_SHAPE()
     {
         m_pos = aPos;
-        m_type = CREEP_SHAPE::TYPE::POINT;
+        m_type = CREEP_SHAPE::TYPE::POINT_TYPE;
     }
 
     std::vector<PATH_CONNECTION> Paths( const BE_SHAPE_POINT& aS2, double aMaxWeight,
@@ -857,10 +857,6 @@ public:
     std::shared_ptr<GRAPH_NODE> FindNode( GRAPH_NODE::TYPE aType, CREEP_SHAPE* aParent,
                                           const VECTOR2I& aPos );
 
-    void RemoveConnection( const std::shared_ptr<GRAPH_CONNECTION>&, bool aDelete = false );
-
-    void Trim( double aWeightLimit );
-
     void Addshape( const SHAPE& aShape, std::shared_ptr<GRAPH_NODE>& aConnectTo,
                    BOARD_ITEM* aParent = nullptr );
 
@@ -923,6 +919,8 @@ public:
     int m_minGrooveWidth;
 
 private:
+    void detachConnection( const std::shared_ptr<GRAPH_CONNECTION>& aGc );
+
     double m_creepageTarget;
     double m_creepageTargetSquared;
 };

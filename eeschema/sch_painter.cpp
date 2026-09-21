@@ -25,6 +25,7 @@
 #include <chrono>
 #include <bitmap_base.h>
 #include <connection_graph.h>
+#include <connectivity/conn_netchain_manager.h>
 #include <gal/graphics_abstraction_layer.h>
 #include <sch_netchain.h>
 #include <callback_gal.h>
@@ -64,6 +65,7 @@
 #include <kiface_base.h>
 #include <default_values.h>
 #include <advanced_config.h>
+#include <connectivity/conn_text.h>
 #include <settings/settings_manager.h>
 #include <stroke_params.h>
 #include <string_utils.h>
@@ -116,6 +118,8 @@ bool SCH_PAINTER::Draw( const VIEW_ITEM* aItem, int aLayer )
     if( !item )
         return false;
 
+    // Staged items keep drawing their last published nets until the recalculation
+    SCH_CONNECTIVITY::RENDER_SCOPE renderScope;
     draw( item, aLayer, false );
 
     return false;
@@ -1571,22 +1575,19 @@ void SCH_PAINTER::draw( const SCH_PIN* aPin, int aLayer, bool aDimmed )
     if( std::optional<PIN_LAYOUT_CACHE::TEXT_INFO> elecTypeInfo = cache.GetPinElectricalTypeInfo( shadowWidth ) )
         drawTextInfo( *elecTypeInfo, getColorForLayer( LAYER_PRIVATE_NOTES ) );
 
-    if( aPin->IsBrightened() && m_schematic && !m_schematic->GetHighlightedNetChain().IsEmpty() )
+    if( aPin->IsBrightened() && m_netChainTerminalPins.contains( aPin ) )
     {
-        if( SCH_NETCHAIN* sig = m_schematic->ConnectionGraph()->GetNetChainByName( m_schematic->GetHighlightedNetChain() ) )
+        if( SCH_NETCHAIN* sig = m_schematic->NetChains().GetNetChainByName( m_schematic->GetHighlightedNetChain() ) )
         {
-            if( sig->GetTerminalPinA() == aPin->m_Uuid || sig->GetTerminalPinB() == aPin->m_Uuid )
-            {
-                CIRCLE c = cache.GetDanglingIndicator();
-                COLOR4D emphasis = sig->GetColor() != COLOR4D::UNSPECIFIED
-                                        ? sig->GetColor()
-                                        : color.Brightened( 0.5 );
-                m_gal->SetStrokeColor( emphasis );
-                m_gal->SetIsFill( false );
-                m_gal->SetIsStroke( true );
-                m_gal->SetLineWidth( getShadowWidth( true ) );
-                m_gal->DrawCircle( c.Center, c.Radius );
-            }
+            CIRCLE c = cache.GetDanglingIndicator();
+            COLOR4D emphasis = sig->GetColor() != COLOR4D::UNSPECIFIED
+                                    ? sig->GetColor()
+                                    : color.Brightened( 0.5 );
+            m_gal->SetStrokeColor( emphasis );
+            m_gal->SetIsFill( false );
+            m_gal->SetIsStroke( true );
+            m_gal->SetLineWidth( getShadowWidth( true ) );
+            m_gal->DrawCircle( c.Center, c.Radius );
         }
     }
 }
@@ -1741,11 +1742,13 @@ void SCH_PAINTER::draw( const SCH_LINE* aLine, int aLayer )
     // highlighted chain is immediately visible.
     if( drawingWires && !drawingShadows && m_schematic && !m_schematic->GetHighlightedNetChain().IsEmpty() )
     {
-        SCH_CONNECTION* conn = !aLine->IsConnectivityDirty() ? aLine->Connection() : nullptr;
+        const auto net = !aLine->IsConnectivityDirty()
+                                 ? aLine->GetConnectionName( &m_schematic->CurrentSheet() )
+                                 : std::nullopt;
 
-        if( conn && !conn->Name().IsEmpty() )
+        if( net && !net->IsEmpty() )
         {
-            if( SCH_NETCHAIN* chain = m_schematic->ConnectionGraph()->GetNetChainForNet( conn->Name() ) )
+            if( SCH_NETCHAIN* chain = m_schematic->NetChains().GetNetChainForNet( *net ) )
             {
                 if( chain->GetName() == m_schematic->GetHighlightedNetChain()
                     && chain->GetColor() != COLOR4D::UNSPECIFIED )
@@ -1943,6 +1946,10 @@ void SCH_PAINTER::draw( const SCH_SHAPE* aShape, int aLayer, bool aDimmed )
     auto drawShape =
             [&]( const SCH_SHAPE* shape )
             {
+                int  lineWidth = KiROUND( getLineWidth( shape, false ) );
+                bool hasEndings = shape->GetStartEnding().GetStyle() != LINE_ENDING_STYLE::NONE
+                                  || shape->GetEndEnding().GetStyle() != LINE_ENDING_STYLE::NONE;
+
                 switch( shape->GetShape() )
                 {
                 case SHAPE_T::ARC:
@@ -1951,11 +1958,8 @@ void SCH_PAINTER::draw( const SCH_SHAPE* aShape, int aLayer, bool aDimmed )
                     EDA_ANGLE startAngle = arc.GetStartAngle();
                     EDA_ANGLE arcAngle = arc.GetCentralAngle();
 
-                    if( shape->ShortenArcForEndings( startAngle, arcAngle, arc.GetRadius(),
-                                                     KiROUND( getLineWidth( shape, false ) ) ) )
-                    {
+                    if( shape->ShortenArcForEndings( startAngle, arcAngle, arc.GetRadius(), lineWidth ) )
                         m_gal->DrawArc( arc.GetCenter(), arc.GetRadius(), startAngle, arcAngle );
-                    }
 
                     break;
                 }
@@ -1989,29 +1993,45 @@ void SCH_PAINTER::draw( const SCH_SHAPE* aShape, int aLayer, bool aDimmed )
                         break;
 
                     const SHAPE_LINE_CHAIN& outline = shape->GetPolyShape().COutline( 0 );
-                    std::vector<VECTOR2I>   pts;
+                    std::deque<VECTOR2D>    drawPts;
 
-                    if( !shape->GetShortenedBodyPolyPoints( outline, 0, pts, KiROUND( getLineWidth( shape, false ) ) ) )
+                    if( hasEndings && !shape->IsClosed() )
                     {
-                        break;
+                        std::vector<VECTOR2I> pts;
+
+                        if( shape->GetShortenedBodyPolyPoints( outline, 0, pts, lineWidth ) )
+                        {
+                            for( const VECTOR2I& pt : pts )
+                                drawPts.emplace_back( pt );
+                        }
+                    }
+                    else
+                    {
+                        for( const VECTOR2I& pt : outline.CPoints() )
+                            drawPts.emplace_back( pt );
+
+                        if( shape->IsClosed() )
+                            drawPts.emplace_back( outline.CPoint( 0 ) );
                     }
 
-                    std::deque<VECTOR2D> drawPts;
+                    if( drawPts.size() >= 2 )
+                        m_gal->DrawPolygon( drawPts );
 
-                    for( const VECTOR2I& pt : pts )
-                        drawPts.emplace_back( pt );
-
-                    m_gal->DrawPolygon( drawPts );
                     break;
                 }
 
                 case SHAPE_T::BEZIER:
                 {
-                    std::optional<BEZIER<double>> curve =
-                            shape->ShortenedBezierCurve( KiROUND( getLineWidth( shape, false ) ) );
-
-                    if( curve )
-                        m_gal->DrawCurve( curve->Start, curve->C1, curve->C2, curve->End, shape->GetMaxError() );
+                    if( hasEndings )
+                    {
+                        if( std::optional<BEZIER<double>> curve = shape->ShortenedBezierCurve( lineWidth ) )
+                            m_gal->DrawCurve( curve->Start, curve->C1, curve->C2, curve->End, shape->GetMaxError() );
+                    }
+                    else
+                    {
+                        m_gal->DrawCurve( shape->GetStart(), shape->GetBezierC1(), shape->GetBezierC2(),
+                                          shape->GetEnd() );
+                    }
 
                     break;
                 }
@@ -2200,15 +2220,10 @@ void SCH_PAINTER::draw( const SCH_TEXT* aText, int aLayer, bool aDimmed )
 
     COLOR4D color = getRenderColor( aText, aLayer, drawingShadows, aDimmed );
 
-    if( m_schematic )
+    if( m_schematic && !aText->IsConnectivityDirty()
+        && aText->HasBusConnection( &m_schematic->CurrentSheet() ) )
     {
-        SCH_CONNECTION* conn = nullptr;
-
-        if( !aText->IsConnectivityDirty() )
-            conn = aText->Connection();
-
-        if( conn && conn->IsBus() )
-            color = getRenderColor( aText, LAYER_BUS, drawingShadows, aDimmed );
+        color = getRenderColor( aText, LAYER_BUS, drawingShadows, aDimmed );
     }
 
     if( !( aText->IsVisible() || aText->IsForceVisible() ) )
@@ -2227,7 +2242,7 @@ void SCH_PAINTER::draw( const SCH_TEXT* aText, int aLayer, bool aDimmed )
     m_gal->SetFillColor( color );
     m_gal->SetHoverColor( color );
 
-    wxString        shownText( aText->GetShownText( true ) );
+    wxString        shownText( aText->GetShownText( FOR_CANVAS ) );
     VECTOR2I        text_offset = aText->GetSchematicTextOffset( &m_schSettings );
     TEXT_ATTRIBUTES attrs = aText->GetAttributes();
     KIFONT::FONT*   font = getFont( aText );
@@ -2451,7 +2466,7 @@ void SCH_PAINTER::draw( const SCH_TEXTBOX* aTextBox, int aLayer, bool aDimmed )
         }
         else
         {
-            wxString        shownText = aTextBox->GetShownText( true );
+            wxString        shownText = aTextBox->GetShownText( FOR_CANVAS );
             TEXT_ATTRIBUTES attrs = aTextBox->GetAttributes();
             wxString        activeUrl;
 
@@ -2599,8 +2614,7 @@ void SCH_PAINTER::draw( const SCH_TABLE* aTable, int aLayer, bool aDimmed )
 }
 
 
-wxString SCH_PAINTER::expandLibItemTextVars( const wxString& aSourceText,
-                                             const SCH_SYMBOL* aSymbolContext )
+wxString SCH_PAINTER::expandLibItemTextVars( const wxString& aSourceText, const SCH_SYMBOL* aSymbolContext )
 {
     std::function<bool( wxString* )> symbolResolver =
             [&]( wxString* token ) -> bool
@@ -2611,7 +2625,7 @@ wxString SCH_PAINTER::expandLibItemTextVars( const wxString& aSourceText,
                 return aSymbolContext->ResolveTextVar( &m_schematic->CurrentSheet(), token );
             };
 
-    return ExpandTextVars( aSourceText, &symbolResolver );
+    return ExpandTextVars( aSourceText, &symbolResolver, FOR_CANVAS );
 }
 
 
@@ -2700,6 +2714,7 @@ void SCH_PAINTER::draw( const SCH_SYMBOL* aSymbol, int aLayer )
     for( SCH_ITEM& tempItem : tempSymbol.GetDrawItems() )
     {
         tempItem.SetFlags( aSymbol->GetFlags() );     // SELECTED, HIGHLIGHTED, BRIGHTENED,
+        tempItem.SetNetHighlighted( aSymbol->IsNetHighlighted() );
         tempItem.Move( aSymbol->GetPosition() );
 
         if( tempItem.Type() == SCH_TEXT_T )
@@ -2720,6 +2735,10 @@ void SCH_PAINTER::draw( const SCH_SYMBOL* aSymbol, int aLayer )
 
     // Copy the pin info from the symbol to the temp pins.
     std::vector<SCH_PIN*> symbolPins = aSymbol->MapLibPins( originalPins, usingAlternateSymbol );
+    SCH_NETCHAIN*         highlightedChain = nullptr;
+
+    if( m_schematic && !m_schematic->GetHighlightedNetChain().IsEmpty() )
+        highlightedChain = m_schematic->NetChains().GetNetChainByName( m_schematic->GetHighlightedNetChain() );
 
     for( unsigned i = 0; i < tempPins.size(); ++ i )
     {
@@ -2735,6 +2754,14 @@ void SCH_PAINTER::draw( const SCH_SYMBOL* aSymbol, int aLayer )
         tempPin->ClearFlags();
         tempPin->SetFlags( symbolPin->GetFlags() );     // SELECTED, HIGHLIGHTED, BRIGHTENED,
                                                         // IS_SHOWN_AS_BITMAP
+        tempPin->SetNetHighlighted( symbolPin->IsNetHighlighted() );
+
+        // Terminal markers match the schematic pin, not its library definition
+        if( highlightedChain
+            && highlightedChain->IsTerminal( symbolPin->m_Uuid, m_schematic->CurrentSheet().PathRef() ) )
+        {
+            m_netChainTerminalPins.insert( tempPin );
+        }
 
         tempPin->SetName( expandLibItemTextVars( symbolPin->GetShownName(), aSymbol ) );
         tempPin->SetType( symbolPin->GetType() );
@@ -2773,6 +2800,7 @@ void SCH_PAINTER::draw( const SCH_SYMBOL* aSymbol, int aLayer )
     }
 
     draw( &tempSymbol, aLayer, false, aSymbol->GetUnit(), aSymbol->GetBodyStyle(), DNP );
+    m_netChainTerminalPins.clear();
 
     for( unsigned i = 0; i < tempPins.size(); ++i )
     {
@@ -2787,6 +2815,7 @@ void SCH_PAINTER::draw( const SCH_SYMBOL* aSymbol, int aLayer )
         tempPin->ClearFlags( IS_DANGLING );             // Clear this temporary flag
         symbolPin->SetFlags( tempPin->GetFlags() );     // SELECTED, HIGHLIGHTED, BRIGHTENED,
                                                         // IS_SHOWN_AS_BITMAP
+        symbolPin->SetNetHighlighted( tempPin->IsNetHighlighted() );
     }
 
     // Draw DNP and EXCLUDE from SIM markers.
@@ -2915,7 +2944,7 @@ void SCH_PAINTER::draw( const SCH_FIELD* aField, int aLayer, bool aDimmed )
         variant = m_schematic->GetCurrentVariant();
     }
 
-    wxString shownText = aField->GetShownText( sheetPath, true, 0, variant );
+    wxString shownText = aField->GetShownText( sheetPath, FOR_CANVAS, variant );
 
     if( shownText.IsEmpty() )
         return;

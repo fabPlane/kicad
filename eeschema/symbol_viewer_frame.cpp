@@ -33,6 +33,7 @@
 #include <kiway_mail.h>
 #include <locale_io.h>
 #include <symbol_viewer_frame.h>
+#include <symbol_edit_frame.h>
 #include <widgets/msgpanel.h>
 #include <widgets/wx_listbox.h>
 #include <widgets/wx_aui_utils.h>
@@ -53,6 +54,7 @@
 #include <tool/tool_manager.h>
 #include <tool/zoom_tool.h>
 #include <tools/sch_actions.h>
+#include <tools/sch_selection_tool.h>
 #include <tools/symbol_editor_control.h>
 #include <tools/sch_inspection_tool.h>
 #include <view/view_controls.h>
@@ -210,6 +212,15 @@ SYMBOL_VIEWER_FRAME::SYMBOL_VIEWER_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     m_auimgr.AddPane( GetCanvas(), EDA_PANE().Canvas().Name( "DrawFrame" ).Center() );
 
     RestoreAuiLayout();
+
+    // Perspectives are sometimes saved with panes marked hidden, and this frame offers no way to
+    // bring one back, so a single bad save would leave the browser permanently blank
+    for( const wchar_t* pane : { wxS( "Libraries" ), wxS( "Symbols" ), wxS( "MsgPanel" ),
+                                 wxS( "DrawFrame" ) } )
+    {
+        m_auimgr.GetPane( pane ).Show( true );
+    }
+
     m_auimgr.Update();
 
     if( m_libListWidth > 0 )
@@ -806,12 +817,14 @@ void SYMBOL_VIEWER_FRAME::LoadSettings( APP_SETTINGS_BASE* aCfg )
         GetRenderSettings()->m_ShowPinNumbers = cfg->m_LibViewPanel.show_pin_numbers;
 
         // Set parameters to a reasonable value.
-        int maxWidth = cfg->m_LibViewPanel.window.state.size_x - 80;
+        int64_t maxWidth = cfg->m_LibViewPanel.window.state.size_x - 80;
+        int64_t totalWidth = static_cast<int64_t>( m_libListWidth ) + m_symbolListWidth;
 
-        if( m_libListWidth + m_symbolListWidth > maxWidth )
+        // Multiply before dividing or the integer ratio truncates to zero and starves the library list
+        if( totalWidth > 0 && totalWidth > maxWidth )
         {
-            m_libListWidth = maxWidth * ( m_libListWidth / ( m_libListWidth + m_symbolListWidth ) );
-            m_symbolListWidth = maxWidth - m_libListWidth;
+            m_libListWidth = static_cast<int>( maxWidth * m_libListWidth / totalWidth );
+            m_symbolListWidth = static_cast<int>( maxWidth ) - m_libListWidth;
         }
     }
 }

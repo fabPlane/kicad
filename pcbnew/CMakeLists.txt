@@ -113,8 +113,8 @@ set( PCBNEW_DIALOGS
     dialogs/dialog_global_edit_teardrops_base.cpp
     dialogs/dialog_global_edit_text_and_graphics.cpp
     dialogs/dialog_global_edit_text_and_graphics_base.cpp
-    dialogs/dialog_griditem_properties.cpp
-    dialogs/dialog_griditem_properties_base.cpp
+    dialogs/dialog_grid_item_properties.cpp
+    dialogs/dialog_grid_item_properties_base.cpp
     dialogs/geom_field_helpers.cpp
     dialogs/dialog_push_pad_properties.cpp
     dialogs/dialog_push_pad_properties_base.cpp
@@ -159,6 +159,12 @@ set( PCBNEW_DIALOGS
     dialogs/dialog_render_job.cpp
     dialogs/dialog_swap_layers.cpp
     dialogs/dialog_swap_layers_base.cpp
+    dialogs/dialog_drill_chart_properties.cpp
+    dialogs/dialog_drill_groups.cpp
+    dialogs/dialog_drill_groups_base.cpp
+    dialogs/panel_setup_drill_chart.cpp
+    dialogs/panel_setup_drill_chart_base.cpp
+    dialogs/dialog_drill_chart_properties_base.cpp
     dialogs/dialog_table_properties.cpp
     dialogs/dialog_table_properties_base.cpp
     dialogs/dialog_tablecell_properties.cpp
@@ -245,6 +251,8 @@ set( PCBNEW_DIALOGS
     dialogs/panel_setup_zones_base.cpp
     dialogs/panel_setup_zone_hatch_offsets.cpp
     dialogs/panel_setup_zone_hatch_offsets_base.cpp
+    dialogs/panel_zone_conversion.cpp
+    dialogs/panel_zone_conversion_base.cpp
     dialogs/panel_zone_properties.cpp
     dialogs/panel_zone_properties_base.cpp
     footprint_wizard.cpp
@@ -482,6 +490,7 @@ set( PCBNEW_CLASS_SRCS
     edit_zone_helpers.cpp
 
     api/api_handler_board.cpp
+    api/api_handler_fp_libraries.cpp
     api/api_handler_footprint.cpp
     api/api_handler_footprint_library.cpp
     api/api_handler_pcb.cpp
@@ -1052,6 +1061,9 @@ if( WIN32 )
 #Copy dynamic lib dependency to build dir to allow running directly
     add_custom_command( TARGET pcbnew POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:kicad_3dsg>" "$<TARGET_FILE_DIR:pcbnew>"
+        )
+    add_custom_command( TARGET pcbnew POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:kicad_3d_import>" "$<TARGET_FILE_DIR:pcbnew>"
         )
     add_custom_command( TARGET pcbnew POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:kiapi>" "$<TARGET_FILE_DIR:pcbnew>"

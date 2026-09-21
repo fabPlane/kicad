@@ -42,6 +42,7 @@
 #include <project/net_settings.h>
 #include <properties/property.h>
 #include <properties/property_mgr.h>
+#include <dialogs/dialog_find_by_properties.h>
 
 BOOST_AUTO_TEST_SUITE( Libeval_Compiler )
 
@@ -520,6 +521,92 @@ BOOST_AUTO_TEST_CASE( ParentNavigation )
 }
 
 
+// A property missing on a child item resolves against its parent footprint.
+BOOST_AUTO_TEST_CASE( PropertyParentFallback )
+{
+    PROPERTY_MANAGER::Instance().Rebuild();
+
+    BOARD brd;
+
+    FOOTPRINT fp( &brd );
+    fp.SetReference( wxT( "J1" ) );
+
+    PCB_TEXT* text = new PCB_TEXT( &fp );
+    fp.Add( text );
+
+    testEvalExpr( wxT( "A.Reference == 'J1'" ), VAL( 1.0 ), false, text, text );
+    testEvalExpr( wxT( "A.Reference == 'J2'" ), VAL( 0.0 ), false, text, text );
+}
+
+
+// A bool property must be readable in a rule.
+BOOST_AUTO_TEST_CASE( BoolPropertyEvaluation )
+{
+    PROPERTY_MANAGER::Instance().Rebuild();
+
+    BOARD brd;
+
+    FOOTPRINT fp( &brd );
+
+    testEvalExpr( wxT( "A.Do_not_Populate == 0" ), VAL( 1.0 ), false, &fp, &fp );
+
+    fp.SetDNP( true );
+
+    testEvalExpr( wxT( "A.Do_not_Populate == 1" ), VAL( 1.0 ), false, &fp, &fp );
+}
+
+
+// Queries read flags and fields through the current assembly variant.
+BOOST_AUTO_TEST_CASE( VariantAwareEvaluation )
+{
+    PROPERTY_MANAGER::Instance().Rebuild();
+
+    BOARD brd;
+
+    FOOTPRINT fp( &brd );
+    fp.SetValue( wxT( "BaseVal" ) );
+
+    FOOTPRINT_VARIANT* variant = fp.AddVariant( wxT( "V1" ) );
+    variant->SetDNP( true );
+    variant->SetFieldValue( wxT( "Value" ), wxT( "VariantVal" ) );
+
+    brd.AddVariant( wxT( "V1" ) );
+    brd.SetCurrentVariant( wxT( "V1" ) );
+
+    testEvalExpr( wxT( "A.Do_not_Populate == 1" ), VAL( 1.0 ), false, &fp, &fp );
+    testEvalExpr( wxT( "A.getField('Value') == 'VariantVal'" ), VAL( 1.0 ), false, &fp, &fp );
+
+    // Without a current variant the base values apply.
+    brd.SetCurrentVariant( wxEmptyString );
+
+    testEvalExpr( wxT( "A.Do_not_Populate == 0" ), VAL( 1.0 ), false, &fp, &fp );
+    testEvalExpr( wxT( "A.getField('Value') == 'BaseVal'" ), VAL( 1.0 ), false, &fp, &fp );
+}
+
+
+// Reference resolves as a property with the fallback above, so the query normalizer
+// must leave it alone. getField() has no such fallback.
+BOOST_AUTO_TEST_CASE( FieldAliasNormalization )
+{
+    std::vector<PROPERTY_ROW_DATA> rows;
+
+    BOOST_CHECK_EQUAL( normalizeQueryFieldAliases( wxS( "A.Reference == 'R1'" ), rows ), wxS( "A.Reference == 'R1'" ) );
+
+    // A field with no property behind it needs the rewrite to resolve at all.
+    BOOST_CHECK_EQUAL( normalizeQueryFieldAliases( wxS( "A.Value == 'X'" ), rows ),
+                       wxS( "A.getField('Value') == 'X'" ) );
+
+    PROPERTY_ROW_DATA customField;
+    customField.propertyName = wxS( "My Field" );
+    customField.property = nullptr;
+    customField.matchMode = PROPERTY_MATCH_MODE::MATCHING;
+    customField.isMixed = false;
+
+    BOOST_CHECK_EQUAL( normalizeQueryFieldAliases( wxS( "A.My_Field == 'X'" ), { customField } ),
+                       wxS( "A.getField('My Field') == 'X'" ) );
+}
+
+
 BOOST_AUTO_TEST_CASE( ReceiverValidation )
 {
     expectCompileSuccess( wxT( "L == 'F.Cu'" ) );
@@ -530,6 +617,28 @@ BOOST_AUTO_TEST_CASE( ReceiverValidation )
     expectCompileError( wxT( "L.Width == 1mm" ) );
     expectCompileError( wxT( "AB.Width == A.Width" ) );
     expectCompileError( wxT( "AB.Parent.Reference == 'J1'" ) );
+}
+
+
+BOOST_AUTO_TEST_CASE( LayerReceiverLayerField )
+{
+    PCBEXPR_COMPILER compiler( new PCBEXPR_UNIT_RESOLVER() );
+    PCBEXPR_UCODE    ucode;
+    PCBEXPR_CONTEXT  preflight( NULL_CONSTRAINT, UNDEFINED_LAYER );
+
+    compiler.Compile( wxT( "L.Layer == '*.Paste'" ), &ucode, &preflight );
+    BOOST_REQUIRE( !compiler.IsErrorPending() );
+
+    BOARD           brd;
+    PCB_TRACK       track( &brd );
+    PCBEXPR_CONTEXT paste( NULL_CONSTRAINT, F_Paste );
+    PCBEXPR_CONTEXT copper( NULL_CONSTRAINT, F_Cu );
+
+    paste.SetItems( &track, &track );
+    copper.SetItems( &track, &track );
+
+    BOOST_CHECK_EQUAL( ucode.Run( &paste )->AsDouble(), 1.0 );
+    BOOST_CHECK_EQUAL( ucode.Run( &copper )->AsDouble(), 0.0 );
 }
 
 

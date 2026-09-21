@@ -547,9 +547,15 @@ wxString SCH_SHEET_PATH::PathHumanReadable( bool aUseShortRootName,
             loopStart = startIdx;
     }
 
+    SCH_SHEET_PATH parentPath;
+
+    for( size_t i = 0; i < loopStart && i < size(); ++i )
+        parentPath.push_back( at( i ) );
+
     for( unsigned i = loopStart; i < size(); i++ )
     {
-        wxString sheetName = at( i )->GetField( FIELD_T::SHEET_NAME )->GetShownText( false );
+        wxString sheetName = at( i )->GetField( FIELD_T::SHEET_NAME )->GetShownText( &parentPath, FOR_GUI );
+        parentPath.push_back( at( i ) );
 
         if( aEscapeSheetNames )
             sheetName = EscapeString( sheetName, CTX_NETNAME );
@@ -584,9 +590,11 @@ void SCH_SHEET_PATH::UpdateAllScreenReferences() const
             SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
 
             // GetRef() and GetUnitSelection() are O(1) via the symbol's instance path index.
-            symbol->GetField( FIELD_T::REFERENCE )->SetText( symbol->GetRef( this ) );
+            // Bypass SCH_FIELD::SetText so a display refresh does not invalidate connectivity
+            SCH_FIELD* reference = symbol->GetField( FIELD_T::REFERENCE );
+            reference->EDA_TEXT::SetText( symbol->GetRef( this ).Strip( wxString::both ) );
             symbol->SetUnit( symbol->GetUnitSelection( this ) );
-            LastScreen()->Update( item, false );
+            LastScreen()->UpdateDisplayBounds( item );
         }
         else if( item->Type() == SCH_GLOBAL_LABEL_T )
         {
@@ -602,7 +610,7 @@ void SCH_SHEET_PATH::UpdateAllScreenReferences() const
                     label->AutoplaceFields( LastScreen(), AUTOPLACE_AUTO );
 
                 intersheetRefs->SetVisible( label->Schematic()->Settings().m_IntersheetRefsShow );
-                LastScreen()->Update( intersheetRefs );
+                LastScreen()->UpdateDisplayBounds( intersheetRefs );
             }
         }
         else if( item->Type() == SCH_SHAPE_T )
@@ -929,11 +937,10 @@ void SCH_SHEET_PATH::CheckForMissingSymbolInstances( const wxString& aProjectNam
             if( !IsSharedPath() && ( LastScreen()->GetFileFormatVersionAtLoad() <= 20200310 ) )
             {
                 SCH_FIELD* refField = symbol->GetField( FIELD_T::REFERENCE );
-                symbolInstance.m_Reference = refField->GetShownText( this, true );
+                symbolInstance.m_Reference = refField->GetShownText( this, INTERNAL );
                 symbolInstance.m_Unit = symbol->GetUnit();
 
-                wxLogTrace( traceSchSheetPaths,
-                           "  Legacy format: Using reference '%s' from field, unit %d",
+                wxLogTrace( traceSchSheetPaths, "  Legacy format: Using reference '%s' from field, unit %d",
                            symbolInstance.m_Reference, symbolInstance.m_Unit );
             }
             else if( !symbol->GetInstances().empty() )
@@ -1349,6 +1356,9 @@ SCH_ITEM* SCH_SHEET_LIST::ResolveItem( const KIID& aID, SCH_SHEET_PATH* aPathOut
 
 SCH_ITEM* SCH_SHEET_PATH::ResolveItem( const KIID& aID ) const
 {
+    if( !LastScreen() )
+        return nullptr;
+
     for( SCH_ITEM* aItem : LastScreen()->Items() )
     {
         if( aItem->m_Uuid == aID )
