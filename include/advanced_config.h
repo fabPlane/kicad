@@ -532,6 +532,17 @@ public:
     bool m_IncrementalConnectivity;
 
     /**
+     * Use the schematic connectivity engine instead of CONNECTION_GRAPH.
+     *
+     * See @ref schematic_connectivity.
+     *
+     * Setting name: "ConnectivityEngine"
+     * Valid values: 0 or 1
+     * Default value: 1
+     */
+    bool m_ConnectivityEngine;
+
+    /**
      * The number of milliseconds to wait in a click before showing a disambiguation menu.
      *
      * Setting name: "DisambiguationTime"
@@ -667,6 +678,16 @@ public:
      * Default value: 1
      */
     bool m_EnableCacheFriendlyFracture;
+
+    /**
+     * Index fracture edges by y stripe instead of rescanning every earlier edge for each hole.
+     * Disable to fall back on the linear scan when bisecting a suspected fracture fault.
+     *
+     * Setting name: "EnableFractureEdgeIndex"
+     * Valid values: 0 or 1
+     * Default value: 1
+     */
+    bool m_EnableFractureEdgeIndex;
 
     /**
      * Refine each triangulation toward the constrained Delaunay triangulation with a

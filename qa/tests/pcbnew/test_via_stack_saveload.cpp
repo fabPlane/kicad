@@ -139,6 +139,29 @@ BOOST_AUTO_TEST_CASE( PropertiesAndMembersRoundTrip )
 }
 
 
+BOOST_AUTO_TEST_CASE( ViewLayersCoverTheWholeSpan )
+{
+    auto board = std::make_unique<BOARD>();
+    board->SetCopperLayerCount( 4 );
+    board->SetEnabledLayers( LSET::AllCuMask( 4 ) | LSET::AllTechMask() );
+
+    PCB_VIA_STACK* stack = new PCB_VIA_STACK( board.get(), F_Cu );
+    stack->SetStartLayer( F_Cu );
+    stack->SetEndLayer( In2_Cu );
+    board->Add( stack );
+
+    std::vector<int> layers = stack->ViewGetLayers();
+
+    for( PCB_LAYER_ID layer : { F_Cu, In1_Cu, In2_Cu } )
+    {
+        BOOST_CHECK_MESSAGE( alg::contains( layers, layer ),
+                             "span layer " << LSET::Name( layer ).ToStdString() << " is not registered" );
+    }
+
+    BOOST_CHECK( !alg::contains( layers, (int) B_Cu ) );
+}
+
+
 // A stacked stack materializes one coaxial microvia per adjacent copper pair, no traces.
 BOOST_AUTO_TEST_CASE( StackedGeometry )
 {
@@ -521,38 +544,36 @@ BOOST_AUTO_TEST_CASE( PendingStackExpansionMatcher )
     board->Add( new NETINFO_ITEM( board.get(), wxT( "sig" ), 1 ) );
     board->Add( new NETINFO_ITEM( board.get(), wxT( "other" ), 2 ) );
 
-    auto makeVia = [&]( PCB_LAYER_ID aTop, PCB_LAYER_ID aBottom, int aNet )
-    {
-        PCB_VIA* via = new PCB_VIA( board.get() );
-        via->SetViaType( VIATYPE::MICROVIA );
-        via->SetLayerPair( aTop, aBottom );
-        via->SetWidth( PADSTACK::ALL_LAYERS, pcbIUScale.mmToIU( 0.3 ) );
-        via->SetDrill( pcbIUScale.mmToIU( 0.15 ) );
-        via->SetNetCode( aNet );
-        board->Add( via );
-        return via;
-    };
-
     VIA_STACK_PRESET preset;
     preset.m_Name = wxT( "fanout" );
 
-    std::vector<PENDING_STACK_EXPANSION> pending = { { F_Cu, In2_Cu, 1, preset } };
+    VECTOR2I dropped( pcbIUScale.mmToIU( 10 ), pcbIUScale.mmToIU( 10 ) );
+
+    std::vector<PENDING_STACK_EXPANSION> pending = { { F_Cu, In2_Cu, 1, preset, dropped } };
     std::set<KIID>                       preRoute;
 
-    PCB_VIA* match = makeVia( F_Cu, In2_Cu, 1 );
+    PCB_VIA* match = makeMicrovia( board.get(), dropped, F_Cu, In2_Cu, 1 );
 
     BOOST_REQUIRE( MatchPendingStackExpansion( match, preRoute, pending ) );
     BOOST_CHECK_EQUAL( MatchPendingStackExpansion( match, preRoute, pending )->m_Name, wxT( "fanout" ) );
 
     // Routing upward records the span end to start, while a via always holds it top down.
-    std::vector<PENDING_STACK_EXPANSION> upward = { { In2_Cu, F_Cu, 1, preset } };
+    std::vector<PENDING_STACK_EXPANSION> upward = { { In2_Cu, F_Cu, 1, preset, dropped } };
     BOOST_CHECK( MatchPendingStackExpansion( match, preRoute, upward ) );
 
-    PCB_VIA* wrongNet = makeVia( F_Cu, In2_Cu, 2 );
+    PCB_VIA* wrongNet = makeMicrovia( board.get(), dropped, F_Cu, In2_Cu, 2 );
     BOOST_CHECK( MatchPendingStackExpansion( wrongNet, preRoute, pending ) == nullptr );
 
-    PCB_VIA* wrongSpan = makeVia( F_Cu, In1_Cu, 1 );
+    PCB_VIA* wrongSpan = makeMicrovia( board.get(), dropped, F_Cu, In1_Cu, 1 );
     BOOST_CHECK( MatchPendingStackExpansion( wrongSpan, preRoute, pending ) == nullptr );
+
+    VECTOR2I elsewhere( pcbIUScale.mmToIU( 20 ), pcbIUScale.mmToIU( 10 ) );
+    PCB_VIA* bystander = makeMicrovia( board.get(), elsewhere, F_Cu, In2_Cu, 1 );
+    BOOST_CHECK( MatchPendingStackExpansion( bystander, preRoute, pending ) == nullptr );
+
+    // A drop whose via the route has not placed yet claims nothing.
+    std::vector<PENDING_STACK_EXPANSION> armed = { { F_Cu, In2_Cu, 1, preset, std::nullopt } };
+    BOOST_CHECK( MatchPendingStackExpansion( match, preRoute, armed ) == nullptr );
 
     // A via that already existed is not one the route created.
     preRoute.insert( match->m_Uuid );
@@ -576,6 +597,34 @@ BOOST_AUTO_TEST_CASE( DuplicatePresetNamesAreDropped )
     BOOST_REQUIRE_EQUAL( bds.m_ViaStackPresets.size(), 2u );
     BOOST_CHECK_EQUAL( bds.m_ViaStackPresets[0].m_Name, wxS( "HDI" ) );
     BOOST_CHECK_EQUAL( bds.m_ViaStackPresets[1].m_Name, wxS( "Other" ) );
+}
+
+
+// A dimension outside the internal unit range is not a size we can honour. Zero hands the
+// stack to the board defaults, which is what a missing dimension already does.
+BOOST_AUTO_TEST_CASE( OutOfRangePresetDimensionsFallBackToDefaults )
+{
+    BOARD_DESIGN_SETTINGS bds( nullptr, "board.design_settings" );
+
+    nlohmann::json entries = nlohmann::json::array();
+
+    // The realistic way to get here is writing 0.3 mm in internal units.
+    entries.push_back( { { "name", "wrong unit" }, { "via_size", 300000.0 }, { "via_drill", 150000.0 } } );
+    entries.push_back( { { "name", "negative" }, { "via_size", -5000.0 }, { "via_drill", -5000.0 } } );
+    entries.push_back( { { "name", "sane" }, { "via_size", 0.3 }, { "via_drill", 0.15 } } );
+
+    bds.Set( "via_stack_presets", entries );
+    bds.Load();
+
+    BOOST_REQUIRE_EQUAL( bds.m_ViaStackPresets.size(), 3u );
+
+    BOOST_CHECK_EQUAL( bds.m_ViaStackPresets[0].m_ViaSize, 0 );
+    BOOST_CHECK_EQUAL( bds.m_ViaStackPresets[0].m_ViaDrill, 0 );
+    BOOST_CHECK_EQUAL( bds.m_ViaStackPresets[1].m_ViaSize, 0 );
+    BOOST_CHECK_EQUAL( bds.m_ViaStackPresets[1].m_ViaDrill, 0 );
+
+    BOOST_CHECK_EQUAL( bds.m_ViaStackPresets[2].m_ViaSize, pcbIUScale.mmToIU( 0.3 ) );
+    BOOST_CHECK_EQUAL( bds.m_ViaStackPresets[2].m_ViaDrill, pcbIUScale.mmToIU( 0.15 ) );
 }
 
 
@@ -673,6 +722,38 @@ BOOST_AUTO_TEST_CASE( CreateFromItemsRejectsMixedNets )
 
     BOOST_REQUIRE( stack );
     BOOST_CHECK_EQUAL( stack->GetNetCode(), 1 );
+}
+
+
+// A stack carries one size for every hop, so mixed vias must be rejected too.
+BOOST_AUTO_TEST_CASE( CreateFromItemsRejectsMixedDimensions )
+{
+    auto board = std::make_unique<BOARD>();
+    board->SetCopperLayerCount( 4 );
+    board->SetEnabledLayers( LSET::AllCuMask( 4 ) | LSET::AllTechMask() );
+
+    VECTOR2I pos( pcbIUScale.mmToIU( 5 ), pcbIUScale.mmToIU( 5 ) );
+
+    PCB_VIA* upper = makeMicrovia( board.get(), pos, F_Cu, In1_Cu );
+    PCB_VIA* lower = makeMicrovia( board.get(), pos, In1_Cu, In2_Cu );
+
+    std::vector<BOARD_ITEM*> items = { upper, lower };
+    wxString                 error;
+
+    lower->SetDrill( pcbIUScale.mmToIU( 0.10 ) );
+    BOOST_CHECK( PCB_VIA_STACK::CreateFromItems( items, board.get(), nullptr, &error ) == nullptr );
+    BOOST_CHECK( !error.IsEmpty() );
+
+    lower->SetDrill( upper->GetDrillValue() );
+    lower->SetWidth( PADSTACK::ALL_LAYERS, pcbIUScale.mmToIU( 0.25 ) );
+    BOOST_CHECK( PCB_VIA_STACK::CreateFromItems( items, board.get() ) == nullptr );
+
+    // Matching again, so the factory still builds one.
+    lower->SetWidth( PADSTACK::ALL_LAYERS, upper->GetWidth( PADSTACK::ALL_LAYERS ) );
+
+    std::unique_ptr<PCB_VIA_STACK> stack( PCB_VIA_STACK::CreateFromItems( items, board.get() ) );
+
+    BOOST_CHECK( stack );
 }
 
 
@@ -1689,7 +1770,7 @@ BOOST_AUTO_TEST_CASE( ExpansionLeavesPreRouteViasAlone )
 
     VIA_STACK_PRESET preset;
 
-    std::vector<PENDING_STACK_EXPANSION> pending = { { F_Cu, In2_Cu, net->GetNetCode(), preset } };
+    std::vector<PENDING_STACK_EXPANSION> pending = { { F_Cu, In2_Cu, net->GetNetCode(), preset, ROUTED_POS } };
 
     auto guarded = [&]( PCB_VIA* aVia ) -> const VIA_STACK_PRESET*
     {
@@ -1707,6 +1788,46 @@ BOOST_AUTO_TEST_CASE( ExpansionLeavesPreRouteViasAlone )
     BOOST_REQUIRE_MESSAGE( loose.size() == 1,
                            "Expected the pre-existing via to be left loose, found " << loose.size() );
     BOOST_CHECK_MESSAGE( loose.front() == PRE_ROUTE_POS, "A via that predates the route was swallowed into a stack" );
+}
+
+
+// The same route can leave an ordinary microvia on the drop's net and span. The pre-route
+// snapshot does not cover it, so only the spot the drop landed on tells them apart.
+BOOST_AUTO_TEST_CASE( ExpansionLeavesOtherViasFromTheSameRouteAlone )
+{
+    std::unique_ptr<BOARD> board = std::make_unique<BOARD>();
+
+    board->SetCopperLayerCount( 4 );
+    board->SetEnabledLayers( LSET::AllCuMask( 4 ) | LSET::AllTechMask() );
+
+    board->Add( new NETINFO_ITEM( board.get(), wxT( "SHARED" ), 1 ) );
+
+    VECTOR2I dropped( pcbIUScale.mmToIU( 10 ), pcbIUScale.mmToIU( 10 ) );
+    VECTOR2I bystander( pcbIUScale.mmToIU( 20 ), pcbIUScale.mmToIU( 10 ) );
+
+    makeMicrovia( board.get(), dropped, F_Cu, In2_Cu, 1 );
+    makeMicrovia( board.get(), bystander, F_Cu, In2_Cu, 1 );
+
+    VIA_STACK_PRESET preset;
+
+    std::vector<PENDING_STACK_EXPANSION> pending = { { F_Cu, In2_Cu, 1, preset, dropped } };
+    std::set<KIID>                       preRoute;
+
+    auto guarded = [&]( PCB_VIA* aVia ) -> const VIA_STACK_PRESET*
+    {
+        return MatchPendingStackExpansion( aVia, preRoute, pending );
+    };
+
+    BOOST_CHECK_EQUAL( PCB_VIA_STACK::ExpandMultiHopMicrovias( board.get(), nullptr, guarded ), 1 );
+
+    BOOST_REQUIRE_EQUAL( board->Generators().size(), 1u );
+    BOOST_CHECK_MESSAGE( board->Generators().front()->GetPosition() == dropped,
+                         "The stack was built at the wrong via" );
+
+    std::vector<VECTOR2I> loose = looseMicroviaPositions( board.get() );
+
+    BOOST_REQUIRE_EQUAL( loose.size(), 1u );
+    BOOST_CHECK_MESSAGE( loose.front() == bystander, "A via the drop did not arm was swallowed into a stack" );
 }
 
 

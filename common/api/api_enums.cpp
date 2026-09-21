@@ -25,6 +25,7 @@
 #include <api/common/types/base_types.pb.h>
 #include <api/common/types/embedded_files.pb.h>
 #include <api/common/types/enums.pb.h>
+#include <api/common/types/library_types.pb.h>
 #include <api/board/board_commands.pb.h>
 #include <api/board/board.pb.h>
 #include <api/board/board_rules.pb.h>
@@ -33,6 +34,8 @@
 #include <api/schematic/schematic_types.pb.h>
 
 #include <core/typeinfo.h>
+#include <libraries/library_manager.h>
+#include <libraries/library_table.h>
 #include <line_ending.h>
 #include <eda_shape.h>
 #include <font/text_attributes.h>
@@ -58,12 +61,14 @@ KICAD_T FromProtoEnum( types::KiCadObjectType aValue )
     case types::KiCadObjectType::KOT_PCB_SHAPE:             return PCB_SHAPE_T;
     case types::KiCadObjectType::KOT_PCB_BARCODE:           return PCB_BARCODE_T;
     case types::KiCadObjectType::KOT_PCB_REFERENCE_IMAGE:   return PCB_REFERENCE_IMAGE_T;
-    case types::KiCadObjectType::KOT_PCB_GRIDITEM:          return PCB_GRIDITEM_T;
+    case types::KiCadObjectType::KOT_PCB_GRIDITEM:          return PCB_GRID_ITEM_T;
     case types::KiCadObjectType::KOT_PCB_FIELD:             return PCB_FIELD_T;
     case types::KiCadObjectType::KOT_PCB_GENERATOR:         return PCB_GENERATOR_T;
     case types::KiCadObjectType::KOT_PCB_TEXT:              return PCB_TEXT_T;
     case types::KiCadObjectType::KOT_PCB_TEXTBOX:           return PCB_TEXTBOX_T;
     case types::KiCadObjectType::KOT_PCB_TABLE:             return PCB_TABLE_T;
+    case types::KiCadObjectType::KOT_PCB_DRILL_CHART:       return PCB_DRILL_CHART_T;
+    case types::KiCadObjectType::KOT_PCB_DRILL_MAP:         return PCB_DRILL_MAP_T;
     case types::KiCadObjectType::KOT_PCB_TABLECELL:         return PCB_TABLECELL_T;
     case types::KiCadObjectType::KOT_PCB_TRACE:             return PCB_TRACE_T;
     case types::KiCadObjectType::KOT_PCB_VIA:               return PCB_VIA_T;
@@ -123,12 +128,14 @@ types::KiCadObjectType ToProtoEnum( KICAD_T aValue )
     case PCB_SHAPE_T:            return types::KiCadObjectType::KOT_PCB_SHAPE;
     case PCB_BARCODE_T:          return types::KiCadObjectType::KOT_PCB_BARCODE;
     case PCB_REFERENCE_IMAGE_T:  return types::KiCadObjectType::KOT_PCB_REFERENCE_IMAGE;
-    case PCB_GRIDITEM_T:         return types::KiCadObjectType::KOT_PCB_GRIDITEM;
+    case PCB_GRID_ITEM_T:        return types::KiCadObjectType::KOT_PCB_GRIDITEM;
     case PCB_FIELD_T:            return types::KiCadObjectType::KOT_PCB_FIELD;
     case PCB_GENERATOR_T:        return types::KiCadObjectType::KOT_PCB_GENERATOR;
     case PCB_TEXT_T:             return types::KiCadObjectType::KOT_PCB_TEXT;
     case PCB_TEXTBOX_T:          return types::KiCadObjectType::KOT_PCB_TEXTBOX;
     case PCB_TABLE_T:            return types::KiCadObjectType::KOT_PCB_TABLE;
+    case PCB_DRILL_CHART_T:      return types::KiCadObjectType::KOT_PCB_DRILL_CHART;
+    case PCB_DRILL_MAP_T:        return types::KiCadObjectType::KOT_PCB_DRILL_MAP;
     case PCB_TABLECELL_T:        return types::KiCadObjectType::KOT_PCB_TABLECELL;
     case PCB_TRACE_T:            return types::KiCadObjectType::KOT_PCB_TRACE;
     case PCB_VIA_T:              return types::KiCadObjectType::KOT_PCB_VIA;
@@ -905,4 +912,102 @@ common::types::EmbeddedFileType ToProtoEnum( EMBEDDED_FILES::EMBEDDED_FILE::FILE
 
     wxCHECK_MSG( false, common::types::EFT_UNKNOWN,
                  "Unhandled case in ToProtoEnum<EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE>" );
+}
+
+
+template<> KICOMMON_API
+LIBRARY_TABLE_TYPE FromProtoEnum( types::LibraryType aType )
+{
+    switch( aType )
+    {
+    case types::LibraryType::LT_SYMBOL:       return LIBRARY_TABLE_TYPE::SYMBOL;
+    case types::LibraryType::LT_FOOTPRINT:    return LIBRARY_TABLE_TYPE::FOOTPRINT;
+    case types::LibraryType::LT_DESIGN_BLOCK: return LIBRARY_TABLE_TYPE::DESIGN_BLOCK;
+    default:                                  return LIBRARY_TABLE_TYPE::UNINITIALIZED;
+    }
+
+    wxCHECK_MSG( false, LIBRARY_TABLE_TYPE::UNINITIALIZED,
+                 "Unhandled case in ToProtoEnum<LibraryType>" );
+}
+
+
+template<> KICOMMON_API
+types::LibraryType ToProtoEnum( LIBRARY_TABLE_TYPE aType )
+{
+    switch( aType )
+    {
+    case LIBRARY_TABLE_TYPE::SYMBOL:       return types::LibraryType::LT_SYMBOL;
+    case LIBRARY_TABLE_TYPE::FOOTPRINT:    return types::LibraryType::LT_FOOTPRINT;
+    case LIBRARY_TABLE_TYPE::DESIGN_BLOCK: return types::LibraryType::LT_DESIGN_BLOCK;
+    default:                               return types::LibraryType::LT_UNKNOWN;
+    }
+
+    wxCHECK_MSG( false, common::types::LT_UNKNOWN,
+                 "Unhandled case in ToProtoEnum<LIBRARY_TABLE_TYPE>" );
+}
+
+
+template<> KICOMMON_API
+LIBRARY_TABLE_SCOPE FromProtoEnum( types::LibraryTableScope aScope )
+{
+    switch( aScope )
+    {
+    case types::LibraryTableScope::LTS_GLOBAL:  return LIBRARY_TABLE_SCOPE::GLOBAL;
+    case types::LibraryTableScope::LTS_PROJECT: return LIBRARY_TABLE_SCOPE::PROJECT;
+    case types::LibraryTableScope::LTS_BOTH:    return LIBRARY_TABLE_SCOPE::BOTH;
+    default:                                    return LIBRARY_TABLE_SCOPE::UNINITIALIZED;
+    }
+
+    wxCHECK_MSG( false, LIBRARY_TABLE_SCOPE::UNINITIALIZED,
+                 "Unhandled case in FromProtoEnum<LibraryTableScope>" );
+}
+
+
+template<> KICOMMON_API
+types::LibraryTableScope ToProtoEnum( LIBRARY_TABLE_SCOPE aScope )
+{
+    switch( aScope )
+    {
+    case LIBRARY_TABLE_SCOPE::GLOBAL:        return types::LibraryTableScope::LTS_GLOBAL;
+    case LIBRARY_TABLE_SCOPE::PROJECT:       return types::LibraryTableScope::LTS_PROJECT;
+    case LIBRARY_TABLE_SCOPE::BOTH:          return types::LibraryTableScope::LTS_BOTH;
+    case LIBRARY_TABLE_SCOPE::UNINITIALIZED: return types::LibraryTableScope::LTS_UNKNOWN;
+    default: break;
+    }
+
+    wxCHECK_MSG( false, common::types::LibraryTableScope::LTS_UNKNOWN,
+                 "Unhandled case in ToProtoEnum<LIBRARY_TABLE_SCOPE>" );
+}
+
+
+template<> KICOMMON_API
+LOAD_STATUS FromProtoEnum( types::LibraryLoadStatus aStatus )
+{
+    switch( aStatus )
+    {
+    case types::LibraryLoadStatus::LLS_UNKNOWN:
+    case types::LibraryLoadStatus::LLS_INVALID: return LOAD_STATUS::INVALID;
+    case types::LibraryLoadStatus::LLS_LOADING: return LOAD_STATUS::LOADING;
+    case types::LibraryLoadStatus::LLS_LOADED:  return LOAD_STATUS::LOADED;
+    case types::LibraryLoadStatus::LLS_ERROR:   return LOAD_STATUS::LOAD_ERROR;
+    default: break;
+    }
+
+    wxCHECK_MSG( false, LOAD_STATUS::INVALID, "Unhandled case in FromProtoEnum<LibraryLoadStatus>" );
+}
+
+
+template<> KICOMMON_API
+types::LibraryLoadStatus ToProtoEnum( LOAD_STATUS aStatus )
+{
+    switch( aStatus )
+    {
+    case LOAD_STATUS::INVALID:      return types::LibraryLoadStatus::LLS_INVALID;
+    case LOAD_STATUS::LOADING:      return types::LibraryLoadStatus::LLS_LOADING;
+    case LOAD_STATUS::LOADED:       return types::LibraryLoadStatus::LLS_LOADED;
+    case LOAD_STATUS::LOAD_ERROR:   return types::LibraryLoadStatus::LLS_ERROR;
+    default: break;
+    }
+
+    wxCHECK_MSG( false, types::LibraryLoadStatus::LLS_UNKNOWN, "Unhandled case in ToProtoEnum<LOAD_STATUS>" );
 }

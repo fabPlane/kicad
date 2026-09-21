@@ -34,7 +34,7 @@
 #include <padstack.h>
 #include <pcb_group.h>
 #include <pcb_generator.h>
-#include <pcb_griditem.h>
+#include <pcb_grid_item.h>
 #include <pcb_edit_frame.h>
 #include <spread_footprints.h>
 #include <tool/tool_manager.h>
@@ -255,19 +255,11 @@ int EDIT_TOOL::SwapPadNets( const TOOL_EVENT& aEvent )
         selectedPads.insert( pads[i] );
     }
 
-    // If all nets are the same, nothing to do
-    bool allSame = true;
-
-    for( size_t i = 1; i < padsCount; ++i )
-    {
-        if( originalNets[i] != originalNets[0] )
-        {
-            allSame = false;
-            break;
-        }
-    }
-
-    if( allSame )
+    if( std::ranges::all_of( originalNets,
+                             [&]( int net )
+                             {
+                                 return net == originalNets.front();
+                             } ) )
         return 0;
 
     // Desired new nets are a cyclic rotation of original nets (like Swap positions)
@@ -537,24 +529,11 @@ int EDIT_TOOL::SwapGateNets( const TOOL_EVENT& aEvent )
         }
     }
 
-    // If all unit nets match across positions, nothing to do
-    bool allSame = true;
-
-    for( size_t pi = 0; pi < pinCount && allSame; ++pi )
-    {
-        int refNet = unitNets[0][pi];
-
-        for( size_t ui = 1; ui < unitCount; ++ui )
-        {
-            if( unitNets[ui][pi] != refNet )
-            {
-                allSame = false;
-                break;
-            }
-        }
-    }
-
-    if( allSame )
+    if( std::ranges::all_of( unitNets,
+                             [&]( const auto& nets )
+                             {
+                                 return nets == unitNets.front();
+                             } ) )
     {
         frame()->ShowInfoBarError( _( "Gate swapping has no effect: all selected gates have identical nets." ) );
         return 0;
@@ -1078,7 +1057,7 @@ bool EDIT_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, BOARD_COMMIT* aCommit
     if( frameRotate )
     {
         prevFrameAngle = GridFrameAngleAt( *board, frameFp ? frameFp->GetPosition() : originalCursorPos,
-                                           PCB_GRIDITEM_ROLE::PLACEMENT );
+                                           PCB_GRID_ROLE::PLACEMENT );
     }
 
     auto applyMoveFrameOrientation =
@@ -1089,7 +1068,7 @@ bool EDIT_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, BOARD_COMMIT* aCommit
 
                 // m_cursor is the pick-up point dragged along with the selection.
                 VECTOR2I  pivot = frameFp ? frameFp->GetPosition() : m_cursor;
-                EDA_ANGLE newAngle = GridFrameAngleAt( *board, pivot, PCB_GRIDITEM_ROLE::PLACEMENT );
+                EDA_ANGLE newAngle = GridFrameAngleAt( *board, pivot, PCB_GRID_ROLE::PLACEMENT );
                 EDA_ANGLE delta = GridFrameRotationDelta( prevFrameAngle, newAngle, editFrame->GetRotationAngle() );
 
                 prevFrameAngle = newAngle;
@@ -1333,7 +1312,8 @@ bool EDIT_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, BOARD_COMMIT* aCommit
 
                         // Images and grid items are on non-cached layers and will not be updated automatically in
                         // the overlay, so explicitly tell the view they've moved.
-                        if( item->Type() == PCB_REFERENCE_IMAGE_T || item->Type() == PCB_GRIDITEM_T )
+                        if( item->Type() == PCB_REFERENCE_IMAGE_T || item->Type() == PCB_GRID_ITEM_T
+                            || item->Type() == PCB_DRILL_MAP_T )
                             view()->Update( item, KIGFX::GEOMETRY );
                     }
 
@@ -1632,6 +1612,7 @@ bool EDIT_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, BOARD_COMMIT* aCommit
                     originalPos = nextItem->GetPosition();
                     m_selectionTool->AddItemToSel( nextItem );
                     selection.SetReferencePoint( originalPos );
+
                     if( angleSnapMode != LEADER_MODE::DIRECT )
                         grid.SetSnapLineOrigin( selection.GetReferencePoint() );
 
@@ -1649,7 +1630,7 @@ bool EDIT_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, BOARD_COMMIT* aCommit
                     if( frameRotate )
                     {
                         prevFrameAngle = GridFrameAngleAt( *board, frameFp ? frameFp->GetPosition() : originalPos,
-                                                           PCB_GRIDITEM_ROLE::PLACEMENT );
+                                                           PCB_GRID_ROLE::PLACEMENT );
                     }
 
                     // Pick up new item
@@ -1667,7 +1648,7 @@ bool EDIT_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, BOARD_COMMIT* aCommit
 
             break; // finish
         }
-        else if( evt->IsDblClick( BUT_LEFT ) )
+        else if( evt->IsDblClick( BUT_LEFT ) || evt->IsAction( &ACTIONS::cursorDblClick ) )
         {
             // The first click will move the new item, so put it back
             if( moveIndividually )
@@ -1689,11 +1670,15 @@ bool EDIT_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, BOARD_COMMIT* aCommit
             else
                 m_toolMgr->RunSynchronousAction( ACTIONS::increment, aCommit, ACTIONS::INCREMENT { 1, 0 } );
         }
-        else if( ZONE_FILLER_TOOL::IsZoneFillAction( evt ) || evt->IsAction( &PCB_ACTIONS::moveExact )
-                 || evt->IsAction( &PCB_ACTIONS::moveWithReference ) || evt->IsAction( &PCB_ACTIONS::copyWithReference )
+        else if( ZONE_FILLER_TOOL::IsZoneFillAction( evt )
+                 || evt->IsAction( &PCB_ACTIONS::moveExact )
+                 || evt->IsAction( &PCB_ACTIONS::moveWithReference )
+                 || evt->IsAction( &PCB_ACTIONS::copyWithReference )
                  || evt->IsAction( &PCB_ACTIONS::positionRelative )
-                 || evt->IsAction( &PCB_ACTIONS::interactiveOffsetTool ) || evt->IsAction( &ACTIONS::find )
-                 || evt->IsAction( &ACTIONS::findNext ) || evt->IsAction( &ACTIONS::findPrevious )
+                 || evt->IsAction( &PCB_ACTIONS::interactiveOffsetTool )
+                 || evt->IsAction( &ACTIONS::find )
+                 || evt->IsAction( &ACTIONS::findNext )
+                 || evt->IsAction( &ACTIONS::findPrevious )
                  || evt->IsAction( &ACTIONS::redo ) )
         {
             wxBell();
@@ -1778,6 +1763,7 @@ bool EDIT_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, BOARD_COMMIT* aCommit
     m_toolMgr->RunAction( PCB_ACTIONS::hideLocalRatsnest );
 
     editFrame->GetCanvas()->SetCurrentCursor( KICURSOR::ARROW );
+
     m_inMoveWithReference = false;
     return !restore_state;
 }

@@ -234,8 +234,8 @@ int FOOTPRINT_EDITOR_CONTROL::NewFootprint( const TOOL_EVENT& aEvent )
         return 0;
 
     // Give the new footprint a resolvable identity so it opens in its own tab instead of
-    // overwriting the active one. The legacy single-board path leaves the nickname empty.
-    if( m_frame->GetTabsPanel() && !libraryName.IsEmpty() )
+    // overwriting the active one.
+    if( !libraryName.IsEmpty() )
         newFootprint->SetFPID( LIB_ID( libraryName, newFootprint->GetFPID().GetLibItemName() ) );
 
     canvas()->GetViewControls()->SetCrossHairCursorPosition( VECTOR2D( 0, 0 ), false );
@@ -265,19 +265,6 @@ int FOOTPRINT_EDITOR_CONTROL::CreateFootprint( const TOOL_EVENT& aEvent )
 {
     LIB_ID selected = m_frame->GetLibTree()->GetSelectedLibId();
 
-    if( m_frame->IsContentModified() )
-    {
-        if( !HandleUnsavedChanges( m_frame, _( "The current footprint has been modified.  "
-                                               "Save changes?" ),
-                                   [&]() -> bool
-                                   {
-                                       return m_frame->SaveFootprint( footprint() );
-                                   } ) )
-        {
-            return 0;
-        }
-    }
-
     if( KIWAY_PLAYER* frame = m_frame->Kiway().Player( FRAME_FOOTPRINT_WIZARD, true, m_frame ) )
     {
         FOOTPRINT_WIZARD_FRAME* wizard = static_cast<FOOTPRINT_WIZARD_FRAME*>( frame );
@@ -289,7 +276,7 @@ int FOOTPRINT_EDITOR_CONTROL::CreateFootprint( const TOOL_EVENT& aEvent )
 
             if( newFootprint )    // i.e. if create footprint command is OK
             {
-                m_frame->Clear_Pcb( false );
+                m_frame->BeginNewFootprint( selected.GetLibNickname() );
 
                 canvas()->GetViewControls()->SetCrossHairCursorPosition( VECTOR2D( 0, 0 ), false );
                 //  Add the new object to board
@@ -580,12 +567,8 @@ int FOOTPRINT_EDITOR_CONTROL::DeleteFootprint( const TOOL_EVENT& aEvent )
 
     if( frame->DeleteFootprintFromLibrary( fpID, true ) )
     {
-        // Close only the deleted footprint's tab, leaving the others open. Without a tab strip, fall
-        // back to clearing the shared board when the deleted footprint is the one on screen.
-        if( frame->GetTabsPanel() )
-            frame->CloseFootprintTab( fpID );
-        else if( fpID == frame->GetLoadedFPID() )
-            frame->Clear_Pcb( false );
+        // Close only the deleted footprint's tab, leaving the others open.
+        frame->CloseFootprintTab( fpID );
 
         frame->SyncLibraryTree( true );
     }
@@ -597,11 +580,6 @@ int FOOTPRINT_EDITOR_CONTROL::DeleteFootprint( const TOOL_EVENT& aEvent )
 int FOOTPRINT_EDITOR_CONTROL::ImportFootprint( const TOOL_EVENT& aEvent )
 {
     bool is_last_fp_from_brd = m_frame->IsCurrentFPFromBoard();
-
-    // The import opens in its own tab, leaving the open documents alone; only the legacy single-board
-    // path has to clear first
-    if( !m_frame->GetTabsPanel() && !m_frame->Clear_Pcb( true ) )
-        return -1;                  // this command is aborted
 
     getViewControls()->SetCrossHairCursorPosition( VECTOR2D( 0, 0 ), false );
 

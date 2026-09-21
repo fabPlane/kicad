@@ -386,6 +386,12 @@ bool PGM_BASE::InitPgm( bool aHeadless, bool aIsUnitTest )
     wxInitAllImageHandlers();
 #endif
 
+#ifndef KICAD_HEADLESS_API
+    // libpng warnings such as "iCCP: known incorrect sRGB profile" otherwise pop up for
+    // benign plugin and user images; load failures are still reported by the callers
+    wxImage::SetDefaultLoadFlags( wxImage::GetDefaultLoadFlags() & ~wxImage::Load_Verbose );
+#endif
+
 #if !wxCHECK_VERSION( 3, 3, 0 ) && !defined( KICAD_HEADLESS_API )
     // Without this the wxPropertyGridManager segfaults on Windows.
     // There is no property grid in the headless core.

@@ -31,8 +31,8 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <optional>
-#include <mutex>
 
 #include <board_connected_item.h>
 #include <base_units.h>
@@ -47,6 +47,11 @@ class PAD;
 class MSG_PANEL_ITEM;
 class SHAPE_POLY_SET;
 class SHAPE_ARC;
+
+namespace kiapi::board::types
+{
+class Via;
+}
 
 
 // Used for tracks and vias for algorithmic safety, not to enforce constraints
@@ -419,6 +424,10 @@ public:
     PADSTACK& Padstack()                          { return m_padStack; }
     void SetPadstack( const PADSTACK& aPadstack ) { m_padStack = aPadstack; }
 
+    // A micro, blind, or buried via with a Front/Inner/Back padstack definition is an odd beast as it might
+    // not exist on F_Cu or B_Cu.
+    bool IsGhostLayer( PCB_LAYER_ID aLayer ) const;
+
     BACKDRILL_MODE GetBackdrillMode() const { return m_padStack.GetBackdrillMode(); }
     void SetBackdrillMode( BACKDRILL_MODE aMode ) { m_padStack.SetBackdrillMode( aMode ); }
 
@@ -527,10 +536,14 @@ public:
     bool IsTented( PCB_LAYER_ID aLayer ) const override;
     int GetSolderMaskExpansion() const;
 
+    PCB_LAYER_ID GetPrincipalLayer() const;
+
     PCB_LAYER_ID GetLayer() const override;
     void SetLayer( PCB_LAYER_ID aLayer ) override;
 
     bool IsOnLayer( PCB_LAYER_ID aLayer ) const override;
+
+    bool IsOnCopperLayer() const override;
 
     virtual LSET GetLayerSet() const override;
 
@@ -836,7 +849,10 @@ public:
 
     void ClearZoneLayerOverrides();
 
-    const ZONE_LAYER_OVERRIDE& GetZoneLayerOverride( PCB_LAYER_ID aLayer ) const;
+    /**
+     * @return the override for \a aLayer, or ZLO_NONE if \a aLayer is not a copper layer.
+     */
+    ZONE_LAYER_OVERRIDE GetZoneLayerOverride( PCB_LAYER_ID aLayer ) const;
 
     void SetZoneLayerOverride( PCB_LAYER_ID aLayer, ZONE_LAYER_OVERRIDE aOverride );
 
@@ -848,6 +864,9 @@ public:
     void Serialize( google::protobuf::Any &aContainer ) const override;
     bool Deserialize( const google::protobuf::Any &aContainer ) override;
 
+    void Serialize( kiapi::board::types::Via& aVia ) const;
+    bool Deserialize( const kiapi::board::types::Via& aVia );
+
     wxString LayerMaskDescribe() const override;
 
 protected:
@@ -857,6 +876,8 @@ private:
     // Silence GCC warning about hiding the PCB_TRACK base method
     bool operator==( const PCB_TRACK& aOther ) const override;
 
+    bool sameZoneLayerOverrides( const PCB_VIA& aOther ) const;
+
 private:
     VIATYPE      m_viaType;                  ///< through, blind/buried or micro
 
@@ -864,6 +885,6 @@ private:
 
     bool         m_isFree;                   ///< "Free" vias don't get their nets auto-updated
 
-    mutable std::mutex                          m_zoneLayerOverridesMutex;
-    std::map<PCB_LAYER_ID, ZONE_LAYER_OVERRIDE> m_zoneLayerOverrides;
+    // These are used in zone filling, so use a fixed size to avoid undefined behavior
+    std::array<std::atomic<ZONE_LAYER_OVERRIDE>, MAX_CU_LAYERS> m_zoneLayerOverrides;
 };

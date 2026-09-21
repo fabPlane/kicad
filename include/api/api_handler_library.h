@@ -55,22 +55,22 @@ public:
 
     ~API_HANDLER_LIBRARY() override {}
 
-    static kiapi::common::commands::LibraryType ToProtoType( LIBRARY_TABLE_TYPE aType );
+    static kiapi::common::types::LibraryType ToProtoType( LIBRARY_TABLE_TYPE aType );
 
-    static LIBRARY_TABLE_TYPE FromProtoType( kiapi::common::commands::LibraryType aType );
+    static LIBRARY_TABLE_TYPE FromProtoType( kiapi::common::types::LibraryType aType );
 
     /// Pack one table row, including its resolved URI
     void PackRow( kiapi::common::commands::LibraryTableRow& aOut, const LIBRARY_TABLE_ROW& aRow ) const;
 
 protected:
     /// @return an AS_UNHANDLED status if aType is not the type this handler serves
-    std::optional<ApiResponseStatus> checkType( kiapi::common::commands::LibraryType aType ) const;
+    std::optional<ApiResponseStatus> checkType( kiapi::common::types::LibraryType aType ) const;
 
     /// @return the row named aNickname in the tables of the given scope, valid or not, or nullptr
     const LIBRARY_TABLE_ROW* findRow( const wxString& aNickname, LIBRARY_TABLE_SCOPE aScope ) const;
 
     /// @return the (already loaded) table of the given scope, or an error status
-    HANDLER_RESULT<LIBRARY_TABLE*> table( kiapi::common::commands::LibraryTableScope aScope ) const;
+    HANDLER_RESULT<LIBRARY_TABLE*> table( kiapi::common::types::LibraryTableScope aScope ) const;
 
     /// Save aTable and reload the manager's view of it; @return an error status on failure
     std::optional<ApiResponseStatus> saveTable( LIBRARY_TABLE* aTable, const std::string& aClientName );

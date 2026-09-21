@@ -135,9 +135,9 @@ public:
     wxString GetFieldText( const wxString& aFieldName, const SCH_SHEET_PATH* aPath = nullptr,
                            const wxString& aVariantName = wxEmptyString ) const;
 
-    wxString GetShownName( bool aAllowExtraText ) const
+    wxString GetShownName( RESOLUTION_CONTEXT aContext ) const
     {
-        return GetField( FIELD_T::SHEET_NAME )->GetShownText( aAllowExtraText );
+        return GetField( FIELD_T::SHEET_NAME )->GetShownText( aContext );
     }
     wxString GetName() const { return GetField( FIELD_T::SHEET_NAME )->GetText(); }
     void SetName( const wxString& aName ) { GetField( FIELD_T::SHEET_NAME )->SetText( aName ); }
@@ -586,6 +586,10 @@ public:
      */
     bool HasPageNumberChanges( const SCH_SHEET& aOther ) const;
 
+    bool HasHierarchyChanges( const SCH_SHEET& aOther ) const;
+
+    bool HasPinIdentityChanges( const SCH_SHEET& aOther ) const;
+
     /**
      * Compare page numbers of schematic sheets.
      *
@@ -650,6 +654,9 @@ protected:
 
     bool getInstance( SCH_SHEET_INSTANCE& aInstance, const KIID_PATH& aSheetPath,
                       bool aTestFromEnd = false ) const;
+
+    void setVariantAttribute( bool aEnable, const SCH_SHEET_PATH* aInstance, const wxString& aVariantName,
+                              bool SCH_SHEET::*aBase, bool SCH_SHEET_VARIANT::*aOverride );
 
     SCH_SHEET_INSTANCE* getInstance( const KIID_PATH& aPath );
     const SCH_SHEET_INSTANCE* getInstance( const KIID_PATH& aPath ) const;

@@ -120,8 +120,7 @@ PCB_VIA::PCB_VIA( BOARD_ITEM* aParent ) :
     // For now, vias are always circles
     m_padStack.SetShape( PAD_SHAPE::CIRCLE, PADSTACK::ALL_LAYERS );
 
-    for( PCB_LAYER_ID layer : LAYER_RANGE( F_Cu, B_Cu, BoardCopperLayerCount() ) )
-        m_zoneLayerOverrides[layer] = ZLO_NONE;
+    ClearZoneLayerOverrides();
 
     m_isFree = false;
 }
@@ -134,7 +133,12 @@ PCB_VIA::PCB_VIA( const PCB_VIA& aOther ) :
     PCB_VIA::operator=( aOther );
 
     SetUuidDirect( aOther.m_Uuid );
-    m_zoneLayerOverrides = aOther.m_zoneLayerOverrides;
+
+    for( size_t ii = 0; ii < m_zoneLayerOverrides.size(); ++ii )
+    {
+        m_zoneLayerOverrides[ii].store( aOther.m_zoneLayerOverrides[ii].load( std::memory_order_relaxed ),
+                                        std::memory_order_relaxed );
+    }
 }
 
 
@@ -338,7 +342,22 @@ bool PCB_VIA::operator==( const PCB_VIA& aOther ) const
             && m_layer == aOther.m_layer
             && m_padStack == aOther.m_padStack
             && m_viaType == aOther.m_viaType
-            && m_zoneLayerOverrides == aOther.m_zoneLayerOverrides;
+            && sameZoneLayerOverrides( aOther );
+}
+
+
+bool PCB_VIA::sameZoneLayerOverrides( const PCB_VIA& aOther ) const
+{
+    for( size_t ii = 0; ii < m_zoneLayerOverrides.size(); ++ii )
+    {
+        if( m_zoneLayerOverrides[ii].load( std::memory_order_relaxed )
+                != aOther.m_zoneLayerOverrides[ii].load( std::memory_order_relaxed ) )
+        {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 
@@ -366,7 +385,7 @@ double PCB_VIA::Similarity( const BOARD_ITEM& aOther ) const
     if( m_viaType != other.m_viaType )
         similarity *= 0.9;
 
-    if( m_zoneLayerOverrides != other.m_zoneLayerOverrides )
+    if( !sameZoneLayerOverrides( other ) )
         similarity *= 0.9;
 
     return similarity;
@@ -540,38 +559,48 @@ bool PCB_ARC::Deserialize( const google::protobuf::Any &aContainer )
 void PCB_VIA::Serialize( google::protobuf::Any &aContainer ) const
 {
     kiapi::board::types::Via via;
+    Serialize( via );
+    aContainer.PackFrom( via );
+}
 
-    via.mutable_id()->set_value( m_Uuid.AsStdString() );
-    via.mutable_position()->set_x_nm( GetPosition().x );
-    via.mutable_position()->set_y_nm( GetPosition().y );
+
+void PCB_VIA::Serialize( kiapi::board::types::Via& aVia ) const
+{
+    aVia.mutable_id()->set_value( m_Uuid.AsStdString() );
+    aVia.mutable_position()->set_x_nm( GetPosition().x );
+    aVia.mutable_position()->set_y_nm( GetPosition().y );
 
     PADSTACK padstack = Padstack();
 
-    padstack.Serialize( *via.mutable_pad_stack() );
+    padstack.Serialize( *aVia.mutable_pad_stack() );
 
     // PADSTACK::m_layerSet is not used by vias
-    via.mutable_pad_stack()->clear_layers();
-    kiapi::board::PackLayerSet( *via.mutable_pad_stack()->mutable_layers(), GetLayerSet() );
+    aVia.mutable_pad_stack()->clear_layers();
+    kiapi::board::PackLayerSet( *aVia.mutable_pad_stack()->mutable_layers(), GetLayerSet() );
 
-    via.set_type( ToProtoEnum<VIATYPE, kiapi::board::types::ViaType>( GetViaType() ) );
-    via.set_locked( IsLocked() ? kiapi::common::types::LockedState::LS_LOCKED
+    aVia.set_type( ToProtoEnum<VIATYPE, kiapi::board::types::ViaType>( GetViaType() ) );
+    aVia.set_locked( IsLocked() ? kiapi::common::types::LockedState::LS_LOCKED
                                : kiapi::common::types::LockedState::LS_UNLOCKED );
-    PackNet( via.mutable_net() );
+    PackNet( aVia.mutable_net() );
 
     if( const BOARD* board = GetBoard() )
-        via.mutable_parent()->set_value( board->m_Uuid.AsStdString() );
+        aVia.mutable_parent()->set_value( board->m_Uuid.AsStdString() );
 
-    kiapi::board::PackTeardropSettings( *via.mutable_teardrop(), GetTeardropParams() );
+    kiapi::board::PackTeardropSettings( *aVia.mutable_teardrop(), GetTeardropParams() );
 
-    via.set_is_free( GetIsFree() );
+    aVia.set_is_free( GetIsFree() );
 
     {
-        std::unique_lock lock( m_zoneLayerOverridesMutex );
-        kiapi::board::PackZoneLayerOverrides( via.mutable_zone_layer_overrides(), m_zoneLayerOverrides );
+        // Pack drops ZLO_NONE, so walking every copper layer emits only the overridden ones
+        std::map<PCB_LAYER_ID, ZONE_LAYER_OVERRIDE> overrides;
+
+        for( PCB_LAYER_ID layer : LAYER_RANGE( F_Cu, B_Cu, MAX_CU_LAYERS ) )
+            overrides[layer] = GetZoneLayerOverride( layer );
+
+        kiapi::board::PackZoneLayerOverrides( aVia.mutable_zone_layer_overrides(), overrides );
     }
 
-    kiapi::common::PackCustomProperties( via.mutable_custom_properties(), *this );
-    aContainer.PackFrom( via );
+    kiapi::common::PackCustomProperties( aVia.mutable_custom_properties(), *this );
 }
 
 
@@ -582,12 +611,18 @@ bool PCB_VIA::Deserialize( const google::protobuf::Any &aContainer )
     if( !aContainer.UnpackTo( &via ) )
         return false;
 
-    SetUuidDirect( KIID( via.id().value() ) );
-    SetStart( VECTOR2I( via.position().x_nm(), via.position().y_nm() ) );
+    return Deserialize( via );
+}
+
+
+bool PCB_VIA::Deserialize( const kiapi::board::types::Via& aVia )
+{
+    SetUuidDirect( KIID( aVia.id().value() ) );
+    SetStart( VECTOR2I( aVia.position().x_nm(), aVia.position().y_nm() ) );
     SetEnd( GetStart() );
 
     google::protobuf::Any padStackWrapper;
-    padStackWrapper.PackFrom( via.pad_stack() );
+    padStackWrapper.PackFrom( aVia.pad_stack() );
 
     if( !m_padStack.Deserialize( padStackWrapper ) )
         return false;
@@ -595,23 +630,26 @@ bool PCB_VIA::Deserialize( const google::protobuf::Any &aContainer )
     // PADSTACK::m_layerSet is not used by vias
     m_padStack.LayerSet().reset();
 
-    SetViaType( FromProtoEnum<VIATYPE>( via.type() ) );
-    UnpackNet( via.net() );
-    SetLocked( via.locked() == kiapi::common::types::LockedState::LS_LOCKED );
-    kiapi::common::UnpackCustomProperties( via.custom_properties(), *this );
+    SetViaType( FromProtoEnum<VIATYPE>( aVia.type() ) );
+    UnpackNet( aVia.net() );
+    SetLocked( aVia.locked() == kiapi::common::types::LockedState::LS_LOCKED );
+    kiapi::common::UnpackCustomProperties( aVia.custom_properties(), *this );
 
-    if( via.has_teardrop() )
-        kiapi::board::UnpackTeardropSettings( GetTeardropParams(), via.teardrop() );
+    if( aVia.has_teardrop() )
+        kiapi::board::UnpackTeardropSettings( GetTeardropParams(), aVia.teardrop() );
     else
         SetTeardropsEnabled( false );
 
-    SetIsFree( via.is_free() );
+    SetIsFree( aVia.is_free() );
 
     ClearZoneLayerOverrides();
 
     {
-        std::unique_lock lock( m_zoneLayerOverridesMutex );
-        kiapi::board::UnpackZoneLayerOverrides( m_zoneLayerOverrides, via.zone_layer_overrides() );
+        std::map<PCB_LAYER_ID, ZONE_LAYER_OVERRIDE> overrides;
+        kiapi::board::UnpackZoneLayerOverrides( overrides, aVia.zone_layer_overrides() );
+
+        for( const auto& [layer, value] : overrides )
+            SetZoneLayerOverride( layer, value );
     }
 
     return true;
@@ -1235,6 +1273,9 @@ const BOX2I PCB_VIA::GetBoundingBox() const
     Padstack().ForEachUniqueLayer(
             [&]( PCB_LAYER_ID aLayer )
             {
+                if( IsGhostLayer( aLayer ) )
+                    return;
+
                 diameter = std::max( diameter, GetWidth( aLayer ) );
             } );
 
@@ -1703,10 +1744,6 @@ bool PCB_TRACK::IsOnLayer( PCB_LAYER_ID aLayer ) const
 
 bool PCB_VIA::IsOnLayer( PCB_LAYER_ID aLayer ) const
 {
-#if 0
-    // Nice and simple, but raises its ugly head in performance profiles....
-    return GetLayerSet().test( aLayer );
-#endif
     if( IsCopperLayer( aLayer ) &&
         LAYER_RANGE::Contains( Padstack().Drill().start, Padstack().Drill().end, aLayer ) )
     {
@@ -1721,6 +1758,12 @@ bool PCB_VIA::IsOnLayer( PCB_LAYER_ID aLayer ) const
         return Padstack().Drill().end == B_Cu && !IsTented( B_Mask );
 
     return false;
+}
+
+
+bool PCB_VIA::IsOnCopperLayer() const
+{
+    return true;
 }
 
 
@@ -2163,6 +2206,40 @@ bool PCB_VIA::IsBuriedVia() const
 }
 
 
+bool PCB_VIA::IsGhostLayer( PCB_LAYER_ID aLayer ) const
+{
+    if( ( m_viaType == VIATYPE::MICROVIA || m_viaType == VIATYPE::BLIND || m_viaType == VIATYPE::BURIED )
+            && m_padStack.Mode() == PADSTACK::MODE::FRONT_INNER_BACK )
+    {
+        switch( aLayer )
+        {
+        case F_Cu:
+            if( Padstack().Drill().start != F_Cu )
+                return true;
+
+            break;
+
+        case B_Cu:
+            if( Padstack().Drill().end !=  B_Cu )
+                return true;
+
+            break;
+
+        case PADSTACK::INNER_LAYERS:
+            if( GetBoard() && GetBoard()->GetCopperLayerCount() == 2 )
+                return true;
+
+            break;
+
+        default:
+            wxFAIL_MSG( wxT( "Unsupported layer for FRONT_INNER_BACK" ) );
+        }
+    }
+
+    return false;
+}
+
+
 bool PCB_VIA::FlashLayer( const LSET& aLayers ) const
 {
     for( PCB_LAYER_ID layer : aLayers )
@@ -2228,27 +2305,36 @@ bool PCB_VIA::FlashLayer( int aLayer ) const
 }
 
 
-void PCB_VIA::ClearZoneLayerOverrides()
+// IsCopperLayer() accepts any even id below PCB_LAYER_ID_COUNT, but only F_Cu..In30_Cu carry a
+// distinct ordinal.  Anything above aliases B_Cu or indexes past the override array
+static bool hasLayerOrdinal( PCB_LAYER_ID aLayer )
 {
-    std::unique_lock<std::mutex> cacheLock( m_zoneLayerOverridesMutex );
-
-    for( PCB_LAYER_ID layer : LAYER_RANGE( F_Cu, B_Cu, BoardCopperLayerCount() ) )
-        m_zoneLayerOverrides[layer] = ZLO_NONE;
+    return IsCopperLayer( aLayer ) && aLayer <= In30_Cu;
 }
 
 
-const ZONE_LAYER_OVERRIDE& PCB_VIA::GetZoneLayerOverride( PCB_LAYER_ID aLayer ) const
+void PCB_VIA::ClearZoneLayerOverrides()
 {
-    static const ZONE_LAYER_OVERRIDE defaultOverride = ZLO_NONE;
-    auto it = m_zoneLayerOverrides.find( aLayer );
-    return it != m_zoneLayerOverrides.end() ? it->second : defaultOverride;
+    for( std::atomic<ZONE_LAYER_OVERRIDE>& entry : m_zoneLayerOverrides )
+        entry.store( ZLO_NONE, std::memory_order_relaxed );
+}
+
+
+ZONE_LAYER_OVERRIDE PCB_VIA::GetZoneLayerOverride( PCB_LAYER_ID aLayer ) const
+{
+    if( !hasLayerOrdinal( aLayer ) )
+        return ZLO_NONE;
+
+    return m_zoneLayerOverrides[CopperLayerToOrdinal( aLayer )].load( std::memory_order_relaxed );
 }
 
 
 void PCB_VIA::SetZoneLayerOverride( PCB_LAYER_ID aLayer, ZONE_LAYER_OVERRIDE aOverride )
 {
-    std::unique_lock<std::mutex> cacheLock( m_zoneLayerOverridesMutex );
-    m_zoneLayerOverrides[aLayer] = aOverride;
+    if( !hasLayerOrdinal( aLayer ) )
+        return;
+
+    m_zoneLayerOverrides[CopperLayerToOrdinal( aLayer )].store( aOverride, std::memory_order_relaxed );
 }
 
 
@@ -2377,9 +2463,17 @@ const BOX2I PCB_TRACK::ViewBBox() const
     BOX2I bbox = GetBoundingBox();
 
     if( const BOARD* board = GetBoard() )
+    {
         bbox.Inflate( 2 * board->GetDesignSettings().GetBiggestClearanceValue() );
+
+        // Only a via drills, so a plain segment would just be given an oversized box
+        if( HasHole() )
+            bbox = board->ExpandBoundingBoxForDrillSymbols( bbox );
+    }
     else
+    {
         bbox.Inflate( GetWidth() );     // Add a bit extra for safety
+    }
 
     return bbox;
 }
@@ -2390,6 +2484,14 @@ std::vector<int> PCB_VIA::ViewGetLayers() const
     LAYER_RANGE layers( Padstack().Drill().start, Padstack().Drill().end, MAX_CU_LAYERS );
     std::vector<int> ret_layers{ LAYER_VIA_HOLES, LAYER_VIA_HOLEWALLS, LAYER_VIA_NETNAMES };
     ret_layers.reserve( MAX_CU_LAYERS + 6 );
+
+    // A drill map on a layer asks the holes to draw their symbols there, so the symbols stay
+    // in the view index and one hole edit repaints one hole
+    if( const BOARD* drillBoard = GetBoard() )
+    {
+        for( PCB_LAYER_ID mapLayer : drillBoard->DrillSymbolLayers().Seq() )
+            ret_layers.push_back( DRILL_SYMBOL_LAYER_FOR( mapLayer ) );
+    }
 
     // TODO(JE) Rendering order issue
 #if 0
@@ -2436,6 +2538,14 @@ double PCB_VIA::ViewGetLOD( int aLayer, const KIGFX::VIEW* aView ) const
     PCB_PAINTER*         painter = static_cast<PCB_PAINTER*>( aView->GetPainter() );
     PCB_RENDER_SETTINGS* renderSettings = painter->GetSettings();
     const BOARD*         board = GetBoard();
+
+    // Reviewing a drill drawing with vias hidden is normal, so the symbols answer to the
+    // map's own layer rather than to the vias meta control
+    if( IsDrillSymbolLayer( aLayer ) )
+    {
+        return aView->IsLayerVisibleCached( aLayer - LAYER_DRILL_SYMBOL_START ) ? LOD_SHOW
+                                                                                : LOD_HIDE;
+    }
 
     // Meta control for hiding all vias
     if( !aView->IsLayerVisibleCached( LAYER_VIAS ) )
@@ -2672,6 +2782,9 @@ void PCB_VIA::GetMsgPanelInfo( EDA_DRAW_FRAME* aFrame, std::vector<MSG_PANEL_ITE
     m_padStack.ForEachUniqueLayer(
             [&]( PCB_LAYER_ID aLayer )
             {
+                if( IsGhostLayer( aLayer ) )
+                    return;
+
                 widths.insert( GetWidth( aLayer ) );
             } );
 
@@ -2788,6 +2901,9 @@ bool PCB_VIA::HitTest( const VECTOR2I& aPosition, int aAccuracy ) const
                 if( hit )
                     return;
 
+                if( IsGhostLayer( aLayer ) )
+                    return;
+
                 int max_dist = aAccuracy + ( GetWidth( aLayer ) / 2 );
 
                 // rel_pos is aPosition relative to m_Start (or the center of the via)
@@ -2843,6 +2959,9 @@ bool PCB_VIA::HitTest( const BOX2I& aRect, bool aContained, int aAccuracy ) cons
             [&]( PCB_LAYER_ID aLayer )
             {
                 if( hit )
+                    return;
+
+                if( IsGhostLayer( aLayer ) )
                     return;
 
                 BOX2I box( GetStart() );
@@ -3003,6 +3122,9 @@ std::shared_ptr<SHAPE> PCB_VIA::GetEffectiveShape( PCB_LAYER_ID aLayer, FLASHING
             Padstack().ForEachUniqueLayer(
                     [&]( PCB_LAYER_ID layer )
                     {
+                        if( IsGhostLayer( layer ) )
+                            return;
+
                         diameter = std::max( diameter, GetWidth( layer ) );
                     } );
         }
@@ -3128,6 +3250,28 @@ static struct TRACK_VIA_DESC
                 .Map( FILLING_MODE::NOT_FILLED, _HKI( "Not filled" ) );
 
         // clang-format on: the suggestion is less readable
+
+        // Pad and via registration can run in either order across translation units.
+        ENUM_MAP<PAD_DRILL_POST_MACHINING_MODE>& pmMap = ENUM_MAP<PAD_DRILL_POST_MACHINING_MODE>::Instance();
+
+        if( pmMap.Choices().GetCount() == 0 )
+        {
+            pmMap.Undefined( PAD_DRILL_POST_MACHINING_MODE::UNKNOWN )
+                .Map( PAD_DRILL_POST_MACHINING_MODE::NOT_POST_MACHINED, _HKI( "Not post-machined" ) )
+                .Map( PAD_DRILL_POST_MACHINING_MODE::COUNTERBORE,       _HKI( "Counterbore" ) )
+                .Map( PAD_DRILL_POST_MACHINING_MODE::COUNTERSINK,       _HKI( "Countersink" ) );
+        }
+
+        ENUM_MAP<BACKDRILL_MODE>& bdMap = ENUM_MAP<BACKDRILL_MODE>::Instance();
+
+        if( bdMap.Choices().GetCount() == 0 )
+        {
+            bdMap.Undefined( BACKDRILL_MODE::NO_BACKDRILL )
+                .Map( BACKDRILL_MODE::NO_BACKDRILL,     _HKI( "No backdrill" ) )
+                .Map( BACKDRILL_MODE::BACKDRILL_BOTTOM, _HKI( "Backdrill bottom" ) )
+                .Map( BACKDRILL_MODE::BACKDRILL_TOP,    _HKI( "Backdrill top" ) )
+                .Map( BACKDRILL_MODE::BACKDRILL_BOTH,   _HKI( "Backdrill both" ) );
+        }
 
         ENUM_MAP<PCB_LAYER_ID>& layerEnum = ENUM_MAP<PCB_LAYER_ID>::Instance();
 

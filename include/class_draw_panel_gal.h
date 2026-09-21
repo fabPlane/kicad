@@ -109,6 +109,18 @@ public:
     }
 
     /**
+     * Convert a stored canvas type setting into a backend that can actually be used.
+     *
+     * A settings file may have been written by hand or by another version of KiCad, so a value
+     * outside the supported range is bad data rather than a programming error.  It resolves to
+     * the accelerated canvas, as does the retired wxDC canvas (#GAL_TYPE_NONE).
+     *
+     * @param aStoredCanvasType is the raw COMMON_SETTINGS graphics.canvas_type value.
+     * @return a GAL type that #SwitchBackend() implements.
+     */
+    static GAL_TYPE ResolveStoredCanvasType( int aStoredCanvasType );
+
+    /**
      * Switch method of rendering graphics.
      *
      * @param aGalType is a type of rendering engine that you want to use.
@@ -364,6 +376,12 @@ protected:
 
     /// Set after an OpenGL recovery attempt to prevent infinite retry loops
     bool                     m_glRecoveryAttempted;
+
+    /// Consecutive frames dropped because the GL context could not be made current
+    int                      m_contextBindFailures;
+
+    /// Set when a size change could not be applied because the GL context was unavailable
+    bool                     m_pendingResize;
 
     /// Flag to indicate whether the panel should take focus at certain times (when moused over,
     /// and on various mouse/key events)

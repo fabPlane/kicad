@@ -378,7 +378,7 @@ void PCB_DIMENSION_BASE::Serialize( google::protobuf::Any &aContainer ) const
 
     // text.text above is the bare measurement; the rules that wrap it in prefix, units and suffix
     // are internal to KiCad, so hand out the string the plotter draws as well
-    dimension.set_resolved_text( GetShownText( true ).ToUTF8() );
+    dimension.set_resolved_text( GetShownText( FOR_CANVAS ).ToUTF8() );
 
     aContainer.PackFrom( dimension );
 }
@@ -979,7 +979,7 @@ const BOX2I PCB_DIMENSION_BASE::GetBoundingBox() const
 wxString PCB_DIMENSION_BASE::GetItemDescription( UNITS_PROVIDER* aUnitsProvider, bool aFull ) const
 {
     return wxString::Format( _( "Dimension '%s' on %s" ),
-                             aFull ? GetShownText( false ) : KIUI::EllipsizeMenuText( GetText() ),
+                             aFull ? GetShownText( FOR_GUI ) : KIUI::EllipsizeMenuText( GetText() ),
                              GetLayerName() );
 }
 

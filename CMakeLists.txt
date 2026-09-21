@@ -158,6 +158,17 @@ option( KICAD_UPDATE_CHECK
     "Build in update check"
     ON )
 
+option( KICAD_BUILD_NATIVE_MODEL_PREVIEW
+    "Build native operating-system 3D model preview components"
+    ON )
+
+if( KICAD_BUILD_NATIVE_MODEL_PREVIEW )
+    add_compile_definitions( KICAD_NATIVE_MODEL_PREVIEW )
+endif()
+
+set( KICAD_BUNDLE_ID "org.kicad.kicad"
+    CACHE STRING "Bundle identifier for the containing KiCad application" )
+
 cmake_dependent_option( KICAD_WAYLAND
     "Support Wayland features"
     ON "UNIX_NOT_APPLE"
@@ -942,6 +953,13 @@ if( NOT KICAD_HEADLESS_API )
     endif()
     include_directories( SYSTEM ${OCC_INCLUDE_DIR} )
 endif()
+if( OCC_VERSION_STRING VERSION_LESS 7.5.0 )
+    MESSAGE( FATAL_ERROR "================================================================\n"
+                         "OpenCASCADE version ${OCC_VERSION_STRING} was found.\n"
+                         "  KiCad requires a minimum version of 7.6.0\n"
+                         "================================================================\n")
+endif()
+include_directories( SYSTEM ${OCC_INCLUDE_DIR} )
 
 # Try to find Protobuf with modern approach first, fallback to legacy if needed
 set( _protobuf_found FALSE )
@@ -1065,6 +1083,12 @@ if( KICAD_WX_PORT )
     message( STATUS "Detected wxWidgets port: ${KICAD_WX_PORT}")
 else()
     message( FATAL_ERROR "Unable to detect wxWidgets port")
+endif()
+
+if( UNIX_NOT_APPLE AND KICAD_BUILD_NATIVE_MODEL_PREVIEW
+    AND NOT _wx_selected_config MATCHES "^gtk3" )
+    message( FATAL_ERROR
+        "Native 3D model picker previews require a wxWidgets GTK 3 build; detected '${_wx_selected_config}'" )
 endif()
 
 if( NOT MSVC )
@@ -1293,6 +1317,16 @@ if( APPLE )
 
     # As of CMP0082 (CMake 3.14), the install rules are run in order, so we can just
     # declare it last.
+
+    install( CODE "
+        cmake_policy( SET CMP0012 NEW )
+
+        if( ${KICAD_APPLE_MAKE_RELOCATEABLE_BUNDLE} )
+            message( STATUS \"Making the finished bundle relocateable...\" )
+            include( ${KICAD_CMAKE_MODULE_PATH}/InstallSteps/RefixupMacOS.cmake )
+            refix_kicad_bundle( ${OSX_BUNDLE_INSTALL_DIR} )
+        endif()
+    " COMPONENT Runtime )
 
     add_subdirectory( signing )
 endif()

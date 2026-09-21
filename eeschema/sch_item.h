@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <memory>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <map>
@@ -28,13 +30,14 @@
 #include <eda_item.h>
 #include <properties/property.h>
 #include <sch_sheet_path.h>
-#include <netclass.h>
 #include <stroke_params.h>
 #include <layer_ids.h>
-#include <sch_render_settings.h>
-#include <plotters/plotter.h>
 
+class NETCLASS;
+class PLOTTER;
+class SCH_RENDER_SETTINGS;
 class CONNECTION_GRAPH;
+struct CONNECTION_GRAPH_LIFETIME;
 class SCH_CONNECTION;
 class SCH_SHEET_PATH;
 class SCHEMATIC;
@@ -44,6 +47,11 @@ class LINE_READER;
 class SCH_EDIT_FRAME;
 class SCH_RULE_AREA;
 struct SCH_PLOT_OPTS;
+
+namespace KIGFX
+{
+class RENDER_SETTINGS;
+}
 
 namespace KIFONT
 {
@@ -145,7 +153,7 @@ public:
     static std::vector<DANGLING_END_ITEM>::iterator
     get_lower_type( std::vector<DANGLING_END_ITEM>& aItemListByType, const DANGLING_END_T& aType );
 
-    /** Both contain the same information */
+    // Both contain the same information
     static void sort_dangling_end_items( std::vector<DANGLING_END_ITEM>& aItemListByType,
                                          std::vector<DANGLING_END_ITEM>& aItemListByPos );
 };
@@ -288,6 +296,8 @@ public:
                      const wxString& aVariantName = wxEmptyString ) const;
 
     wxString ResolveText( const wxString& aText, const SCH_SHEET_PATH* aPath, int aDepth = 0 ) const;
+    wxString ResolveText( const wxString& aText, const SCH_SHEET_PATH* aPath, int aDepth,
+                          const wxString& aVariantName ) const;
 
     /**
      * Check if object is movable from the anchor point.
@@ -317,6 +327,8 @@ public:
      */
     SCHEMATIC* Schematic() const;
 
+    SCH_SCREEN* GetParentScreen() const;
+
     const SYMBOL* GetParentSymbol() const;
     SYMBOL* GetParentSymbol();
 
@@ -345,6 +357,12 @@ public:
      */
     std::vector<int> ViewGetLayers() const override;
 
+    /**
+     * The view bounds of text that shows a net name must match the drawing, so this reads
+     * connectivity inside a SCH_CONNECTIVITY::RENDER_SCOPE.
+     */
+    const BOX2I ViewBBox() const override;
+
     int GetMaxError() const;
 
     /**
@@ -354,7 +372,7 @@ public:
 
     int GetEffectivePenWidth( const SCH_RENDER_SETTINGS* aSettings ) const;
 
-    const wxString& GetDefaultFont( const RENDER_SETTINGS* aSettings ) const;
+    const wxString& GetDefaultFont( const KIGFX::RENDER_SETTINGS* aSettings ) const;
 
     const KIFONT::METRICS& GetFontMetrics() const;
 
@@ -556,9 +574,34 @@ public:
     SCH_CONNECTION* Connection( const SCH_SHEET_PATH* aSheet = nullptr ) const;
 
     /**
+     * Return the active connection name; absent for missing or stale published rows.
+     * aIgnoreSheet removes only the hierarchy prefix of the canonical name.
+     */
+    std::optional<wxString> GetConnectionName( const SCH_SHEET_PATH* aSheet = nullptr,
+                                              bool aLocal = false, bool aIgnoreSheet = false ) const;
+
+    // Missing or stale published connections are not buses.
+    bool HasBusConnection( const SCH_SHEET_PATH* aSheet = nullptr ) const;
+
+    /**
+     * Names of the bus members of this item's connection, empty when it does not have a bus.
+     *
+     * The published connectivity gives the leaf names, so a nested bus is flattened here.
+     */
+    std::vector<wxString> GetBusMemberNames( const SCH_SHEET_PATH* aSheet = nullptr ) const;
+
+    /**
+     * Match \a aSearchData against the connection of this item on \a aSheet.
+     *
+     * A bus matches when one of its members matches.  An item without a connection never matches,
+     * which is also what a search finds while connectivity is out of date.
+     */
+    bool MatchesNetName( const EDA_SEARCH_DATA& aSearchData, const SCH_SHEET_PATH* aSheet ) const;
+
+    /**
      * Retrieve the set of items connected to this item on the given sheet.
      */
-    const std::vector<SCH_ITEM*>& ConnectedItems( const SCH_SHEET_PATH& aPath );
+    const std::vector<SCH_ITEM*>& ConnectedItems( const SCH_SHEET_PATH& aPath ) const;
 
     /**
      * Add a connection link between this item and another.
@@ -586,7 +629,12 @@ public:
 
     bool IsConnectivityDirty() const { return m_connectivity_dirty; }
 
-    void SetConnectivityDirty( bool aDirty = true ) { m_connectivity_dirty = aDirty; }
+    /**
+     * Set the dirty flag.  Setting it also bumps the parent screen revision for a connectivity
+     * source, so an edit outside SCH_COMMIT can use this call.  Clearing it does not bump.  The
+     * bump follows the draw list check of invalidateConnectivity().
+     */
+    void SetConnectivityDirty( bool aDirty = true );
 
     /**
      * Check if \a aItem has connectivity changes against this object.
@@ -725,10 +773,15 @@ protected:
      */
     virtual void swapData( SCH_ITEM* aItem );
 
-    SCH_RENDER_SETTINGS* getRenderSettings( PLOTTER* aPlotter ) const
-    {
-        return static_cast<SCH_RENDER_SETTINGS*>( aPlotter->RenderSettings() );
-    }
+    /**
+     * Bump the parent screen's connectivity revision when this item, or the item owning it as a
+     * child, is on its draw list.  Call it from each setter that changes captured state.
+     *
+     * @param aChangedType is passed to SCH_SCREEN::BumpConnectivityRevision().
+     */
+    void invalidateConnectivity( KICAD_T aChangedType = TYPE_NOT_INIT );
+
+    SCH_RENDER_SETTINGS* getRenderSettings( PLOTTER* aPlotter ) const;
 
     struct cmp_items
     {
@@ -799,7 +852,13 @@ protected:
 
 private:
     friend class LIB_SYMBOL;
+    friend class CONNECTION_GRAPH;
+
+    /// Graph membership belongs to this item identity and must not propagate to clones.
+    void registerConnectivityOwner( const std::shared_ptr<CONNECTION_GRAPH_LIFETIME>& aOwner );
+
+    /// An item may be indexed by multiple graphs, each with an independent lifetime.
+    std::vector<std::weak_ptr<CONNECTION_GRAPH_LIFETIME>> m_connectivityOwners;
 };
 
 DECLARE_ENUM_TO_WXANY( SCH_LAYER_ID );
-

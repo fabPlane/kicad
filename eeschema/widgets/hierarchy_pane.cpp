@@ -19,10 +19,11 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <sch_render_settings.h>
 #include <bitmaps.h>
 #include <sch_edit_frame.h>
 #include <sch_commit.h>
-#include <connection_graph.h>
+#include <connectivity/conn_navigation.h>
 #include <schematic.h>
 #include <gal/color4d.h>
 #include <layer_ids.h>
@@ -129,7 +130,7 @@ void HIERARCHY_PANE::buildHierarchyTree( SCH_SHEET_PATH* aList, const wxTreeItem
         SCH_SHEET* sheet = static_cast<SCH_SHEET*>( aItem );
         aList->push_back( sheet );
 
-        wxString     sheetNameBase = sheet->GetField( FIELD_T::SHEET_NAME )->GetShownText( false );
+        wxString sheetNameBase = sheet->GetField( FIELD_T::SHEET_NAME )->GetShownText( FOR_GUI );
 
         // If the sheet name is empty, use the filename (without extension) as fallback
         if( sheetNameBase.IsEmpty() )
@@ -311,7 +312,7 @@ void HIERARCHY_PANE::UpdateHierarchyTree( bool aClear )
             m_list.clear();
             m_list.push_back( sheet );
 
-            wxString sheetNameBase = sheet->GetShownName( false );
+            wxString sheetNameBase = sheet->GetShownName( FOR_GUI );
 
             // If the sheet name is empty, use the filename (without extension) as fallback
             if( sheetNameBase.IsEmpty() && sheet->GetScreen() )
@@ -411,9 +412,8 @@ void HIERARCHY_PANE::UpdateLabelsHierarchyTree()
                     return;
 
                 SCH_SHEET* sheet = itemData->m_SheetPath.Last();
-                wxString   sheetNameBase = sheet->GetField( FIELD_T::SHEET_NAME )->GetShownText( false );
-                wxString   sheetName = formatPageString( sheetNameBase,
-                                                         itemData->m_SheetPath.GetPageNumber() );
+                wxString   sheetNameBase = sheet->GetField( FIELD_T::SHEET_NAME )->GetShownText( FOR_GUI );
+                wxString   sheetName = formatPageString( sheetNameBase, itemData->m_SheetPath.GetPageNumber() );
 
                 if( m_tree->GetItemText( id ) != sheetName )
                     m_tree->SetItemText( id, sheetName );
@@ -865,16 +865,8 @@ void HIERARCHY_PANE::UpdateNetHighlight( const wxString& aNetName )
 
     if( !aNetName.IsEmpty() && m_frame->Schematic().IsValid() )
     {
-        CONNECTION_GRAPH* graph = m_frame->Schematic().ConnectionGraph();
-
-        if( graph )
-        {
-            for( const CONNECTION_SUBGRAPH* sg : graph->GetAllSubgraphs( aNetName ) )
-            {
-                if( sg && sg->GetSheet().Last() )
-                    sheetsWithNet.insert( sg->GetSheet().Path().AsString() );
-            }
-        }
+        for( const KIID_PATH& path : SCH_CONNECTIVITY::NAVIGATION_QUERY( m_frame->Schematic() ).NetSheets( aNetName ) )
+            sheetsWithNet.insert( path.AsString() );
     }
 
     std::function<void( const wxTreeItemId& )> recurse =

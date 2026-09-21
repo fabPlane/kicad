@@ -18,12 +18,16 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <eda_shape.h>
+#include <tool/tool_manager.h>
 #include "sch_sheet_path.h"
 #include <limits>
 #include <memory>
 #include <set>
 #include <unordered_set>
 
+#include <advanced_config.h>
+#include <connectivity/conn_facade.h>
 #include <kiplatform/ui.h>
 #include <optional>
 #include <project_sch.h>
@@ -1581,8 +1585,12 @@ int SCH_DRAWING_TOOLS::SingleClickPlace( const TOOL_EVENT& aEvent )
                 }
             }
 
-            if( evt->IsDblClick( BUT_LEFT ) || type == SCH_SHEET_PIN_T )  // Finish tool.
+            if( evt->IsDblClick( BUT_LEFT )
+                || evt->IsAction( &ACTIONS::cursorDblClick )
+                || type == SCH_SHEET_PIN_T )  // Finish tool.
+            {
                 break;
+            }
         }
         else if( evt->IsClick( BUT_RIGHT ) )
         {
@@ -1712,15 +1720,24 @@ wxString SCH_DRAWING_TOOLS::findWireLabelDriverName( SCH_LINE* aWire )
 
     SCH_SHEET_PATH sheetPath = m_frame->GetCurrentSheet();
 
-    if( SCH_CONNECTION* wireConnection = aWire->Connection( &sheetPath ) )
+    const auto labelDriverName = []( const auto& aConnection ) -> wxString
     {
-        SCH_ITEM* wireDriver = wireConnection->Driver();
+        SCH_ITEM* driver = aConnection.Driver();
 
-        if( wireDriver && wireDriver->IsType( { SCH_LABEL_T, SCH_GLOBAL_LABEL_T } ) )
-            return wireConnection->LocalName();
+        if( driver && driver->IsType( { SCH_LABEL_T, SCH_GLOBAL_LABEL_T } ) )
+            return aConnection.LocalName();
+
+        return wxEmptyString;
+    };
+
+    if( ADVANCED_CFG::GetCfg().m_ConnectivityEngine )
+    {
+        const auto connection = m_frame->Schematic().Connectivity().Connection( aWire->m_Uuid, sheetPath.PathRef() );
+        return connection ? labelDriverName( *connection ) : wxString();
     }
 
-    return wxEmptyString;
+    const SCH_CONNECTION* wireConnection = aWire->Connection( &sheetPath );
+    return wireConnection ? labelDriverName( *wireConnection ) : wxString();
 }
 
 
@@ -2525,7 +2542,9 @@ int SCH_DRAWING_TOOLS::DrawRuleArea( const TOOL_EVENT& aEvent )
                 cleanup();
             }
         }
-        else if( started && ( evt->IsMotion() || evt->IsDrag( BUT_LEFT ) ) )
+        else if( started && (   evt->IsMotion()
+                             || evt->IsAction( &ACTIONS::refreshPreview )
+                             || evt->IsDrag( BUT_LEFT ) ) )
         {
             polyGeomMgr.SetCursorPosition( cursorPos );
         }
@@ -2744,7 +2763,8 @@ int SCH_DRAWING_TOOLS::DrawTable( const TOOL_EVENT& aEvent )
             m_view->AddToPreview( table->Clone() );
             m_frame->SetMsgPanel( table );
         }
-        else if( evt->IsDblClick( BUT_LEFT ) && !table )
+        else if( !table && (   evt->IsDblClick( BUT_LEFT )
+                            || evt->IsAction( &ACTIONS::cursorDblClick ) ) )
         {
             m_toolMgr->RunAction( SCH_ACTIONS::properties );
         }
@@ -3116,8 +3136,9 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
             evt->SetPassEvent();
             break;
         }
-        else if( sheet
-                    && ( evt->IsAction( &ACTIONS::refreshPreview ) || evt->IsMotion() || evt->IsDrag( BUT_LEFT ) ) )
+        else if( sheet && (   evt->IsAction( &ACTIONS::refreshPreview )
+                           || evt->IsMotion()
+                           || evt->IsDrag( BUT_LEFT ) ) )
         {
             sizeSheet( sheet, cursorPos );
             m_view->ClearPreview();
@@ -3193,7 +3214,8 @@ int SCH_DRAWING_TOOLS::doSyncSheetsPins( std::list<SCH_SHEET_PATH> sheetPaths, S
                             commit.Push( _( "Modify schematic item" ) );
                         }
 
-                        updateItem( aItem, true );
+                        // The push already updated the R-tree and republished connectivity
+                        updateItem( aItem, false );
                         m_frame->OnModify();
                     },
                     [&]( EDA_ITEM* aItem, SCH_SHEET_PATH aPath )

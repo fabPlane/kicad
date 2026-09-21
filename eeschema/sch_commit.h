@@ -27,6 +27,8 @@ class PICKED_ITEMS_LIST;
 class TOOL_MANAGER;
 class SCH_EDIT_FRAME;
 class SCH_BASE_FRAME;
+class SCH_ITEM;
+class SCH_SCREEN;
 class EDA_DRAW_FRAME;
 class TOOL_BASE;
 
@@ -36,7 +38,18 @@ class SCH_TOOL_BASE;
 #define SKIP_UNDO          0x0001
 #define APPEND_UNDO        0x0002
 #define SKIP_SET_DIRTY     0x0004
+#define SKIP_CONNECTIVITY  0x0008
+// With SKIP_UNDO (implicit headless), transfer ownership of removed items to the commit.
+#define DELETE_REMOVED_ITEMS 0x0010
 
+/**
+ * Commit for the schematic and symbol editors.
+ *
+ * Outside the symbol editor, Stage() bumps the connectivity revision of the staged item's screen,
+ * and the connectivity facade stops serving that screen until the next recalculation.  A commit
+ * that staged an item must therefore end in Push() or Revert().  A caller that drops such a commit
+ * on purpose must request the recalculation itself.
+ */
 class SCH_COMMIT : public COMMIT
 {
 public:
@@ -55,6 +68,9 @@ public:
                    BASE_SCREEN *aScreen = nullptr ) override;
 
     virtual EDA_ITEM* ResolveItem( KIID& aID ) override;
+
+    /** Retain the pre-edit state of an item already removed from its screen by cleanup. */
+    void RemovedForCleanup( SCH_ITEM* aItem, SCH_SCREEN* aScreen );
 
 private:
     EDA_ITEM* undoLevelItem( EDA_ITEM* aItem ) const override;

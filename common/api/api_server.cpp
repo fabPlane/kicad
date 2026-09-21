@@ -587,6 +587,13 @@ GetSupportedCommandsResponse KICAD_API_SERVER::SupportedCommands() const
 }
 
 
+void KICAD_API_SERVER::NotifyNetSettingsChanged()
+{
+    for( API_HANDLER* handler : m_handlers )
+        handler->onNetSettingsChanged();
+}
+
+
 std::string KICAD_API_SERVER::SocketPath() const
 {
     if( m_inProcess )
@@ -757,6 +764,7 @@ std::string KICAD_API_SERVER::DispatchBytes( const std::string& aRequestBytes )
 API_RESULT KICAD_API_SERVER::Dispatch( ApiRequest& aRequest )
 {
     API_RESULT result;
+    bool       notifyNetSettings = false;
 
     // A handler that throws must still produce a reply: the request/reply socket cannot receive
     // the next request until this one is answered, so an escaped exception would wedge the
@@ -768,6 +776,7 @@ API_RESULT KICAD_API_SERVER::Dispatch( ApiRequest& aRequest )
         for( size_t i = 0; i < m_handlers.size(); ++i )
         {
             result = m_handlers[i]->Handle( aRequest );
+            notifyNetSettings |= m_handlers[i]->clearNetSettingsNotification();
 
             if( result.has_value() )
                 break;
@@ -776,7 +785,10 @@ API_RESULT KICAD_API_SERVER::Dispatch( ApiRequest& aRequest )
         }
 
         if( !result.has_value() && result.error().status() == ApiStatusCode::AS_UNHANDLED )
+        {
             result = m_fallbackHandler->Handle( aRequest );
+            notifyNetSettings |= m_fallbackHandler->clearNetSettingsNotification();
+        }
     }
     catch( const IO_ERROR& ioe )
     {
@@ -792,6 +804,9 @@ API_RESULT KICAD_API_SERVER::Dispatch( ApiRequest& aRequest )
         e.set_error_message( fmt::format( "request failed: {}", exc.what() ) );
         result = tl::unexpected( e );
     }
+
+    if( notifyNetSettings )
+        NotifyNetSettingsChanged();
 
     return result;
 }

@@ -48,6 +48,8 @@
 #include <kiplatform/touchpad.h>
 #include <kiplatform/ui.h>
 
+#include <stdexcept>
+
 #include <core/profile.h>
 
 #include <wx/display.h>
@@ -83,6 +85,8 @@ EDA_DRAW_PANEL_GAL::EDA_DRAW_PANEL_GAL( wxWindow* aParentWindow, wxWindowID aWin
         m_eventDispatcher( nullptr ),
         m_lostFocus( false ),
         m_glRecoveryAttempted( false ),
+        m_contextBindFailures( 0 ),
+        m_pendingResize( false ),
         m_stealsFocus( true ),
         m_statusPopup( nullptr )
 {
@@ -246,6 +250,10 @@ bool EDA_DRAW_PANEL_GAL::recoverFromGalError( const std::exception& aError )
 }
 
 
+/// Frames to drop before giving up on the GL context and letting the backend recover
+static constexpr int MAX_CONTEXT_BIND_RETRIES = 2;
+
+
 bool EDA_DRAW_PANEL_GAL::DoRePaint( bool aAllowSkip )
 {
     if( !m_refreshMutex.try_lock() )
@@ -261,6 +269,10 @@ bool EDA_DRAW_PANEL_GAL::DoRePaint( bool aAllowSkip )
 
     if( m_drawing )
         return false;
+
+    // The context may have become current since the size change was deferred
+    if( m_pendingResize )
+        ResizeGal();
 
     m_lastRepaintStart = std::chrono::steady_clock::now();
 
@@ -360,6 +372,18 @@ bool EDA_DRAW_PANEL_GAL::DoRePaint( bool aAllowSkip )
             KIGFX::GAL_DRAWING_CONTEXT ctx( m_gal );
             cntCtx.Stop();
 
+            if( !ctx.IsDrawing() )
+            {
+                // A canvas being torn down never reaches here; DoRePaint returns above once
+                // the window stops being visible.  So repeated failures mean a live canvas
+                // whose context is gone for good, and retrying forever would leave it blank
+                if( ++m_contextBindFailures > MAX_CONTEXT_BIND_RETRIES )
+                    throw std::runtime_error( "Could not make the OpenGL context current" );
+
+                RequestRefresh();
+                return false;
+            }
+
             if( m_view->IsTargetDirty( KIGFX::TARGET_OVERLAY )
                 && !m_gal->HasTarget( KIGFX::TARGET_OVERLAY ) )
             {
@@ -418,6 +442,7 @@ bool EDA_DRAW_PANEL_GAL::DoRePaint( bool aAllowSkip )
 
         // OpenGL frame completed successfully, allow future recovery attempts
         m_glRecoveryAttempted = false;
+        m_contextBindFailures = 0;
     }
     catch( std::exception& err )
     {
@@ -472,7 +497,20 @@ void EDA_DRAW_PANEL_GAL::ResizeGal( bool aForce )
         return;
 
     KIGFX::GAL_CONTEXT_LOCKER locker( m_gal );
-    wxSize                    clientSize = GetClientSize();
+
+    // Resizing reallocates the framebuffer, which only exists in this canvas' own context
+    if( !m_gal->IsContextValid() )
+    {
+        // wx reports a given size once, so dropping it here would leave the canvas stuck at
+        // whatever size the GAL was built with until something else resizes the window
+        m_pendingResize = true;
+        RequestRefresh();
+        return;
+    }
+
+    m_pendingResize = false;
+
+    wxSize clientSize = GetClientSize();
 
     if( !aForce && ToVECTOR2I( clientSize ) == m_gal->GetScreenPixelSize() )
         return;
@@ -636,6 +674,17 @@ void EDA_DRAW_PANEL_GAL::SetTopLayer( int aLayer )
 }
 
 
+EDA_DRAW_PANEL_GAL::GAL_TYPE EDA_DRAW_PANEL_GAL::ResolveStoredCanvasType( int aStoredCanvasType )
+{
+    if( aStoredCanvasType == GAL_TYPE_CAIRO )
+        return GAL_TYPE_CAIRO;
+
+    // The retired wxDC canvas, and any value another KiCad version may have written, leave the
+    // user with the accelerated canvas rather than the do-nothing stub GAL
+    return GAL_TYPE_OPENGL;
+}
+
+
 bool EDA_DRAW_PANEL_GAL::SwitchBackend( GAL_TYPE aGalType )
 {
     // Do not do anything if the currently used GAL is correct
@@ -648,6 +697,9 @@ bool EDA_DRAW_PANEL_GAL::SwitchBackend( GAL_TYPE aGalType )
 
     // Prevent refreshing canvas during backend switch
     StopDrawing();
+
+    m_contextBindFailures = 0;
+    m_pendingResize = false;
 
     KIGFX::GAL* new_gal = nullptr;
 
@@ -676,6 +728,9 @@ bool EDA_DRAW_PANEL_GAL::SwitchBackend( GAL_TYPE aGalType )
                 {
                     // We're well and truly banjaxed if we get here without a fallback.
                     DisplayInfoMessage( m_parent, _( "Could not use OpenGL" ), errormsg );
+                    new_gal = new KIGFX::GAL( m_options );
+                    aGalType = GAL_TYPE_NONE;
+                    result = false;
                 }
             }
 

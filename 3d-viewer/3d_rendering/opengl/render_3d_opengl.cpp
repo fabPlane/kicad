@@ -24,6 +24,7 @@
 
 #include "plugins/3dapi/xv3d_types.h"
 #include "render_3d_opengl.h"
+#include "../orphaned_gl_objects.h"
 #include "opengl_utils.h"
 #include "common_ogl/ogl_utils.h"
 #include "../3d_placeholder_utils.h"
@@ -43,10 +44,6 @@
 #include <wx/log.h>
 #include <wx/utils.h>
 
-/**
- * Scale conversion from 3d model units to pcb units
- */
-#define UNITS3D_TO_UNITSPCB ( pcbIUScale.IU_PER_MM )
 
 RENDER_3D_OPENGL::RENDER_3D_OPENGL( EDA_3D_CANVAS* aCanvas, BOARD_ADAPTER& aAdapter, CAMERA& aCamera ) :
         RENDER_3D_BASE( aAdapter, aCamera ),
@@ -97,7 +94,7 @@ RENDER_3D_OPENGL::~RENDER_3D_OPENGL()
 
     m_placeholderModel.reset();
 
-    if( m_canvasInitialized )
+    if( m_canvasInitialized && !ORPHANED_GL_OBJECTS::Active() )
         glDeleteTextures( 1, &m_circleTexture );
 
     delete m_spheres_gizmo;
@@ -836,52 +833,7 @@ bool RENDER_3D_OPENGL::Redraw( bool aIsMoving )
             renderList->DrawAll();
         }
 
-        for( auto& [fp, renderListDef] : m_extrudedBodyLists )
-        {
-            const EXTRUDED_3D_BODY* body = fp->GetExtrudedBody();
-
-            if( !body )
-                continue;
-
-            if( !renderListDef )
-                continue;
-
-            std::shared_ptr<OPENGL_RENDER_LIST> renderList = renderListDef->MakeOrGet();
-
-            if( !renderList )
-                continue;
-
-            bool highlight = false;
-
-            if( m_boardAdapter.m_IsBoardView )
-            {
-                if( fp->IsSelected() )
-                    highlight = true;
-
-                if( extCfg.highlight_on_rollover && fp == m_currentRollOverItem )
-                    highlight = true;
-            }
-
-            KIGFX::COLOR4D c = body->m_color;
-
-            if( c == KIGFX::COLOR4D::UNSPECIFIED )
-                c = EXTRUDED_3D_BODY::GetDefaultColor( body->m_material );
-
-            SMATERIAL mat;
-
-            SFVEC3F                  diffuse( c.r, c.g, c.b );
-            EXTRUSION_MATERIAL_PROPS props = GetMaterialProps( body->m_material, diffuse );
-
-            mat.m_Diffuse = diffuse;
-            mat.m_Ambient = props.m_Ambient;
-            mat.m_Specular = props.m_Specular;
-            mat.m_Shininess = props.m_Shininess;
-            mat.m_Emissive = SFVEC3F( 0.0f );
-            mat.m_Transparency = 1.0f - c.a;
-
-            OglSetMaterial( mat, 1.0f, highlight, extSelColor );
-            renderList->DrawAll();
-        }
+        renderExtrudedBodies( false );
     }
 
     // Display board body
@@ -973,6 +925,13 @@ bool RENDER_3D_OPENGL::Redraw( bool aIsMoving )
 
     glDisable( GL_BLEND );
     OglResetTextureState();
+
+    glEnable( GL_BLEND );
+    glBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
+
+    renderExtrudedBodies( true );
+
+    glDisable( GL_BLEND );
 
     glDepthMask( GL_TRUE );
 
@@ -1076,7 +1035,7 @@ void RENDER_3D_OPENGL::freeAllLists()
         map.clear();                      \
     }
 
-    if( m_canvasInitialized && glIsList( m_grid ) )
+    if( m_canvasInitialized && !ORPHANED_GL_OBJECTS::Active() && glIsList( m_grid ) )
         glDeleteLists( m_grid, 1 );
 
     m_grid = 0;
@@ -1225,30 +1184,7 @@ void RENDER_3D_OPENGL::get3dModelsFromFootprint( std::list<MODELTORENDER> &aDstR
 {
     if( !aFootprint->Models().empty() )
     {
-        const double zpos = m_boardAdapter.GetFootprintZPos( aFootprint->IsFlipped() );
-
-        VECTOR2I pos = aFootprint->GetPosition();
-
-        glm::mat4 fpMatrix( 1.0f );
-
-        fpMatrix = glm::translate( fpMatrix, SFVEC3F( pos.x * m_boardAdapter.BiuTo3dUnits(),
-                                                      -pos.y * m_boardAdapter.BiuTo3dUnits(), zpos ) );
-
-        if( !aFootprint->GetOrientation().IsZero() )
-        {
-            fpMatrix = glm::rotate( fpMatrix, (float) aFootprint->GetOrientation().AsRadians(),
-                                    SFVEC3F( 0.0f, 0.0f, 1.0f ) );
-        }
-
-        if( aFootprint->IsFlipped() )
-        {
-            fpMatrix = glm::rotate( fpMatrix, glm::pi<float>(), SFVEC3F( 0.0f, 1.0f, 0.0f ) );
-            fpMatrix = glm::rotate( fpMatrix, glm::pi<float>(), SFVEC3F( 0.0f, 0.0f, 1.0f ) );
-        }
-
-        double modelunit_to_3d_units_factor = m_boardAdapter.BiuTo3dUnits() * UNITS3D_TO_UNITSPCB;
-
-        fpMatrix = glm::scale( fpMatrix, SFVEC3F( modelunit_to_3d_units_factor ) );
+        const glm::mat4 fpMatrix = m_boardAdapter.GetFootprintMatrix( *aFootprint );
 
         // The placeholder stands in for the whole footprint, so several missing models share one.
         bool placeholderAdded = false;
@@ -1305,12 +1241,7 @@ void RENDER_3D_OPENGL::get3dModelsFromFootprint( std::list<MODELTORENDER> &aDstR
                     }
                     else
                     {
-                        glm::mat4 mtx( 1.0f );
-                        mtx = glm::translate( mtx, offset );
-                        mtx = glm::rotate( mtx, glm::radians( -rotation.z ), { 0.0f, 0.0f, 1.0f } );
-                        mtx = glm::rotate( mtx, glm::radians( -rotation.y ), { 0.0f, 1.0f, 0.0f } );
-                        mtx = glm::rotate( mtx, glm::radians( -rotation.x ), { 1.0f, 0.0f, 0.0f } );
-                        mtx = glm::scale( mtx, scale );
+                        glm::mat4 mtx = CalcModelMatrix( offset, rotation, scale );
                         m_3dModelMatrixMap[ key ] = mtx;
 
                         modelworldMatrix *= mtx;
@@ -1326,30 +1257,7 @@ void RENDER_3D_OPENGL::get3dModelsFromFootprint( std::list<MODELTORENDER> &aDstR
     }
     else
     {
-        const double zpos = m_boardAdapter.GetFootprintZPos( aFootprint->IsFlipped() );
-
-        VECTOR2I pos = aFootprint->GetPosition();
-
-        glm::mat4 fpMatrix( 1.0f );
-
-        fpMatrix = glm::translate( fpMatrix, SFVEC3F( pos.x * m_boardAdapter.BiuTo3dUnits(),
-                                                      -pos.y * m_boardAdapter.BiuTo3dUnits(), zpos ) );
-
-        if( !aFootprint->GetOrientation().IsZero() )
-        {
-            fpMatrix = glm::rotate( fpMatrix, (float) aFootprint->GetOrientation().AsRadians(),
-                                    SFVEC3F( 0.0f, 0.0f, 1.0f ) );
-        }
-
-        if( aFootprint->IsFlipped() )
-        {
-            fpMatrix = glm::rotate( fpMatrix, glm::pi<float>(), SFVEC3F( 0.0f, 1.0f, 0.0f ) );
-            fpMatrix = glm::rotate( fpMatrix, glm::pi<float>(), SFVEC3F( 0.0f, 0.0f, 1.0f ) );
-        }
-
-        double modelunit_to_3d_units_factor = m_boardAdapter.BiuTo3dUnits() * UNITS3D_TO_UNITSPCB;
-
-        fpMatrix = glm::scale( fpMatrix, SFVEC3F( modelunit_to_3d_units_factor ) );
+        const glm::mat4 fpMatrix = m_boardAdapter.GetFootprintMatrix( *aFootprint );
 
         renderPlaceholderForFootprint( aDstRenderList, fpMatrix, aFootprint, aRenderTransparentOnly, aIsSelected,
                                        1.0f );
@@ -1441,6 +1349,63 @@ void RENDER_3D_OPENGL::renderOpaqueModels( const glm::mat4 &aCameraViewMatrix )
     }
 
     glPopMatrix();
+}
+
+
+void RENDER_3D_OPENGL::renderExtrudedBodies( bool aTransparentPass )
+{
+    EDA_3D_VIEWER_SETTINGS::RENDER_SETTINGS& extCfg = m_boardAdapter.m_Cfg->m_Render;
+    const SFVEC3F                            extSelColor = m_boardAdapter.GetColor( extCfg.opengl_selection_color );
+
+    for( auto& [fp, renderListDef] : m_extrudedBodyLists )
+    {
+        const EXTRUDED_3D_BODY* body = fp->GetExtrudedBody();
+
+        if( !body )
+            continue;
+
+        if( !renderListDef )
+            continue;
+
+        std::shared_ptr<OPENGL_RENDER_LIST> renderList = renderListDef->MakeOrGet();
+
+        if( !renderList )
+            continue;
+
+        bool highlight = false;
+
+        if( m_boardAdapter.m_IsBoardView )
+        {
+            if( fp->IsSelected() )
+                highlight = true;
+
+            if( extCfg.highlight_on_rollover && fp == m_currentRollOverItem )
+                highlight = true;
+        }
+
+        KIGFX::COLOR4D c = body->m_color;
+
+        if( c == KIGFX::COLOR4D::UNSPECIFIED )
+            c = EXTRUDED_3D_BODY::GetDefaultColor( body->m_material );
+
+        if( ( c.a < 1.0 ) != aTransparentPass )
+            continue;
+
+        SMATERIAL mat;
+
+        SFVEC3F                  diffuse( c.r, c.g, c.b );
+        EXTRUSION_MATERIAL_PROPS props = GetMaterialProps( body->m_material, diffuse );
+
+        mat.m_Diffuse = diffuse;
+        mat.m_Ambient = props.m_Ambient;
+        mat.m_Specular = props.m_Specular;
+        mat.m_Shininess = props.m_Shininess;
+        mat.m_Emissive = SFVEC3F( 0.0f );
+        mat.m_Transparency = 1.0f - c.a;
+
+        OglSetMaterial( mat, 1.0f, highlight, extSelColor );
+        renderList->DrawAll();
+    }
 }
 
 

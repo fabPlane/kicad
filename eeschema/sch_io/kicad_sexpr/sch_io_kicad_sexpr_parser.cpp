@@ -107,7 +107,7 @@ void SCH_IO_KICAD_SEXPR_PARSER::checkpoint()
                                                             / std::max( 1U, m_lineCount ) );
 
             if( !m_progressReporter->KeepRefreshing() )
-                THROW_IO_ERROR( _( "Open canceled by user." ) );
+                THROW_IO_CANCELLED();
 
             m_lastProgressLine = curLine;
         }
@@ -456,23 +456,34 @@ LIB_SYMBOL* SCH_IO_KICAD_SEXPR_PARSER::parseLibSymbol( LIB_SYMBOL_MAP& aSymbolLi
 
         case T_jumper_pin_groups:
         {
-            std::vector<std::set<wxString>>& groups = symbol->JumperPinGroups();
-            std::set<wxString>* currentGroup = nullptr;
+            JUMPER_GROUP_SET&  groups = symbol->JumperPinGroups();
+            std::set<wxString> names;
+            bool               inGroup = false;
 
-            for( token = NextTok(); currentGroup || token != T_RIGHT; token = NextTok() )
+            for( token = NextTok(); inGroup || token != T_RIGHT; token = NextTok() )
             {
                 switch( static_cast<int>( token ) )
                 {
                 case T_LEFT:
-                    currentGroup = &groups.emplace_back();
+                    if( inGroup )
+                        Expecting( "list of pin names" );
+
+                    inGroup = true;
                     break;
 
                 case DSN_STRING:
-                    currentGroup->insert( FromUTF8() );
+                    if( !inGroup )
+                        Expecting( "list of pin names" );
+
+                    names.insert( FromUTF8() );
                     break;
 
                 case T_RIGHT:
-                    currentGroup = nullptr;
+                    if( std::optional<JUMPER_GROUP> group = JUMPER_GROUP::Make( std::move( names ) ) )
+                        groups.Add( std::move( *group ) );
+
+                    names.clear();
+                    inGroup = false;
                     break;
 
                 default:
@@ -2919,12 +2930,8 @@ SCH_SHEET_PIN* SCH_IO_KICAD_SEXPR_PARSER::parseSchSheetPin( SCH_SHEET* aSheet )
 
     wxString name = FromUTF8();
 
-    if( name.IsEmpty() )
-    {
-        THROW_PARSE_ERROR( _( "Empty sheet pin name" ), CurSource(), CurLine(), CurLineNumber(),
-                           CurOffset() );
-    }
-
+    // An unnamed pin is junk, but rejecting it makes the whole schematic unopenable with no way
+    // out but hand-editing the file.  Load it so the user can rename or delete it
     auto sheetPin = std::make_unique<SCH_SHEET_PIN>( aSheet, VECTOR2I( 0, 0 ), name );
 
     token = NextTok();
@@ -6010,6 +6017,11 @@ void SCH_IO_KICAD_SEXPR_PARSER::parseBusAlias( SCH_SCREEN* aScreen )
     }
 
     NeedRIGHT();
+
+    const SCHEMATIC* schematic = aScreen->Schematic();
+
+    if( !m_appending && !m_sheetLoad && schematic && schematic->HasProjectBusAliases() )
+        return;
 
     aScreen->AddBusAlias( busAlias );
 }

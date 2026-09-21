@@ -56,11 +56,13 @@ const wxChar* const traceEnvVars = wxT( "KICAD_ENV_VARS" );
 const wxChar* const traceSchDragNetCollision = wxT( "KICAD_SCH_DRAG_NET_COLLISION" );
 const wxChar* const traceCrossProbeFlash = wxT( "CROSS_PROBE_FLASH" );
 const wxChar* const traceGalProfile = wxT( "KICAD_GAL_PROFILE" );
+const wxChar* const traceGalContext = wxT( "KICAD_GAL_CONTEXT" );
 const wxChar* const traceStackedPins = wxT( "KICAD_STACKED_PINS" );
 const wxChar* const traceLibWatch = wxT( "KICAD_LIB_WATCH" );
 const wxChar* const traceKiCad2Step = wxT( "KICAD2STEP" );
 const wxChar* const traceUiProfile = wxT( "KICAD_UI_PROFILE" );
 const wxChar* const traceGit = wxT( "KICAD_GIT" );
+const wxChar* const traceModelPreview = wxT( "KICAD_MODEL_PREVIEW" );
 const wxChar* const traceDiffMerge = wxT( "KICAD_DIFF_MERGE" );
 const wxChar* const traceEagleIo = wxT( "KICAD_EAGLE_IO" );
 const wxChar* const traceDiptraceIo = wxT( "KICAD_DIPTRACE_IO" );
@@ -79,6 +81,7 @@ const wxChar* const traceLibraries = wxT( "KICAD_LIBRARIES" );
 const wxChar* const traceSchMove = wxT( "KICAD_SCH_MOVE" );
 const wxChar* const traceSymbolInheritance = wxT( "KICAD_SYMBOL_INHERITANCE" );
 const wxChar* const traceSchNetChain = wxT( "KICAD_SCH_NETCHAIN" );
+const wxChar* const traceImportNetNames = wxT( "KICAD_IMPORT_NET_NAMES" );
 
 #ifdef KICAD_GAL_PROFILE
 LATENCY_PROBE latencyProbeZoomToRender( "zoom-to-render", 16 );

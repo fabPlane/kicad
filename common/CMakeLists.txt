@@ -210,6 +210,9 @@ set( KICOMMON_SRCS
     libraries/library_table.cpp
     libraries/library_table_parser.cpp
 
+    model_preview_manager.cpp
+    model_preview_manager_windows_classifier.cpp
+
     settings/app_settings.cpp
     settings/aui_settings.cpp
     settings/bom_settings.cpp
@@ -235,6 +238,7 @@ set( KICOMMON_SRCS
 
     text_eval/text_eval_wrapper.cpp
     text_eval/text_eval_parser.cpp
+    text_eval/text_eval_environment.cpp
     text_eval/text_eval_vcs.cpp
 
     # This is basically a settings object, but for the toolbar
@@ -311,6 +315,7 @@ set( KICOMMON_SRCS
     increment.cpp
     json_conversions.cpp
     json_schema_validator.cpp
+    jumper_group.cpp
     kidialog.cpp
     kiid.cpp
     ki_error.cpp
@@ -913,6 +918,7 @@ set( COMMON_PREVIEW_ITEMS_SRCS
     )
 
 set( PLOTTERS_CONTROL_SRCS
+    plotters/drill_markers.cpp
     plotters/plotter.cpp
     plotters/DXF_plotter.cpp
     plotters/GERBER_plotter.cpp
@@ -995,6 +1001,7 @@ set( COMMON_SRCS
     ${COMMON_IMPORT_GFX_SRCS}
     ${COMMON_TRANSLINE_CALCULATION_SRCS}
     track_width_calculations.cpp
+    pth_hole_size.cpp
     base_screen.cpp
     bin_mod.cpp
     bitmap_base.cpp
@@ -1127,6 +1134,7 @@ list( APPEND COMMON_SRCS
     api/api_jobs.cpp
     api/api_server_host.cpp
     project_template.cpp
+    api/api_handler_libraries.cpp
 )
 
 #
@@ -1353,6 +1361,11 @@ set( PCB_COMMON_SRCS
     ${CMAKE_SOURCE_DIR}/pcbnew/board_design_settings.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/teardrop/teardrop_parameters.cpp     #needed by board_design_settings.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/router/pns_meander.cpp               #needed by board_design_settings.cpp
+    ${CMAKE_SOURCE_DIR}/pcbnew/drill/drill_enumerator.cpp
+    ${CMAKE_SOURCE_DIR}/pcbnew/drill/drill_symbol_profile.cpp
+    ${CMAKE_SOURCE_DIR}/pcbnew/drill/drill_chart_model.cpp
+    ${CMAKE_SOURCE_DIR}/pcbnew/drill/drill_chart_template.cpp
+    ${CMAKE_SOURCE_DIR}/pcbnew/drill/drill_symbol_assigner.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/board.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/board_exchange_footprint.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/board_text_var_adapter.cpp
@@ -1374,6 +1387,7 @@ set( PCB_COMMON_SRCS
     ${CMAKE_SOURCE_DIR}/pcbnew/footprint_utils.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/footprint_library_adapter.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/fix_board_shape.cpp
+    ${CMAKE_SOURCE_DIR}/pcbnew/import_net_names.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/layer_utils.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/netinfo_item.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/netinfo_list.cpp
@@ -1384,9 +1398,11 @@ set( PCB_COMMON_SRCS
     ${CMAKE_SOURCE_DIR}/pcbnew/pcb_target.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/pcb_reference_image.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/pcb_field.cpp
+    ${CMAKE_SOURCE_DIR}/pcbnew/pcb_drill_chart.cpp
+    ${CMAKE_SOURCE_DIR}/pcbnew/pcb_drill_map.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/pcb_table.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/pcb_tablecell.cpp
-    ${CMAKE_SOURCE_DIR}/pcbnew/pcb_griditem.cpp
+    ${CMAKE_SOURCE_DIR}/pcbnew/pcb_grid_item.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/pcb_text.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/pcb_textbox.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/project_pcb.cpp

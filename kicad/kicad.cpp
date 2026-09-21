@@ -49,6 +49,9 @@
 #include <trace_helpers.h>
 #include <wildcards_and_files_ext.h>
 #include <confirm.h>
+#if defined( KICAD_NATIVE_MODEL_PREVIEW ) && defined( __WINDOWS__ )
+#include <model_preview_manager.h>
+#endif
 
 #include <git/git_backend.h>
 #include <git/libgit_backend.h>
@@ -278,6 +281,9 @@ bool PGM_KICAD::OnPgmInit()
         m_api_server = std::make_unique<KICAD_API_SERVER>();
         m_api_common_handler = std::make_unique<API_HANDLER_COMMON>();
         m_api_server->RegisterHandler( m_api_common_handler.get() );
+        m_api_libraries_handler = std::make_unique<API_HANDLER_LIBRARIES>(
+                LIBRARY_TABLE_TYPE::DESIGN_BLOCK );
+        m_api_server->RegisterHandler( m_api_libraries_handler.get() );
     }
 
     if( appType == FRAME_MERGETOOL )
@@ -463,6 +469,10 @@ bool PGM_KICAD::OnPgmInit()
     {
         frame->Show( true );
         frame->Raise();
+
+#if defined( KICAD_NATIVE_MODEL_PREVIEW ) && defined( __WINDOWS__ )
+        frame->CallAfter( [frame] { MaybeShowModelPreviewSetupPrompt( frame ); } );
+#endif
     }
 
     if( m_api_server )

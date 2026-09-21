@@ -96,7 +96,7 @@ bool HEADLESS_SYMBOL_CONTEXT::SaveSymbolCopy( const wxString& aLibraryName, cons
         copy->SetName( aSymbolName );
         copy->SetLibId( LIB_ID( aLibraryName, aSymbolName ) );
 
-        if( adapter->SaveSymbol( aLibraryName, copy.release(), aOverwrite ) != SYMBOL_LIBRARY_ADAPTER::SAVE_OK )
+        if( adapter->SaveSymbol( aLibraryName, std::move( copy ), aOverwrite ) != SYMBOL_LIBRARY_ADAPTER::SAVE_OK )
         {
             if( aError )
                 *aError = wxString::Format( wxS( "symbol '%s' already exists in library '%s'" ), aSymbolName,

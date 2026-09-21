@@ -29,6 +29,13 @@
 #include <wildcards_and_files_ext.h>
 
 using namespace kiapi::common::commands;
+using kiapi::common::types::LibraryType;
+using kiapi::common::types::LibraryTableScope;
+using kiapi::common::types::LT_SYMBOL;
+using kiapi::common::types::LT_FOOTPRINT;
+using kiapi::common::types::LT_DESIGN_BLOCK;
+using kiapi::common::types::LTS_GLOBAL;
+using kiapi::common::types::LTS_PROJECT;
 using kiapi::common::ApiStatusCode;
 
 
@@ -203,7 +210,7 @@ HANDLER_RESULT<SaveLibraryItemResponse> API_HANDLER_SYMBOL_LIBRARY::handleSaveLi
     // so it gets its own copy, as the symbol editor does
     try
     {
-        if( adapter()->SaveSymbol( nickname, new LIB_SYMBOL( *symbol ), true ) != SYMBOL_LIBRARY_ADAPTER::SAVE_OK )
+        if( adapter()->SaveSymbol( nickname, std::make_unique<LIB_SYMBOL>( *symbol ), true ) != SYMBOL_LIBRARY_ADAPTER::SAVE_OK )
             return tl::unexpected( badRequest( fmt::format( "'{}' was not saved", id.Format().c_str() ) ) );
     }
     catch( const IO_ERROR& ioe )

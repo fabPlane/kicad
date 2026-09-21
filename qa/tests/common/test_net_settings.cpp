@@ -754,4 +754,47 @@ BOOST_AUTO_TEST_CASE( RenameNetPathPrefixRetargetsAssignments )
 }
 
 
+BOOST_AUTO_TEST_CASE( SharedParserRejectsMalformedBoundsWithoutExpansion )
+{
+    BOOST_CHECK( !NET_SETTINGS::ParseBusVector( "D[..2]", nullptr, nullptr ) );
+    BOOST_CHECK( !NET_SETTINGS::ParseBusVector( "D[1..]", nullptr, nullptr ) );
+    BOOST_CHECK( !NET_SETTINGS::ParseBusVector( "D[1..2", nullptr, nullptr ) );
+    BOOST_CHECK( !NET_SETTINGS::ParseBusVector( "D[1..999999999999999999999999999999]", nullptr, nullptr ) );
+}
+
+
+BOOST_AUTO_TEST_CASE( SharedParserExpandsLargestVectorIndex )
+{
+    const long last = std::numeric_limits<long>::max();
+    const wxString text = wxString::Format( "D[%ld..%ld]", last - 1, last );
+    std::vector<wxString> members;
+    BOOST_REQUIRE( NET_SETTINGS::ParseBusVector( text, nullptr, &members ) );
+    BOOST_REQUIRE_EQUAL( members.size(), 2 );
+    BOOST_CHECK_EQUAL( members[1], wxString::Format( "D%ld", last ) );
+}
+
+
+BOOST_AUTO_TEST_CASE( SharedParserPreservesPadding )
+{
+    std::vector<wxString> members;
+    BOOST_REQUIRE( NET_SETTINGS::ParseBusVector( "D[01..03]", nullptr, &members ) );
+    BOOST_REQUIRE_EQUAL( members.size(), 3 );
+    BOOST_CHECK_EQUAL( members[0], wxString( "D01" ) );
+    BOOST_CHECK_EQUAL( members[2], wxString( "D03" ) );
+}
+
+
+BOOST_AUTO_TEST_CASE( SharedParserGroupPrefixBoundaryUsesSourceSpelling )
+{
+    size_t boundary = 99;
+    BOOST_REQUIRE( NET_SETTINGS::ParseBusGroup( "I^{2}C\\ BUS{A}", nullptr, nullptr, &boundary ) );
+    BOOST_CHECK_EQUAL( boundary, wxString( "I^{2}C\\ BUS" ).length() );
+    BOOST_REQUIRE( NET_SETTINGS::ParseBusGroup( "{A}", nullptr, nullptr, &boundary ) );
+    BOOST_CHECK_EQUAL( boundary, 0 );
+    boundary = 99;
+    BOOST_CHECK( !NET_SETTINGS::ParseBusGroup( "G{A", nullptr, nullptr, &boundary ) );
+    BOOST_CHECK_EQUAL( boundary, 99 );
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()

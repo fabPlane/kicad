@@ -75,6 +75,22 @@ public:
     API_RESULT Handle( ApiRequest& aMsg );
 
     /**
+     * Called on all registered handlers after project net settings (netclasses or netclass
+     * assignments) have been changed via the API.
+     */
+    virtual void onNetSettingsChanged() {}
+
+    void requestNetSettingsNotification() { m_notifyNetSettings = true; }
+
+    /// Returns true if the notification had been requested at the time of the call
+    bool clearNetSettingsNotification()
+    {
+        bool pending = m_notifyNetSettings;
+        m_notifyNetSettings = false;
+        return pending;
+    }
+
+    /**
      * Whether a command can be served when KiCad is running without an editor window.
      * Commands registered as GUI_ONLY are still dispatched in headless mode; they are expected to
      * answer AS_UNIMPLEMENTED themselves (see checkForHeadless in the editor handlers).  The mode
@@ -125,6 +141,7 @@ protected:
      */
     void publish( const kiapi::common::events::Event& aEvent );
 
+protected:
     /**
      * A handler for outer messages (envelopes) that will unpack to inner messages and call a
      * specific handler function.  @see registerHandler.
@@ -204,6 +221,7 @@ protected:
     /// Request type names in the order they were registered, for stable command listings
     std::vector<std::string> m_registrationOrder;
 
+    bool m_notifyNetSettings = false;
     static const wxString m_defaultCommitMessage;
 
     /// The server this handler is registered with (non-owning); see attachServer

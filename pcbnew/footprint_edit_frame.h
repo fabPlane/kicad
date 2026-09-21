@@ -43,6 +43,7 @@ class UNDO_REDO_CONTAINER;
 
 class API_HANDLER_FOOTPRINT;
 class API_HANDLER_COMMON;
+class API_HANDLER_LIBRARIES;
 
 namespace PCB { struct IFACE; }     // A KIFACE coded in pcbnew.cpp
 
@@ -101,7 +102,11 @@ public:
 
     bool IsCurrentFPFromBoard() const;
 
-    bool CanCloseFPFromBoard( bool doClose );
+    /**
+     * Prompt to save each dirty tab that meets the requirements.  Returns false if the user
+     * cancels so the window close can be vetoed.
+     */
+    bool HandleUnsavedChanges( bool aFromBoardOnly );
 
     FOOTPRINT_EDITOR_SETTINGS* GetSettings();
 
@@ -192,8 +197,8 @@ public:
     /**
      * Prepare the editor for a new footprint, returning false if the user cancels.
      *
-     * With tabs and a target library the new footprint opens in its own tab and the other tabs are
-     * left intact. Otherwise it falls back to the legacy single-board clear.
+     * With a target library the new footprint opens in its own tab and the other tabs are left
+     * intact. Otherwise it falls back to the legacy single-board clear.
      */
     bool BeginNewFootprint( const wxString& aLibrary );
 
@@ -235,7 +240,7 @@ public:
     bool SaveFootprintAs( FOOTPRINT* aFootprint );
     bool SaveFootprintToBoard( bool aAddNew );
     bool SaveFootprintInLibrary( FOOTPRINT* aFootprint, const wxString& aLibraryName );
-    bool RevertFootprint();
+    bool RevertFootprint( bool aSkipConfirmation = false );
 
     /**
      * Must be called after a footprint change in order to set the "modify" flag of the
@@ -247,11 +252,8 @@ public:
 
     /**
      * Delete all and reinitialize the current board.
-     *
-     * @param doAskAboutUnsavedChanges = true to prompt user for confirmation if existing board
-     *                                   contains unsaved changes, false to re-initialize silently
      */
-    bool Clear_Pcb( bool doAskAboutUnsavedChanges );
+    void Clear_Pcb();
 
     /// Return the LIB_ID of the part being edited.
     LIB_ID GetLoadedFPID() const;
@@ -508,20 +510,10 @@ private:
     bool promptAndCloseFootprintTab( int aIdx );
 
     /**
-     * Prompt to save each dirty session-only tab that is not the active one, since the active tab's
-     * unsaved state is handled by the main canCloseWindow check. Returns false if the user cancels so
-     * the window close can be vetoed.
-     *
-     * Instance and unsaved-import tabs are never persisted, so edits left in them are lost on close
-     * unless they are offered here.
+     * True if any non-active tab has unsaved edits.  Used to veto a session-end query early, since
+     * those tabs are invisible to IsContentModified (which sees only the active tab).
      */
-    bool promptToSaveInactiveTransientTabs();
-
-    /**
-     * True if any non-active session-only tab has unsaved edits. Used to veto a session-end query
-     * early, since those tabs are invisible to IsContentModified (which sees only the active tab).
-     */
-    bool hasDirtyInactiveTransientTabs() const;
+    bool hasDirtyInactiveTabs() const;
 
     /**
      * Free the transient board items a detached context's lists own before it is destroyed, which
@@ -583,6 +575,7 @@ private:
 
     std::unique_ptr<API_HANDLER_FOOTPRINT> m_apiHandler;
     std::unique_ptr<API_HANDLER_COMMON>    m_apiHandlerCommon;
+    std::unique_ptr<API_HANDLER_LIBRARIES> m_apiHandlerFpLibs;
 };
 
 #endif      // FOOTPRINT_EDIT_FRAME_H

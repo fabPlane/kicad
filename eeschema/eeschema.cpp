@@ -24,6 +24,7 @@
 #include <api/api_handler_sch.h>
 #include <api/api_handler_symbol.h>
 #include <api/api_job_registry.h>
+#include <api/api_handler_sch_libraries.h>
 #include <api/api_server.h>
 #include <api/api_utils.h>
 #include <api/cross_probe_client.h>
@@ -474,6 +475,7 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
                                 KICAD_API_SERVER* aServer,
                                 wxString* aError ) override;
 
+    bool handleCreateSchematic( const wxString& aPath, KICAD_API_SERVER* aServer, wxString* aError );
     bool HandleApiCloseDocument( const DOCUMENT_SPEC& aSpec,
                                  KICAD_API_SERVER* aServer,
                                  wxString* aError ) override;
@@ -481,6 +483,9 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
     void PreloadLibraries( KIWAY* aKiway ) override;
     void CancelPreload( bool aBlock = true ) override;
     void ProjectChanged() override;
+    void RegisterLibraryHandlers( KICAD_API_SERVER* aServer ) override;
+    bool LoadAllLibraries() override;
+
 
 private:
     std::unique_ptr<EESCHEMA_JOBS_HANDLER> m_jobHandler;
@@ -506,6 +511,7 @@ private:
     std::shared_ptr<HEADLESS_SYMBOL_CONTEXT>  m_openSymbolContext;
     std::unique_ptr<API_HANDLER_SYMBOL>       m_openSymbolHandler;
     std::unique_ptr<API_HANDLER_SYMBOL_LIBRARY> m_openLibraryHandler;
+    std::unique_ptr<API_HANDLER_SCH_LIBRARIES> m_apiHandlerSchLibs;
 
 } kiface( "eeschema", KIWAY::FACE_SCH );
 
@@ -571,6 +577,12 @@ bool IFACE::OnKifaceStart( PGM_BASE* aProgram, int aCtlBits, KIWAY* aKiway )
     {
         m_jobHandler->SetReporter( &CLI_REPORTER::GetInstance() );
         m_jobHandler->SetProgressReporter( &CLI_PROGRESS_REPORTER::GetInstance() );
+    }
+
+    if( Pgm().ApiServerOrNull() )
+    {
+        m_apiHandlerSchLibs = std::make_unique<API_HANDLER_SCH_LIBRARIES>();
+        Pgm().GetApiServer().RegisterHandler( m_apiHandlerSchLibs.get() );
     }
 
     // Register the schematic and symbol-library merge drivers with libgit2 so
@@ -719,6 +731,14 @@ void IFACE::ProjectChanged()
 
 void IFACE::OnKifaceEnd()
 {
+    if( m_apiHandlerSchLibs )
+    {
+        if( Pgm().ApiServerOrNull() )
+            Pgm().GetApiServer().DeregisterHandler( m_apiHandlerSchLibs.get() );
+
+        m_apiHandlerSchLibs.reset();
+    }
+
     // Release the CLI-cached schematic while the static ERC_ITEM tables it serializes against are
     // still alive; deferring to static teardown crashes reading dangling severity keys
     if( m_jobHandler )
@@ -1067,6 +1087,9 @@ bool IFACE::HandleApiOpenDocument( const DOCUMENT_SPEC& aSpec,
     if( aSpec.kind == DOCUMENT_SPEC::KIND::PROJECT_KIND )
         return handleOpenProject( aSpec.path, aServer, aError );
 
+    if( aSpec.kind == DOCUMENT_SPEC::KIND::CREATE_KIND )
+        return handleCreateSchematic( aSpec.path, aServer, aError );
+
     if( aSpec.path.IsEmpty() )
     {
         if( aError )
@@ -1144,7 +1167,78 @@ bool IFACE::HandleApiOpenDocument( const DOCUMENT_SPEC& aSpec,
 
     m_openSchematic = schematic;
 
-    m_openContext = std::make_shared<HEADLESS_SCH_CONTEXT>( m_openSchematic, project, m_kiway );
+    m_openContext = std::make_shared<HEADLESS_SCH_CONTEXT>( &m_openSchematic, project, m_kiway );
+
+    if( !m_apiHandlerSchLibs )
+    {
+        m_apiHandlerSchLibs = std::make_unique<API_HANDLER_SCH_LIBRARIES>();
+        aServer->RegisterHandler( m_apiHandlerSchLibs.get() );
+    }
+
+    m_openHandler = std::make_unique<API_HANDLER_SCH>( m_openContext );
+    aServer->RegisterHandler( m_openHandler.get() );
+
+    return true;
+}
+
+
+bool IFACE::handleCreateSchematic( const wxString& aPath, KICAD_API_SERVER* aServer, wxString* aError )
+{
+    wxFileName schPath( aPath );
+    schPath.MakeAbsolute();
+
+    wxFileName projectPath( schPath );
+    projectPath.SetExt( FILEEXT::ProjectFileExtension );
+
+    if( m_openSchematic && m_openSchematic->HasHierarchy() )
+    {
+        if( m_openSchematic->Hierarchy().IsModified() )
+        {
+            if( aError )
+                *aError = wxS( "The current schematic has unsaved changes; save or revert it first" );
+
+            return false;
+        }
+    }
+
+    closeCurrentDocument( aServer );
+
+    SETTINGS_MANAGER& settingsManager = Pgm().GetSettingsManager();
+
+    PROJECT* project = settingsManager.GetProject( projectPath.GetFullPath() );
+
+    if( !project )
+    {
+        // Create the project settings in memory (LoadProject falls back to defaults when the
+        // file does not exist on disk) without writing any files.
+        settingsManager.LoadProject( projectPath.GetFullPath(), true );
+        project = settingsManager.GetProject( projectPath.GetFullPath() );
+    }
+
+    if( !project )
+    {
+        if( aError )
+            *aError = wxString::Format( wxS( "Error creating project for %s" ), aPath );
+
+        return false;
+    }
+
+    std::unique_ptr<SCHEMATIC> schematic = std::make_unique<SCHEMATIC>( project );
+    schematic->CreateDefaultScreens();
+
+    SCH_SCREENS screens( schematic->Root() );
+    schematic->RootScreen()->SetFileName( schPath.GetFullPath() );
+
+    m_openSchematic = schematic.release();
+
+    m_openContext = std::make_shared<HEADLESS_SCH_CONTEXT>( &m_openSchematic, project, m_kiway );
+
+    if( !m_apiHandlerSchLibs )
+    {
+        m_apiHandlerSchLibs = std::make_unique<API_HANDLER_SCH_LIBRARIES>();
+        aServer->RegisterHandler( m_apiHandlerSchLibs.get() );
+    }
+
     m_openHandler = std::make_unique<API_HANDLER_SCH>( m_openContext );
     aServer->RegisterHandler( m_openHandler.get() );
 
@@ -1206,5 +1300,29 @@ bool IFACE::HandleApiCloseDocument( const DOCUMENT_SPEC& aSpec, KICAD_API_SERVER
     }
 
     closeCurrentDocument( aServer );
+    return true;
+}
+
+
+void IFACE::RegisterLibraryHandlers( KICAD_API_SERVER* aServer )
+{
+    wxCHECK_RET( aServer, "no API server provided" );
+
+    if( !m_apiHandlerSchLibs )
+    {
+        m_apiHandlerSchLibs = std::make_unique<API_HANDLER_SCH_LIBRARIES>();
+        aServer->RegisterHandler( m_apiHandlerSchLibs.get() );
+    }
+}
+
+
+bool IFACE::LoadAllLibraries()
+{
+    SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &m_kiway->Prj() );
+
+    if( !adapter )
+        return false;
+
+    adapter->AsyncLoad();
     return true;
 }

@@ -211,8 +211,6 @@ bool SYMBOL_LIBRARY_MANAGER::SaveLibrary( const wxString& aLibrary, const wxStri
         // Handle original library
         for( LIB_SYMBOL* symbol : getOriginalSymbols( aLibrary ) )
         {
-            LIB_SYMBOL* newSymbol;
-
             try
             {
                 if( symbol->IsDerived() )
@@ -227,8 +225,13 @@ bool SYMBOL_LIBRARY_MANAGER::SaveLibrary( const wxString& aLibrary, const wxStri
 
                     if( !libParent )
                     {
-                        libParent = new LIB_SYMBOL( *oldParent );
-                        pi->SaveSymbol( aFileName, libParent, &properties );
+                        std::unique_ptr<LIB_SYMBOL> newParent =
+                                std::make_unique<LIB_SYMBOL>( *oldParent );
+                        pi->SaveSymbol( aFileName, std::move( newParent ), &properties );
+
+                        // We cannot use the old parent after handing it to the plugin, we
+                        // must borrow a new copy from the plugin cache to reparent the derived symbol.
+                        libParent = pi->LoadSymbol( aFileName, oldParent->GetName(), &properties );
                     }
                     else
                     {
@@ -248,13 +251,15 @@ bool SYMBOL_LIBRARY_MANAGER::SaveLibrary( const wxString& aLibrary, const wxStri
                         libParent->SetFileAddedCallback( oldParent->GetFileAddedCallback() );
                     }
 
-                    newSymbol = new LIB_SYMBOL( *symbol );
+                    std::unique_ptr<LIB_SYMBOL> newSymbol =
+                            std::make_unique<LIB_SYMBOL>( *symbol );
                     newSymbol->SetParent( libParent );
-                    pi->SaveSymbol( aFileName, newSymbol, &properties );
+                    pi->SaveSymbol( aFileName, std::move( newSymbol ), &properties );
                 }
                 else if( !pi->LoadSymbol( aFileName, symbol->GetName(), &properties ) )
                 {
-                    pi->SaveSymbol( aFileName, new LIB_SYMBOL( *symbol ), &properties );
+                    pi->SaveSymbol( aFileName, std::make_unique<LIB_SYMBOL>( *symbol ),
+                                    &properties );
                 }
             }
             catch( ... )
@@ -521,20 +526,20 @@ bool SYMBOL_LIBRARY_MANAGER::UpdateSymbolAfterRename( LIB_SYMBOL* aSymbol, const
 }
 
 
-LIB_ID SYMBOL_LIBRARY_MANAGER::RevertSymbol( const wxString& aSymbolName, const wxString& aLibrary )
+LIB_ID SYMBOL_LIBRARY_MANAGER::RevertSymbol( const LIB_ID& aIdToRevert )
 {
-    auto it = m_libs.find( aLibrary );
+    auto it = m_libs.find( aIdToRevert.GetLibNickname() );
 
     if( it == m_libs.end() )    // no items to flush
-        return LIB_ID( aLibrary, aSymbolName );
+        return aIdToRevert;
 
-    std::shared_ptr<SYMBOL_BUFFER> symbolBuf = it->second.GetBuffer( aSymbolName );
-    wxCHECK( symbolBuf, LIB_ID( aLibrary, aSymbolName ) );
+    std::shared_ptr<SYMBOL_BUFFER> symbolBuf = it->second.GetBuffer( aIdToRevert.GetLibItemName() );
+    wxCHECK( symbolBuf, aIdToRevert );
     LIB_SYMBOL original( symbolBuf->GetOriginal() );
 
-    if( original.GetName() != aSymbolName )
+    if( original.GetName() != aIdToRevert.GetLibItemName().wx_str() )
     {
-        UpdateSymbolAfterRename( &original, aSymbolName, aLibrary );
+        UpdateSymbolAfterRename( &original, aIdToRevert.GetLibItemName(), aIdToRevert.GetLibNickname() );
     }
     else
     {
@@ -543,7 +548,7 @@ LIB_ID SYMBOL_LIBRARY_MANAGER::RevertSymbol( const wxString& aSymbolName, const 
         OnDataChanged();
     }
 
-    return LIB_ID( aLibrary, original.GetName() );
+    return LIB_ID( aIdToRevert.GetLibNickname(), original.GetName() );
 }
 
 
@@ -579,7 +584,7 @@ bool SYMBOL_LIBRARY_MANAGER::RevertAll()
             if( !buffer->IsModified() )
                 continue;
 
-            RevertSymbol( lib.first, buffer->GetOriginal().GetName() );
+            RevertSymbol( LIB_ID(  lib.first, buffer->GetOriginal().GetName() ) );
         }
     }
 
@@ -1055,16 +1060,14 @@ bool LIB_BUFFER::SaveBuffer( SYMBOL_BUFFER& aSymbolBuf, const wxString& aFileNam
         }
     }
 
-    LIB_SYMBOL* parentSymbol = nullptr;
-
     if( libSymbol.IsDerived() )
     {
-        LIB_SYMBOL*                 newCachedSymbol = new LIB_SYMBOL( libSymbol );
+        std::unique_ptr<LIB_SYMBOL> newCachedSymbol = std::make_unique<LIB_SYMBOL>( libSymbol );
         std::shared_ptr<LIB_SYMBOL> bufferedParent = libSymbol.GetParent().lock();
-        parentSymbol = newCachedSymbol;
 
         wxCHECK( bufferedParent, false );
 
+        // A borrowed pointer to the cached parent symbol in the library.
         LIB_SYMBOL* cachedParent = nullptr;
 
         try
@@ -1078,27 +1081,33 @@ bool LIB_BUFFER::SaveBuffer( SYMBOL_BUFFER& aSymbolBuf, const wxString& aFileNam
 
         if( !cachedParent )
         {
-            cachedParent = new LIB_SYMBOL( *bufferedParent.get() );
-            newCachedSymbol->SetParent( cachedParent );
+            // The parent symbol does not exist in the library, so we need to save it first.
+
+            std::unique_ptr<LIB_SYMBOL> newParent = std::make_unique<LIB_SYMBOL>( *bufferedParent );
+            newCachedSymbol->SetParent( newParent.get() );
+
+            const wxString cachedParentName = newParent->GetName();
 
             try
             {
-                aPlugin->SaveSymbol( aFileName, cachedParent, aBuffer ? &properties : nullptr );
+                aPlugin->SaveSymbol( aFileName, std::move( newParent ), aBuffer ? &properties : nullptr );
             }
             catch( const IO_ERROR& ioe )
             {
-                wxLogError( errorMsg, UnescapeString( cachedParent->GetName() ), aFileName,
+                wxLogError( errorMsg, UnescapeString( cachedParentName ), aFileName,
                             ioe.What() );
                 return false;
             }
 
+            const wxString newCachedSymbolName = newCachedSymbol->GetName();
+
             try
             {
-                aPlugin->SaveSymbol( aFileName, newCachedSymbol, aBuffer ? &properties : nullptr );
+                aPlugin->SaveSymbol( aFileName, std::move( newCachedSymbol ), aBuffer ? &properties : nullptr );
             }
             catch( const IO_ERROR& ioe )
             {
-                wxLogError( errorMsg, UnescapeString( newCachedSymbol->GetName() ), aFileName,
+                wxLogError( errorMsg, UnescapeString( newCachedSymbolName ), aFileName,
                             ioe.What() );
                 return false;
             }
@@ -1130,13 +1139,15 @@ bool LIB_BUFFER::SaveBuffer( SYMBOL_BUFFER& aSymbolBuf, const wxString& aFileNam
 
             newCachedSymbol->SetParent( cachedParent );
 
+            const wxString newCachedSymbolName = newCachedSymbol->GetName();
+
             try
             {
-                aPlugin->SaveSymbol( aFileName, newCachedSymbol, aBuffer ? &properties : nullptr );
+                aPlugin->SaveSymbol( aFileName, std::move( newCachedSymbol ), aBuffer ? &properties : nullptr );
             }
             catch( const IO_ERROR& ioe )
             {
-                wxLogError( errorMsg, UnescapeString( newCachedSymbol->GetName() ), aFileName,
+                wxLogError( errorMsg, UnescapeString( newCachedSymbolName ), aFileName,
                             ioe.What() );
                 return false;
             }
@@ -1151,11 +1162,11 @@ bool LIB_BUFFER::SaveBuffer( SYMBOL_BUFFER& aSymbolBuf, const wxString& aFileNam
     }
     else
     {
-        parentSymbol = new LIB_SYMBOL( libSymbol );
+        std::unique_ptr<LIB_SYMBOL> newSymbol = std::make_unique<LIB_SYMBOL>( libSymbol );
 
         try
         {
-            aPlugin->SaveSymbol( aFileName, parentSymbol, aBuffer ? &properties : nullptr );
+            aPlugin->SaveSymbol( aFileName, std::move( newSymbol ), aBuffer ? &properties : nullptr );
         }
         catch( const IO_ERROR& ioe )
         {
@@ -1171,6 +1182,14 @@ bool LIB_BUFFER::SaveBuffer( SYMBOL_BUFFER& aSymbolBuf, const wxString& aFileNam
     // Reparent all symbols derived from the saved symbol.
     if( GetDerivedSymbolNames( libSymbol.GetName(), derivedSymbols ) != 0 )
     {
+        // The saved copy is owned by the plugin cache. Borrow it back to reparent the
+        // derived symbols. The lookup cannot normally fail since it was just added.
+        LIB_SYMBOL* parentSymbol = aPlugin->LoadSymbol( aFileName, libSymbol.GetName(),
+                                                        aBuffer ? &properties : nullptr );
+
+        wxCHECK_MSG( parentSymbol, false,
+                     wxS( "Failed to borrow the saved symbol back from the plugin cache." ) );
+
         // Save the derived symbols.
         for( const wxString& entry : derivedSymbols )
         {
@@ -1178,17 +1197,21 @@ bool LIB_BUFFER::SaveBuffer( SYMBOL_BUFFER& aSymbolBuf, const wxString& aFileNam
 
             wxCHECK2( symbol, continue );
 
-            LIB_SYMBOL* derivedSymbol = new LIB_SYMBOL( symbol->GetSymbol() );
+            std::unique_ptr<LIB_SYMBOL> derivedSymbol =
+                    std::make_unique<LIB_SYMBOL>( symbol->GetSymbol() );
+
             derivedSymbol->SetParent( parentSymbol );
+
+            const wxString derivedSymbolName = derivedSymbol->GetName();
 
             try
             {
-                aPlugin->SaveSymbol( aFileName, new LIB_SYMBOL( *derivedSymbol ),
+                aPlugin->SaveSymbol( aFileName, std::move( derivedSymbol ),
                                      aBuffer ? &properties : nullptr );
             }
             catch( const IO_ERROR& ioe )
             {
-                wxLogError( errorMsg, UnescapeString( derivedSymbol->GetName() ), aFileName,
+                wxLogError( errorMsg, UnescapeString( derivedSymbolName ), aFileName,
                             ioe.What() );
                 return false;
             }

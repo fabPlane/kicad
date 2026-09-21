@@ -129,15 +129,38 @@ void PlotBoardLayers( BOARD* aBoard, PLOTTER* aPlotter, const LSEQ& aLayers,
     if( !aBoard || !aPlotter || aLayers.empty() )
         return;
 
+    PCB_PLOT_PARAMS plotOptions = aPlotOptions;
+
+    // Gerber carries no colour, so a drill mark lands as ink instead of knocking out its pad
+    // The plot dialog forces them off for gerber but API and CLI callers arrive here directly
+    if( aPlotter->GetPlotterType() == PLOT_FORMAT::GERBER )
+        plotOptions.SetDrillMarksType( DRILL_MARKS::NO_DRILL_SHAPE );
+
     for( PCB_LAYER_ID layer : aLayers )
-        PlotOneBoardLayer( aBoard, aPlotter, layer, aPlotOptions, layer == aLayers[0] );
+        PlotOneBoardLayer( aBoard, aPlotter, layer, plotOptions, layer == aLayers[0] );
+
+    // Drill symbols go after the normal layers but before the physical marks, so a symbol is
+    // never sitting under a knockout
+    LSET mapLayers = aBoard->DrillSymbolLayers() & LSET( aLayers );
+
+    if( mapLayers.any() )
+    {
+        BRDITEMS_PLOTTER itemplotter( aPlotter, aBoard, plotOptions );
+        itemplotter.SetLayerSet( aLayers );
+
+        for( PCB_LAYER_ID layer : mapLayers.Seq() )
+            itemplotter.PlotDrillSymbols( layer );
+    }
 
     // Drill marks are plotted in white to knockout the pad if any layers of the pad are
     // being plotted, and in black if the pad is not being plotted. For the former, this
     // must happen after all other layers are plotted.
-    if( aPlotOptions.GetDrillMarksType() != DRILL_MARKS::NO_DRILL_SHAPE )
+
+    // One global knockout pass, so a plotted layer carrying a map skips them rather than
+    // punching through the symbols they would annotate
+    if( plotOptions.GetDrillMarksType() != DRILL_MARKS::NO_DRILL_SHAPE && !mapLayers.any() )
     {
-        BRDITEMS_PLOTTER itemplotter( aPlotter, aBoard, aPlotOptions );
+        BRDITEMS_PLOTTER itemplotter( aPlotter, aBoard, plotOptions );
         itemplotter.SetLayerSet( aLayers );
         itemplotter.PlotDrillMarks();
     }
@@ -158,11 +181,11 @@ void PlotInteractiveLayer( BOARD* aBoard, PLOTTER* aPlotter, const PCB_PLOT_PARA
 
         properties.emplace_back( wxString::Format( wxT( "!%s = %s" ),
                                                    _( "Reference designator" ),
-                                                   fp->Reference().GetShownText( false ) ) );
+                                                   fp->Reference().GetShownText( FOR_GUI ) ) );
 
         properties.emplace_back( wxString::Format( wxT( "!%s = %s" ),
                                                    _( "Value" ),
-                                                   fp->Value().GetShownText( false ) ) );
+                                                   fp->Value().GetShownText( FOR_GUI ) ) );
 
         properties.emplace_back( wxString::Format( wxT( "!%s = %s" ),
                                                    _( "Footprint" ),
