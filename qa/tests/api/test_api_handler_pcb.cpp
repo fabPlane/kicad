@@ -1527,7 +1527,7 @@ BOOST_AUTO_TEST_CASE( DimensionCarriesTheTextThePlotterDraws )
 
         // The composed string, not the bare measurement the text field carries
         BOOST_CHECK_EQUAL( message.resolved_text(),
-                           std::string( dimension->GetShownText( true ).ToUTF8() ) );
+                           std::string( dimension->GetShownText( FOR_CANVAS ).ToUTF8() ) );
 
         found.emplace_back( message.text().text(), message.resolved_text() );
 
