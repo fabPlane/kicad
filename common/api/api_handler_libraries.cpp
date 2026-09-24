@@ -39,8 +39,6 @@
 using namespace kiapi::common::commands;
 using kiapi::common::types::LibraryCommandStatus;
 using kiapi::common::types::LibraryLoadStatus;
-using kiapi::common::types::LibraryTableScope;
-using kiapi::common::types::LibraryType;
 
 API_HANDLER_LIBRARIES::API_HANDLER_LIBRARIES( LIBRARY_TABLE_TYPE aType ) :
         m_type( aType )
@@ -81,7 +79,7 @@ std::vector<wxString> API_HANDLER_LIBRARIES::getItemNames( LIBRARY_MANAGER_ADAPT
 HANDLER_RESULT<LibraryItemsResponse>
 API_HANDLER_LIBRARIES::handleGetLibraryItems( const HANDLER_CONTEXT<GetLibraryItems>& aCtx )
 {
-    if( aCtx.Request.type() != ToProtoEnum<LIBRARY_TABLE_TYPE, LibraryType>( m_type ) )
+    if( aCtx.Request.type() != ToProtoEnum<LIBRARY_TABLE_TYPE, kiapi::common::types::LibraryType>( m_type ) )
     {
         ApiResponseStatus e;
         e.set_status( ApiStatusCode::AS_UNHANDLED );
@@ -140,8 +138,8 @@ static void packTableEntry( kiapi::common::types::LibraryTableEntry& aEntry, LIB
 {
     aEntry.set_nickname( aRow.Nickname().ToUTF8() );
     aEntry.set_uri( aRow.URI().ToUTF8() );
-    aEntry.set_type( ToProtoEnum<LIBRARY_TABLE_TYPE, LibraryType>( aTableType ) );
-    aEntry.set_scope( ToProtoEnum<LIBRARY_TABLE_SCOPE, LibraryTableScope>( aRow.Scope() ) );
+    aEntry.set_type( ToProtoEnum<LIBRARY_TABLE_TYPE, kiapi::common::types::LibraryType>( aTableType ) );
+    aEntry.set_scope( ToProtoEnum<LIBRARY_TABLE_SCOPE, kiapi::common::types::LibraryTableScope>( aRow.Scope() ) );
     aEntry.set_description( aRow.Description().ToUTF8() );
 
     for( const auto& [key, value] : aRow.GetOptionsMap() )
@@ -190,7 +188,7 @@ API_HANDLER_LIBRARIES::handleGetLibraryStatuses( const HANDLER_CONTEXT<GetLibrar
 
         for( int typeProto : aCtx.Request.types() )
         {
-            LIBRARY_TABLE_TYPE type = FromProtoEnum<LIBRARY_TABLE_TYPE>( static_cast<LibraryType>( typeProto ) );
+            LIBRARY_TABLE_TYPE type = FromProtoEnum<LIBRARY_TABLE_TYPE>( static_cast<kiapi::common::types::LibraryType>( typeProto ) );
 
             if( type == LIBRARY_TABLE_TYPE::UNINITIALIZED )
             {
@@ -250,7 +248,7 @@ API_HANDLER_LIBRARIES::handleReloadLibrary( const HANDLER_CONTEXT<ReloadLibrary>
                 return status;
             };
 
-    if( aCtx.Request.type() == LibraryType::LT_UNKNOWN )
+    if( aCtx.Request.type() == kiapi::common::types::LibraryType::LT_UNKNOWN )
     {
         ApiResponseStatus e;
         e.set_status( ApiStatusCode::AS_BAD_REQUEST );
@@ -258,7 +256,7 @@ API_HANDLER_LIBRARIES::handleReloadLibrary( const HANDLER_CONTEXT<ReloadLibrary>
         return tl::unexpected( e );
     }
 
-    if( aCtx.Request.scope() == LibraryTableScope::LTS_BOTH || aCtx.Request.scope() == LibraryTableScope::LTS_UNKNOWN )
+    if( aCtx.Request.scope() == kiapi::common::types::LibraryTableScope::LTS_BOTH || aCtx.Request.scope() == kiapi::common::types::LibraryTableScope::LTS_UNKNOWN )
     {
         ApiResponseStatus e;
         e.set_status( ApiStatusCode::AS_BAD_REQUEST );
@@ -266,8 +264,8 @@ API_HANDLER_LIBRARIES::handleReloadLibrary( const HANDLER_CONTEXT<ReloadLibrary>
         return tl::unexpected( e );
     }
 
-    const LIBRARY_TABLE_TYPE  tableType = FromProtoEnum<LIBRARY_TABLE_TYPE, LibraryType>( aCtx.Request.type() );
-    const LIBRARY_TABLE_SCOPE scope = ( aCtx.Request.scope() == LibraryTableScope::LTS_GLOBAL )
+    const LIBRARY_TABLE_TYPE  tableType = FromProtoEnum<LIBRARY_TABLE_TYPE, kiapi::common::types::LibraryType>( aCtx.Request.type() );
+    const LIBRARY_TABLE_SCOPE scope = ( aCtx.Request.scope() == kiapi::common::types::LibraryTableScope::LTS_GLOBAL )
                                               ? LIBRARY_TABLE_SCOPE::GLOBAL
                                               : LIBRARY_TABLE_SCOPE::PROJECT;
 
@@ -349,9 +347,9 @@ API_HANDLER_LIBRARIES::handleLoadAllLibraries( const HANDLER_CONTEXT<LoadAllLibr
     {
         for( int protoRaw : aCtx.Request.type() )
         {
-            LibraryType protoType = static_cast<LibraryType>( protoRaw );
+            kiapi::common::types::LibraryType protoType = static_cast<kiapi::common::types::LibraryType>( protoRaw );
             LIBRARY_TABLE_TYPE type =
-                    FromProtoEnum<LIBRARY_TABLE_TYPE, LibraryType>( static_cast<LibraryType>( protoType ) );
+                    FromProtoEnum<LIBRARY_TABLE_TYPE, kiapi::common::types::LibraryType>( static_cast<kiapi::common::types::LibraryType>( protoType ) );
 
             switch( type )
             {
@@ -423,7 +421,7 @@ LibraryCommandStatus API_HANDLER_LIBRARIES::loadAllLibraries()
 HANDLER_RESULT<GetItemsResponse>
 API_HANDLER_LIBRARIES::handleGetItemsFromLibrary( const HANDLER_CONTEXT<GetItemsFromLibrary>& aCtx )
 {
-    if( aCtx.Request.type() != ToProtoEnum<LIBRARY_TABLE_TYPE, LibraryType>( m_type ) )
+    if( aCtx.Request.type() != ToProtoEnum<LIBRARY_TABLE_TYPE, kiapi::common::types::LibraryType>( m_type ) )
     {
         ApiResponseStatus e;
         e.set_status( ApiStatusCode::AS_UNHANDLED );
