@@ -883,7 +883,13 @@ void SCH_SYMBOL::Serialize( kiapi::schematic::types::SchematicSymbolInstance& aS
     }
 
     if( m_part )
+    {
         m_part->Serialize( *aSymbol.mutable_definition(), /* aSkipPins = */ true );
+
+        // The definition is identified by the instance's library id, which Deserialize restores;
+        // the cached library symbol may be named differently (lib_name, e.g. "R_1" for "Device:R")
+        PackLibId( aSymbol.mutable_definition()->mutable_id(), m_lib_id );
+    }
 
     aSymbol.set_show_pin_names( GetShowPinNames() );
     aSymbol.set_show_pin_numbers( GetShowPinNumbers() );

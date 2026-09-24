@@ -252,6 +252,10 @@ tl::expected<bool, ApiResponseStatus> API_HANDLER_COMMON::validateProject( const
         return tl::unexpected( e );
     }
 
+    // An empty specifier, where allowed, means the open project
+    if( aAllowEmpty && aProject.name().empty() && aProject.path().empty() )
+        return true;
+
     const PROJECT& prj = Pgm().GetSettingsManager().Prj();
 
     if( aProject.name().compare( prj.GetProjectName().ToUTF8() ) != 0 )

@@ -2568,10 +2568,12 @@ HANDLER_RESULT<DrcResultsResponse> API_HANDLER_PCB::runDrc( const RunBoardJobDrc
                     return tl::unexpected( e );
                 }
 
-                typedef bool ( *NETLIST_FN_PTR )( const wxString&, std::string& );
+                // Must match eeschema's generateSchematicNetlist, which takes the KIWAY since upstream
+                // resolves pad numbers through the footprint libraries
+                typedef bool ( *NETLIST_FN_PTR )( const wxString&, std::string&, KIWAY* );
                 KIFACE*        eeschema = kiway->KiFACE( KIWAY::FACE_SCH );
                 NETLIST_FN_PTR netlister = (NETLIST_FN_PTR) eeschema->IfaceOrAddress( KIFACE_NETLIST_SCHEMATIC );
-                ( *netlister )( schematicPath.GetFullPath(), netlistStr );
+                ( *netlister )( schematicPath.GetFullPath(), netlistStr, kiway );
             }
             else
             {

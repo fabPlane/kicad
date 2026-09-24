@@ -614,6 +614,14 @@ void FOOTPRINT::SerializeDefinition( kiapi::board::types::Footprint* aOutput ) c
         item->Serialize( *itemMsg );
     }
 
+    // Constraints name other items of the footprint as members, so they come after them;
+    // DeserializeDefinition clears and re-adds them with the rest of the items
+    for( const PCB_CONSTRAINT* item : Constraints() )
+    {
+        google::protobuf::Any* itemMsg = aOutput->add_items();
+        item->Serialize( *itemMsg );
+    }
+
     for( const FP_3DMODEL& model : Models() )
     {
         google::protobuf::Any* itemMsg = aOutput->add_items();
