@@ -706,7 +706,7 @@ std::map<KICAD_T, uint32_t> API_HANDLER_PCB::countItems( const DocumentSpecifier
     static const std::vector<KICAD_T> allTypes = { PCB_TRACE_T,     PCB_ARC_T,     PCB_VIA_T,
                                                    PCB_PAD_T,       PCB_FOOTPRINT_T, PCB_SHAPE_T, PCB_TABLE_T,
                                                    PCB_TEXT_T,      PCB_TEXTBOX_T, PCB_BARCODE_T, PCB_REFERENCE_IMAGE_T,
-                                                   PCB_GRIDITEM_T,  PCB_DIMENSION_T, PCB_ZONE_T, PCB_GROUP_T, PCB_POINT_T,
+                                                   PCB_GRID_ITEM_T,  PCB_DIMENSION_T, PCB_ZONE_T, PCB_GROUP_T, PCB_POINT_T,
                                                    PCB_CONSTRAINT_T };
 
     std::vector<BOARD_ITEM*> items;
@@ -3240,7 +3240,8 @@ API_HANDLER_PCB::handleRunBoardJobExportPng( const HANDLER_CONTEXT<RunBoardJobEx
     if( HANDLER_RESULT<bool> validation = validateDocument( aCtx.Request.job_settings().document() ); !validation )
         return tl::unexpected( validation.error() );
 
-    JOB_EXPORT_PCB_PNG job;
+    auto                jobPtr = std::make_unique<JOB_EXPORT_PCB_PNG>();
+    JOB_EXPORT_PCB_PNG& job = *jobPtr;
     job.m_filename = pcbContext()->GetCurrentFileName();
     job.SetConfiguredOutputPath( wxString::FromUTF8( aCtx.Request.job_settings().output_path() ) );
 
@@ -3274,7 +3275,7 @@ API_HANDLER_PCB::handleRunBoardJobExportPng( const HANDLER_CONTEXT<RunBoardJobEx
     job.m_antialias = aCtx.Request.antialiasing() != types::AntialiasingMode::AAM_NONE;
     job.m_useBackgroundColor = aCtx.Request.plot_background_color();
 
-    return ExecuteBoardJob( pcbContext(), job );
+    return runBoardJob( aCtx.Request.job_settings(), std::move( jobPtr ) );
 }
 
 
