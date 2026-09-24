@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <vector>
 
+#include <api/api_handler_libraries.h>
 #include <api/api_handler_library.h>
 #include <api/api_server.h>
 #include <api/api_server_host.h>
@@ -76,6 +77,12 @@ void API_SERVER_HOST::Install()
                 return openDocument( aRequest );
             } );
 
+    m_commonHandler.SetCreateDocumentHandler(
+            [this]( const commands::CreateDocument& aRequest )
+            {
+                return createDocument( aRequest );
+            } );
+
     m_commonHandler.SetCloseDocumentHandler(
             [this]( const commands::CloseDocument& aRequest )
             {
@@ -113,6 +120,16 @@ void API_SERVER_HOST::Install()
             } );
 
     m_server.RegisterHandler( &m_commonHandler );
+
+    m_designBlockLibrariesHandler = std::make_unique<API_HANDLER_LIBRARIES>( LIBRARY_TABLE_TYPE::DESIGN_BLOCK );
+    m_designBlockLibrariesHandler->SetKiway( &m_kiway );
+    m_designBlockLibrariesHandler->SetLibraryHandlerRegistrar(
+            [this]( KIFACE* aKiface )
+            {
+                aKiface->RegisterLibraryHandlers( &m_server );
+            } );
+    m_server.RegisterHandler( m_designBlockLibrariesHandler.get() );
+
     m_installed = true;
 }
 
@@ -124,6 +141,13 @@ void API_SERVER_HOST::Shutdown()
 
     closeAllDocuments( commands::CloseAllDocuments() );
     m_server.DeregisterHandler( &m_commonHandler );
+
+    if( m_designBlockLibrariesHandler )
+    {
+        m_server.DeregisterHandler( m_designBlockLibrariesHandler.get() );
+        m_designBlockLibrariesHandler.reset();
+    }
+
     m_installed = false;
 }
 
@@ -486,6 +510,106 @@ HANDLER_RESULT<commands::OpenDocumentResponse> API_SERVER_HOST::openDocument(
 
     docSpec->mutable_project()->set_name( project.GetProjectName().ToUTF8() );
     docSpec->mutable_project()->set_path( project.GetProjectPath().ToUTF8() );
+
+    return response;
+}
+
+
+HANDLER_RESULT<commands::OpenDocumentResponse>
+API_SERVER_HOST::createDocument( const commands::CreateDocument& aRequest )
+{
+    types::DocumentType requestType = aRequest.type();
+
+    if( requestType != types::DOCTYPE_PCB && requestType != types::DOCTYPE_SCHEMATIC )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_UNIMPLEMENTED );
+        e.set_error_message( "Only PCB and schematic documents can be created" );
+        return tl::unexpected( e );
+    }
+
+    wxString inputPath = wxString::FromUTF8( aRequest.path() );
+
+    if( inputPath.IsEmpty() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "CreateDocument requires a non-empty path" );
+        return tl::unexpected( e );
+    }
+
+    wxFileName docPath( inputPath );
+    docPath.MakeAbsolute();
+    docPath.SetExt( requestType == types::DOCTYPE_PCB ? FILEEXT::KiCadPcbFileExtension
+                                                      : FILEEXT::KiCadSchematicFileExtension );
+
+    wxFileName projectPath( docPath );
+    projectPath.SetExt( FILEEXT::ProjectFileExtension );
+
+    if( m_openProjectPath && projectPath.GetFullPath() != m_openProjectPath->GetFullPath() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( wxString::Format( "cannot create a document in project '%s' because project "
+                                               "'%s' is already open.",
+                                               projectPath.GetFullName(), m_openProjectPath->GetFullName() )
+                                     .ToStdString() );
+        return tl::unexpected( e );
+    }
+
+    if( std::ranges::any_of( m_openDocuments,
+                             [&]( const OPEN_DOCUMENT& d )
+                             {
+                                 return d.type == requestType;
+                             } ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "a document of this type is already open" );
+        return tl::unexpected( e );
+    }
+
+    KIFACE::DOCUMENT_SPEC spec;
+    spec.kind = KIFACE::DOCUMENT_SPEC::KIND::CREATE_KIND;
+    spec.path = docPath.GetFullPath();
+
+    KIWAY::FACE_T face = faceForDocument( requestType );
+    wxString      error;
+
+    if( !m_kiway.ProcessApiOpenDocument( face, spec, &m_server, &error ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( error.ToStdString() );
+        return tl::unexpected( e );
+    }
+
+    PROJECT& project = Pgm().GetSettingsManager().Prj();
+
+    OPEN_DOCUMENT doc;
+    doc.type = requestType;
+    doc.fileName = docPath.GetFullName();
+    m_openDocuments.push_back( doc );
+
+    // Creating a board or schematic implicitly opens (or creates) its project
+    if( !m_openProjectPath )
+    {
+        wxFileName openedProject( project.GetProjectPath(), project.GetProjectName(),
+                                  FILEEXT::ProjectFileExtension );
+        publishProjectEvent( project, true );
+        notifyProjectFaces( openedProject, true );
+        m_openProjectPath = openedProject;
+    }
+
+    commands::OpenDocumentResponse response;
+    types::DocumentSpecifier*      docSpec = response.mutable_document();
+
+    docSpec->set_type( requestType );
+
+    if( requestType == types::DOCTYPE_PCB )
+        docSpec->set_board_filename( doc.fileName.ToStdString() );
+
+    PackProject( *docSpec->mutable_project(), project );
 
     return response;
 }

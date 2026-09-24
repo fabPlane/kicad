@@ -101,6 +101,13 @@ extern KICOMMON_API const wxChar* const kicadTraceCoroutineStack;
 extern KICOMMON_API const wxChar* const traceAutoSave;
 
 /**
+ * Flag to enable native operating-system model preview debug output.
+ *
+ * Use "KICAD_MODEL_PREVIEW" to enable.
+ */
+extern KICOMMON_API const wxChar* const traceModelPreview;
+
+/**
  * Flag to enable schematic library memory deletion debug output.
  *
  * Use "KICAD_SCH_LIB_MEM" to enable.
@@ -254,6 +261,13 @@ extern KICOMMON_API const wxChar* const traceEnvVars;
  * Use "KICAD_GAL_PROFILE" to enable.
  */
 extern KICOMMON_API const wxChar* const traceGalProfile;
+
+/**
+ * Flag to enable debug output of GAL context binding.
+ *
+ * Use "KICAD_GAL_CONTEXT" to enable.
+ */
+extern KICOMMON_API const wxChar* const traceGalContext;
 
 /**
  * Flag to enable KiCad2Step debug tracing.
@@ -414,6 +428,13 @@ extern KICOMMON_API const wxChar* const traceSymbolInheritance;
  * Use "KICAD_SCH_NETCHAIN" to enable.
  */
 extern KICOMMON_API const wxChar* const traceSchNetChain;
+
+/**
+ * Flag to enable tracing of imported net-name reconciliation between a schematic and its board.
+ *
+ * Use "KICAD_IMPORT_NET_NAMES" to enable.
+ */
+extern KICOMMON_API const wxChar* const traceImportNetNames;
 
 ///@}
 

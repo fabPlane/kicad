@@ -51,32 +51,6 @@ VECTOR2I TRANSFORM_TRS::InverseApply( const VECTOR2I& aPoint ) const
 }
 
 
-TRANSFORM_TRS TRANSFORM_TRS::Invert() const
-{
-    TRANSFORM_TRS inv;
-    inv.m_scaleX = 1.0 / m_scaleX;
-    inv.m_scaleY = 1.0 / m_scaleY;
-    inv.m_rotate = -m_rotate;
-
-    VECTOR2D t( m_translate );
-    RotatePoint( t, -m_rotate );
-    inv.m_translate = VECTOR2I( KiROUND( -t.x / m_scaleX ), KiROUND( -t.y / m_scaleY ) );
-
-    return inv;
-}
-
-
-TRANSFORM_TRS TRANSFORM_TRS::Compose( const TRANSFORM_TRS& aOuter ) const
-{
-    TRANSFORM_TRS result;
-    result.m_scaleX = m_scaleX * aOuter.m_scaleX;
-    result.m_scaleY = m_scaleY * aOuter.m_scaleY;
-    result.m_rotate = m_rotate + aOuter.m_rotate;
-    result.m_translate = aOuter.Apply( m_translate );
-    return result;
-}
-
-
 TRANSFORM_TRS TRANSFORM_TRS::RescaleAround( const VECTOR2I& aFixedPoint,
                                             double aSx, double aSy ) const
 {

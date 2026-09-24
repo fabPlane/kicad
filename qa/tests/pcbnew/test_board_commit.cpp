@@ -22,11 +22,14 @@
 #include <pcbnew_utils/board_test_utils.h>
 #include <board.h>
 #include <board_commit.h>
+#include <connectivity/connectivity_data.h>
+#include <netinfo.h>
 #include <footprint.h>
 #include <pad.h>
 #include <pcb_shape.h>
 #include <pcb_text.h>
 #include <pcb_group.h>
+#include <pcb_board_outline.h>
 #include <lset.h>
 #include <generators/pcb_via_stack.h>
 #include <pcb_view.h>
@@ -54,6 +57,40 @@ BOOST_AUTO_TEST_CASE( RecursesThroughGroups )
     BOOST_CHECK_EQUAL( commit.GetStatus( &s1 ), CHT_MODIFY );
     BOOST_CHECK_EQUAL( commit.GetStatus( &s2 ), CHT_MODIFY );
 }
+
+// Deleting a footprint child must drop it from connectivity, like a board level item.
+BOOST_AUTO_TEST_CASE( RemovedFootprintChildLeavesConnectivity )
+{
+    BOARD        board;
+    TOOL_MANAGER mgr;
+    mgr.SetEnvironment( &board, nullptr, nullptr, nullptr, nullptr );
+    KI_TEST::DUMMY_TOOL* dummyTool = new KI_TEST::DUMMY_TOOL();
+    mgr.RegisterTool( dummyTool );
+
+    board.Add( new NETINFO_ITEM( &board, wxT( "N1" ), 1 ) );
+
+    FOOTPRINT* fp = new FOOTPRINT( &board );
+    PAD*       pad = new PAD( fp );
+    fp->Add( pad );
+    board.Add( fp );
+    pad->SetNetCode( 1 );
+
+    board.BuildConnectivity();
+
+    auto netPads = [&]()
+    {
+        return board.GetConnectivity()->GetNetItems( 1, { PCB_PAD_T } ).size();
+    };
+
+    BOOST_REQUIRE_EQUAL( netPads(), 1u );
+
+    BOARD_COMMIT commit( dummyTool );
+    commit.Remove( pad );
+    commit.Push( wxT( "Delete Pad" ) );
+
+    BOOST_CHECK_EQUAL( netPads(), 0u );
+}
+
 
 BOOST_AUTO_TEST_CASE( MakeImageCreatesTransientCopy )
 {
@@ -162,6 +199,32 @@ BOOST_AUTO_TEST_CASE( RemoveFootprintPrunesSelectedChildren )
 
     // With SKIP_UNDO the removed footprint is ours to free
     delete fp;
+}
+
+// Moving a shape off Edge.Cuts must rebuild the board outline (issue 25551).
+BOOST_AUTO_TEST_CASE( LayerChangeOffEdgeCutsUpdatesBoardOutline )
+{
+    // view must outlive board so board items unregister from a live view at teardown.
+    KIGFX::PCB_VIEW view;
+    BOARD           board;
+    TOOL_MANAGER    mgr;
+    mgr.SetEnvironment( &board, &view, nullptr, nullptr, nullptr );
+
+    PCB_SHAPE* rect = new PCB_SHAPE( &board, SHAPE_T::RECTANGLE );
+    rect->SetLayer( Edge_Cuts );
+    rect->SetStart( VECTOR2I( 0, 0 ) );
+    rect->SetEnd( VECTOR2I( 10000000, 10000000 ) );
+    board.Add( rect );
+    board.UpdateBoardOutline();
+
+    BOOST_REQUIRE_GT( board.BoardOutline()->GetOutline().OutlineCount(), 0 );
+
+    BOARD_COMMIT commit( &mgr, true, false );
+    commit.Modify( rect );
+    rect->SetLayer( Cmts_User );
+    commit.Push( wxT( "Change layer" ), SKIP_UNDO );
+
+    BOOST_CHECK_EQUAL( board.BoardOutline()->GetOutline().OutlineCount(), 0 );
 }
 
 // Undo after a drag must put the hops back with the stack.

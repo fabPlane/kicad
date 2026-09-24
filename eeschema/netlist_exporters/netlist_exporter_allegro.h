@@ -24,6 +24,8 @@
 
 #include "netlist_exporter_base.h"
 #include <list>
+#include <sch_pin.h>
+#include <symbol.h>
 
 /**
  * Generate a netlist compatible with Allegro.
@@ -31,8 +33,8 @@
 class NETLIST_EXPORTER_ALLEGRO : public NETLIST_EXPORTER_BASE
 {
 public:
-    NETLIST_EXPORTER_ALLEGRO( SCHEMATIC* aSchematic ) :
-        NETLIST_EXPORTER_BASE( aSchematic ),
+    NETLIST_EXPORTER_ALLEGRO( SCHEMATIC* aSchematic, KIWAY* aKiway ) :
+        NETLIST_EXPORTER_BASE( aSchematic, aKiway ),
         m_f( nullptr )
     {
     }
@@ -41,7 +43,7 @@ public:
      * Write netlist to \a aOutFileName.
      * Generate the Allegro netlist format supported by Allegro.
      */
-    bool WriteNetlist( const wxString& aOutFileName, unsigned aNetlistOptions,
+    bool writeNetlist( const wxString& aOutFileName, unsigned aNetlistOptions,
                        REPORTER& aReporter ) override;
 
     /**
@@ -186,10 +188,9 @@ private:
 
     struct NET_NODE
     {
-        NET_NODE( SCH_PIN* aPin, const SCH_SHEET_PATH& aSheet, bool aNoConnect ) :
+        NET_NODE( SCH_PIN* aPin, const SCH_SHEET_PATH& aSheet ) :
                 m_Pin( aPin ),
-                m_Sheet( aSheet ),
-                m_NoConnect( aNoConnect )
+                m_Sheet( aSheet )
         {}
 
         bool operator<( const NET_NODE& aNetNode ) const
@@ -220,7 +221,6 @@ private:
 
         SCH_PIN*       m_Pin;
         SCH_SHEET_PATH m_Sheet;
-        bool           m_NoConnect;
     };
 
     FILE* m_f            ;    ///< File pointer for netlist file writing operation.

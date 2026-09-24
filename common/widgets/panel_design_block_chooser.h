@@ -124,7 +124,8 @@ protected:
     EDA_DRAW_FRAME*       m_frame;
     std::function<void()> m_selectHandler;
 
-    std::vector<LIB_ID>   m_historyList;
+    std::vector<LIB_ID>&  m_historyList;
+    LIB_ID                m_preselect;
 };
 
 #endif /* PANEL_DESIGN_BLOCK_CHOOSER_H */

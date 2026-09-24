@@ -50,6 +50,8 @@ protected:
     void onPageChanged( wxBookCtrlEvent& aEvent ) override;
     void onAuxiliaryAction( wxCommandEvent& aEvent ) override;
 
+    bool TransferDataFromWindow() override;
+
     PCB_EDIT_FRAME*                     m_frame;
     PANEL_SETUP_LAYERS*                 m_layers;
     PANEL_SETUP_BOARD_FINISH*           m_boardFinish;
@@ -66,6 +68,7 @@ private:
     size_t m_defaultsPage;
     size_t m_formattingPage;
     size_t m_maskAndPastePage;
+    size_t m_drillChartPage;
     size_t m_constraintsPage;
     size_t m_tracksAndViasPage;
     size_t m_viaStacksPage;

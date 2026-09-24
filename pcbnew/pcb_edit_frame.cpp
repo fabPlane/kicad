@@ -43,6 +43,7 @@
 #include <pcb_edit_frame.h>
 #include <3d_viewer/eda_3d_viewer_frame.h>
 #include <api/api_handler_common.h>
+#include <api/api_handler_libraries.h>
 #include <api/api_handler_pcb.h>
 #include <api/api_plugin_manager.h>
 #include <api/api_server.h>
@@ -68,6 +69,9 @@
 #include <dialogs/dialog_migrate_3d_models.h>
 #include <dialog_board_setup.h>
 #include <dialogs/dialog_dimension_properties.h>
+#include <pcb_drill_chart.h>
+#include <pcb_drill_map.h>
+#include <dialogs/dialog_drill_chart_properties.h>
 #include <dialogs/dialog_table_properties.h>
 #include <gal/graphics_abstraction_layer.h>
 #include <pad.h>
@@ -82,7 +86,7 @@
 #include <wildcards_and_files_ext.h>
 #include <functional>
 #include <pcb_barcode.h>
-#include <pcb_griditem.h>
+#include <pcb_grid_item.h>
 #include <pcb_painter.h>
 #include <project/project_file.h>
 #include <project/project_local_settings.h>
@@ -536,6 +540,8 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     {
         m_apiHandlerCommon = std::make_unique<API_HANDLER_COMMON>();
         Pgm().GetApiServer().RegisterHandler( m_apiHandlerCommon.get() );
+        m_apiLibrariesHandler = std::make_unique<API_HANDLER_LIBRARIES>( LIBRARY_TABLE_TYPE::DESIGN_BLOCK );
+        Pgm().GetApiServer().RegisterHandler( m_apiLibrariesHandler.get() );
     }
 
     resolveCanvasType();
@@ -771,6 +777,12 @@ PCB_EDIT_FRAME::~PCB_EDIT_FRAME()
     // PCB_BASE_FRAME's dtor deletes m_pcb; canvas children outlive it.  Drop
     // every cached TEXT_VAR_TRACKER* before the tracker is freed.
     detachTextVarTracker();
+
+    if( Kiface().IsSingle() )
+    {
+        Pgm().GetApiServer().DeregisterHandler( m_apiHandlerCommon.get() );
+        Pgm().GetApiServer().DeregisterHandler( m_apiLibrariesHandler.get() );
+    }
 
     if( ADVANCED_CFG::GetCfg().m_ShowEventCounters )
     {
@@ -1486,7 +1498,7 @@ void PCB_EDIT_FRAME::setupUIConditions()
     CURRENT_EDIT_TOOL( PCB_ACTIONS::drillOrigin );
     CURRENT_EDIT_TOOL( ACTIONS::gridSetOrigin );
     CURRENT_EDIT_TOOL( PCB_ACTIONS::createArray );
-    CURRENT_EDIT_TOOL( PCB_ACTIONS::placeGridItem );
+    CURRENT_EDIT_TOOL( PCB_ACTIONS::placeSubGrid );
 
     CURRENT_EDIT_TOOL( PCB_ACTIONS::addConstraintCoincident );
     CURRENT_EDIT_TOOL( PCB_ACTIONS::addConstraintPointOnLine );
@@ -1558,9 +1570,8 @@ void PCB_EDIT_FRAME::ResolveDRCExclusions( bool aCreateMarkers )
 bool PCB_EDIT_FRAME::canCloseWindow( wxCloseEvent& aEvent )
 {
     // Shutdown blocks must be determined and vetoed as early as possible
-    if( KIPLATFORM::APP::SupportsShutdownBlockReason()
-            && aEvent.GetId() == wxEVT_QUERY_END_SESSION
-            && IsContentModified() )
+    if( KIPLATFORM::APP::SupportsShutdownBlockReason() && aEvent.GetId() == wxEVT_QUERY_END_SESSION
+                                                       && IsContentModified() )
     {
         return false;
     }
@@ -1589,8 +1600,16 @@ bool PCB_EDIT_FRAME::canCloseWindow( wxCloseEvent& aEvent )
         // Use C-style cast due to Mac's inability to dynamic cast between compile modules
         FOOTPRINT_EDIT_FRAME* fpEditor = (FOOTPRINT_EDIT_FRAME*) Kiway().Player( FRAME_FOOTPRINT_EDITOR, false );
 
-        if( fpEditor && !fpEditor->Close() )   // Can close footprint editor?
-            return false;
+        if( fpEditor )
+        {
+            bool cancel = !fpEditor->Close();   // Can close footprint editor?
+
+            // If fp editor had unsaved changes it will have been fronted.  Bring board editor back to front.
+            Raise();
+
+            if( cancel )
+                return false;
+        }
 
         // Use C-style cast due to Mac's inability to dynamic cast between compile modules
         FOOTPRINT_VIEWER_FRAME* fpViewer = (FOOTPRINT_VIEWER_FRAME*) Kiway().Player( FRAME_FOOTPRINT_VIEWER, false );
@@ -1603,9 +1622,14 @@ bool PCB_EDIT_FRAME::canCloseWindow( wxCloseEvent& aEvent )
         // Use C-style cast due to Mac's inability to dynamic cast between compile modules
         FOOTPRINT_EDIT_FRAME* fpEditor = (FOOTPRINT_EDIT_FRAME*) Kiway().Player( FRAME_FOOTPRINT_EDITOR, false );
 
-        if( fpEditor && fpEditor->IsCurrentFPFromBoard() )
+        if( fpEditor )
         {
-            if( !fpEditor->CanCloseFPFromBoard( true ) )
+            bool cancel = !fpEditor->HandleUnsavedChanges( true );
+
+            // If fp editor had unsaved changes it will have been fronted.  Bring board editor back to front.
+            Raise();
+
+            if( cancel )
                 return false;
         }
     }
@@ -1617,6 +1641,8 @@ bool PCB_EDIT_FRAME::canCloseWindow( wxCloseEvent& aEvent )
     {
         wxFileName fileName = GetBoard()->GetFileName();
         wxString msg = _( "Save changes to '%s' before closing?" );
+
+        wxSafeYield( this, true );      // Allow frame to come to front before showing "Save Changes?"
 
         if( !HandleUnsavedChanges( this, wxString::Format( msg, fileName.GetFullName() ),
                                    [&]() -> bool
@@ -1765,6 +1791,32 @@ void PCB_EDIT_FRAME::ActivateGalCanvas()
 {
     PCB_BASE_EDIT_FRAME::ActivateGalCanvas();
     GetCanvas()->UpdateColors();
+    GetCanvas()->Refresh();
+}
+
+
+void PCB_EDIT_FRAME::RefreshDrillSymbols( int aUpdateFlags )
+{
+    BOARD*       board = GetBoard();
+    KIGFX::VIEW* view = GetCanvas()->GetView();
+
+    board->RefreshDrillSymbolLayers();
+
+    for( PCB_TRACK* track : board->Tracks() )
+    {
+        if( track->Type() == PCB_VIA_T )
+            view->Update( track, aUpdateFlags );
+    }
+
+    for( FOOTPRINT* footprint : board->Footprints() )
+    {
+        for( PAD* pad : footprint->Pads() )
+        {
+            if( pad->HasHole() )
+                view->Update( pad, aUpdateFlags );
+        }
+    }
+
     GetCanvas()->Refresh();
 }
 
@@ -2166,8 +2218,24 @@ void PCB_EDIT_FRAME::OnBoardLoaded()
     // Display the loaded board:
     Zoom_Automatique( false );
 
-    // Invalidate painting as loading the DRC engine will cause clearances to become valid
-    GetCanvas()->GetView()->UpdateAllItems( KIGFX::ALL );
+    // The DRC engine above makes clearances computable, so only the items that draw a
+    // clearance outline are stale; marking every item re-tessellates the whole board
+    {
+        KIGFX::VIEW* view = GetCanvas()->GetView();
+        const auto&  opts = GetPcbNewSettings()->m_Display;
+
+        for( FOOTPRINT* footprint : GetBoard()->Footprints() )
+        {
+            for( PAD* pad : footprint->Pads() )
+                view->Update( pad, KIGFX::REPAINT );
+        }
+
+        if( opts.m_TrackClearance == SHOW_WITH_VIA_ALWAYS )
+        {
+            for( PCB_TRACK* track : GetBoard()->Tracks() )
+                view->Update( track, KIGFX::REPAINT );
+        }
+    }
 
     Refresh();
 
@@ -2258,11 +2326,14 @@ void PCB_EDIT_FRAME::OnModify()
     if( m_isClosing )
         return;
 
+    // A chart reports the board, so an edit that moved a hole has already made it wrong.
+    // Costs one integer comparison per chart when nothing drill related changed.
+    RefreshDrillCharts( *GetBoard() );
+
     Update3DView( true, GetPcbNewSettings()->m_Display.m_Live3DRefresh );
 
     if( !GetTitle().StartsWith( wxT( "*" ) ) )
         UpdateTitle();
-
 }
 
 
@@ -3045,6 +3116,15 @@ void PCB_EDIT_FRAME::OnEditItemRequest( BOARD_ITEM* aItem )
         break;
     }
 
+    case PCB_DRILL_CHART_T:
+    {
+        // Not the generic table dialog, which would offer copper layers and direct editing of
+        // cells that the next rebuild discards
+        DIALOG_DRILL_CHART_PROPERTIES dlg( this, static_cast<PCB_DRILL_CHART*>( aItem ) );
+        dlg.ShowModal();
+        break;
+    }
+
     case PCB_PAD_T:
         ShowPadPropertiesDialog( static_cast<PAD*>( aItem ) );
         break;
@@ -3073,8 +3153,8 @@ void PCB_EDIT_FRAME::OnEditItemRequest( BOARD_ITEM* aItem )
         ShowGraphicItemPropertiesDialog( static_cast<PCB_SHAPE*>( aItem ) );
         break;
 
-    case PCB_GRIDITEM_T:
-        ShowGridItemPropertiesDialog( static_cast<PCB_GRIDITEM*>( aItem ) );
+    case PCB_GRID_ITEM_T:
+        ShowGridItemPropertiesDialog( static_cast<PCB_GRID_ITEM*>( aItem ) );
         break;
 
     case PCB_ZONE_T:

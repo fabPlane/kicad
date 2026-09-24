@@ -39,6 +39,7 @@ set( QA_PCBNEW_SRCS
     test_board_item_index.cpp
     test_board_loader.cpp
     test_board_item.cpp
+    test_drill_chart.cpp
     test_board_commit.cpp
     test_text_var_reactive.cpp
     test_clipboard_group.cpp
@@ -77,6 +78,7 @@ set( QA_PCBNEW_SRCS
     test_issue24967.cpp
     test_issue25010.cpp
     test_issue25110_bezier_line_style.cpp
+    test_issue25521.cpp
     test_fp_lib_load_save.cpp
     test_io_mgr.cpp
     test_ellipse_roundtrip.cpp
@@ -87,6 +89,7 @@ set( QA_PCBNEW_SRCS
     test_match_properties.cpp
     test_meander_corner_radius.cpp
     test_odb_dimension_export.cpp
+    test_odb_drill_tools.cpp
     test_odb_soldermask_shape_export.cpp
     test_issue25074_odb_knockout_textbox.cpp
     test_pcb_control_rehatch.cpp
@@ -96,6 +99,7 @@ set( QA_PCBNEW_SRCS
     test_pcb_differ.cpp
     test_diff_canvas_context.cpp
     test_pcb_merge_applier.cpp
+    test_import_net_names.cpp
     test_net_classes_diff_merge.cpp
     test_custom_drc_diff_merge.cpp
     test_lib_table_diff_merge.cpp
@@ -202,6 +206,7 @@ set( QA_PCBNEW_SRCS
     drc/test_drc_tuner_chain_bridging_agreement.cpp
     drc/test_drc_stub_length.cpp
     drc/test_drc_tuner_agreement.cpp
+    drc/test_drc_length_item_order.cpp
     drc/test_drc_skew_arc.cpp
     drc/test_drc_unconnected_items_exclusion_loss.cpp
     drc/test_drc_via_dangling.cpp
@@ -240,6 +245,7 @@ set( QA_PCBNEW_SRCS
     drc/test_drc_issue23868.cpp
     drc/test_drc_issue24211.cpp
     drc/test_drc_physical_clearance.cpp
+    drc/test_drc_prepared_candidates.cpp
     drc/test_drc_rule_editor.cpp
     drc/test_drc_violation_layers_issue24941.cpp
     drc/test_drc_net_chain_tuning_profiles.cpp
@@ -247,6 +253,7 @@ set( QA_PCBNEW_SRCS
     pcb_io/altium/test_altium_rule_transformer.cpp
     pcb_io/altium/test_altium_pcblib_import.cpp
     pcb_io/altium/test_altium_pcb_import.cpp
+    pcb_io/altium/test_altium_custom_pad_issue23933.cpp
     pcb_io/cadstar/test_cadstar_footprints.cpp
     pcb_io/eagle/test_eagle_board_import.cpp
     pcb_io/eagle/test_eagle_binary_import.cpp

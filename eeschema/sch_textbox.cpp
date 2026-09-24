@@ -39,6 +39,7 @@
 #include <geometry/geometry_utils.h>
 #include <sch_textbox.h>
 #include <tools/sch_navigate_tool.h>
+#include <tool/tool_manager.h>
 #include <markup_parser.h>
 #include <properties/property.h>
 #include <properties/property_mgr.h>
@@ -190,7 +191,12 @@ bool SCH_TEXTBOX::Deserialize( const kiapi::schematic::types::SchematicTextBox& 
         }
 
         attrs.m_Angle = EDA_ANGLE( aInput.textbox().attributes().angle().value_degrees(), DEGREES_T );
-        attrs.m_LineSpacing = aInput.textbox().attributes().line_spacing();
+
+        if( aInput.textbox().attributes().has_line_spacing() )
+            attrs.m_LineSpacing = aInput.textbox().attributes().line_spacing();
+        else
+            attrs.m_LineSpacing = 1.0;
+
         attrs.m_StrokeWidth = UnpackDistance( aInput.textbox().attributes().stroke_width(), aScale );
         attrs.m_Halign = FromProtoEnum<GR_TEXT_H_ALIGN_T, types::HorizontalAlignment>(
                 aInput.textbox().attributes().horizontal_alignment() );
@@ -422,8 +428,8 @@ KIFONT::FONT* SCH_TEXTBOX::GetDrawFont( const RENDER_SETTINGS* aSettings ) const
 }
 
 
-wxString SCH_TEXTBOX::GetShownText( const RENDER_SETTINGS* aSettings, const SCH_SHEET_PATH* aPath, bool aAllowExtraText,
-                                    int aDepth ) const
+wxString SCH_TEXTBOX::GetShownText( const RENDER_SETTINGS* aSettings, const SCH_SHEET_PATH* aPath,
+                                    RESOLUTION_CONTEXT aContext, int aDepth ) const
 {
     // Use local depth counter so each text element starts fresh
     int depth = 0;
@@ -445,12 +451,12 @@ wxString SCH_TEXTBOX::GetShownText( const RENDER_SETTINGS* aSettings, const SCH_
                 return false;
             };
 
-    wxString text = EDA_TEXT::GetShownText( aAllowExtraText, depth );
+    wxString text = EDA_TEXT::GetShownText( aContext, depth );
 
-    if( HasTextVars() )
+    if( HasTextVars() && aContext != RAW_VALUE )
     {
         text = ResolveTextVars( text, &textResolver, depth );
-        FinalizeTextVarExpansion( text, aAllowExtraText );
+        FinalizeTextVarExpansion( text, aContext );
     }
 
     if( aDepth == 0 )
@@ -525,8 +531,8 @@ void SCH_TEXTBOX::DoHypertextAction( EDA_DRAW_FRAME* aFrame, const VECTOR2I& aMo
 
 wxString SCH_TEXTBOX::GetItemDescription( UNITS_PROVIDER* aUnitsProvider, bool aFull ) const
 {
-    return wxString::Format( _( "Text box '%s'" ),
-                             aFull ? GetShownText( false ) : KIUI::EllipsizeMenuText( GetText() ) );
+    return wxString::Format( _( "Text box '%s'" ), aFull ? GetShownText( FOR_GUI )
+                                                         : KIUI::EllipsizeMenuText( GetText() ) );
 }
 
 
@@ -580,7 +586,7 @@ void SCH_TEXTBOX::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS
     std::vector<VECTOR2I> positions;
     wxArrayString         strings_list;
 
-    wxStringSplit( GetShownText( renderSettings, sheet, true ), strings_list, '\n' );
+    wxStringSplit( GetShownText( renderSettings, sheet, FOR_CANVAS ), strings_list, '\n' );
     positions.reserve( strings_list.Count() );
 
     if( renderSettings->m_Transform != TRANSFORM() || aOffset != VECTOR2I() )
@@ -588,9 +594,7 @@ void SCH_TEXTBOX::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS
         SCH_TEXTBOX temp( *this );
 
         if( renderSettings->m_Transform.y1 )
-        {
             temp.SetTextAngle( temp.GetTextAngle() == ANGLE_HORIZONTAL ? ANGLE_VERTICAL : ANGLE_HORIZONTAL );
-        }
 
         temp.SetStart( renderSettings->TransformCoordinate( m_start ) + aOffset );
         temp.SetEnd( renderSettings->TransformCoordinate( m_end ) + aOffset );

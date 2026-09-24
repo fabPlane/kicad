@@ -52,6 +52,8 @@ class PCB_REFERENCE_IMAGE;
 class PCB_TEXT;
 class PCB_FIELD;
 class PCB_TEXTBOX;
+class PCB_DRILL_CHART;
+class PCB_DRILL_MAP;
 class PCB_TABLE;
 class PCB_DIMENSION_BASE;
 class PCB_BARCODE;
@@ -62,7 +64,8 @@ class NET_SETTINGS;
 class NETINFO_LIST;
 class TEXT_ATTRIBUTES;
 class PCB_BOARD_OUTLINE;
-class PCB_GRIDITEM;
+class PCB_GRID_ITEM;
+struct DRILL_SYMBOL_ENTRY;
 
 namespace KIFONT
 {
@@ -232,6 +235,19 @@ protected:
     void draw( const PCB_ARC* aArc, int aLayer );
     void draw( const PCB_VIA* aVia, int aLayer );
     void draw( const PAD* aPad, int aLayer );
+
+    void drawDrillSymbol( const BOARD_ITEM* aItem, int aLayer );
+
+    /**
+     * One hole's marks for one map. Shared so that the map can draw them itself while it is
+     * being dragged, when the holes' own view bounds still describe where the marks were.
+     */
+    void drawDrillMarks( const PCB_DRILL_MAP* aMap, const std::vector<DRILL_SYMBOL_ENTRY>& aEntries,
+                         const COLOR4D& aColor, const KIFONT::METRICS& aFontMetrics );
+
+    void draw( const PCB_DRILL_MAP* aMap, int aLayer );
+
+    void drawChartSymbols( const PCB_DRILL_CHART* aChart, int aLayer );
     void draw( const PCB_SHAPE* aSegment, int aLayer );
     void draw( const PCB_REFERENCE_IMAGE* aBitmap, int aLayer );
     void draw( const PCB_FIELD* aField, int aLayer );
@@ -247,7 +263,7 @@ protected:
     void draw( const PCB_TARGET* aTarget );
     void draw( const PCB_MARKER* aMarker, int aLayer );
     void draw( const PCB_BOARD_OUTLINE* aBoardOutline, int aLayer );
-    void draw( const PCB_GRIDITEM* aGridItem, int aLayer );
+    void draw( const PCB_GRID_ITEM* aGridItem, int aLayer );
 
     /**
      * Get the thickness to draw for a line (e.g. 0 thickness lines get a minimum value).

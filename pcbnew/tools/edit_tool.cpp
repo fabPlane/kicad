@@ -41,6 +41,7 @@
 #include <pcb_textbox.h>
 #include <pcb_table.h>
 #include <pcb_generator.h>
+#include <generators/pcb_via_stitch.h>
 #include <zone.h>
 #include <pad.h>
 #include <pcb_edit_frame.h>
@@ -195,17 +196,19 @@ void EDIT_TOOL::Reset( RESET_REASON aReason )
 }
 
 
-static std::shared_ptr<CONDITIONAL_MENU> makeMirrorRotateMenu( TOOL_INTERACTIVE* aTool )
+static std::shared_ptr<CONDITIONAL_MENU> makeMirrorRotateMenu( EDIT_TOOL* aEditTool )
 {
-    std::shared_ptr<CONDITIONAL_MENU> menu = std::make_shared<CONDITIONAL_MENU>( aTool );
+    std::shared_ptr<CONDITIONAL_MENU> menu = std::make_shared<CONDITIONAL_MENU>( aEditTool );
 
     menu->SetIcon( BITMAPS::special_tools );
     menu->SetUntranslatedTitle( _HKI( "Mirror / Rotate" ) );
 
+    bool isBoardEditor = aEditTool && aEditTool->IsBoardEditor();
+
     auto canMirror =
-            []( const SELECTION& aSelection )
+            [isBoardEditor]( const SELECTION& aSelection )
             {
-                if( SELECTION_CONDITIONS::OnlyTypes( padTypes )( aSelection ) )
+                if( isBoardEditor && SELECTION_CONDITIONS::OnlyTypes( padTypes )( aSelection ) )
                     return false;
 
                 return selectionMirrorable( aSelection );
@@ -874,6 +877,7 @@ bool EDIT_TOOL::Init()
                                        PCB_DIM_RADIAL_T,
                                        PCB_DIM_ORTHOGONAL_T,
                                        PCB_TABLE_T,
+                                       PCB_DRILL_CHART_T,
                                        PCB_TABLECELL_T,
                                } );
 
@@ -2507,7 +2511,8 @@ int EDIT_TOOL::Rotate( const TOOL_EVENT& aEvent )
                     sTool->FilterCollectorForLockedItems( aCollector );
             } );
 
-    m_selectionTool->ReportFilteredLockedItems();
+    if( m_selectionTool->ReportFilteredLockedItems() )
+        return 0;
 
     if( selection.Empty() )
         return 0;
@@ -2523,7 +2528,7 @@ int EDIT_TOOL::Rotate( const TOOL_EVENT& aEvent )
     // RequestSelection() as we need the reference point when a pad is the selection front.
     if( !m_isFootprintEditor && !frame()->GetPcbNewSettings()->m_AllowFreePads )
     {
-        selection = m_selectionTool->RequestSelection(
+        PCB_SELECTION& filtered = m_selectionTool->RequestSelection(
                 []( const VECTOR2I& aPt, GENERAL_COLLECTOR& aCollector, PCB_SELECTION_TOOL* sTool )
                 {
                     sTool->FilterCollectorForMarkers( aCollector );
@@ -2533,7 +2538,10 @@ int EDIT_TOOL::Rotate( const TOOL_EVENT& aEvent )
                     sTool->FilterCollectorForLockedItems( aCollector );
                 } );
 
-        m_selectionTool->ReportFilteredLockedItems();
+        if( m_selectionTool->ReportFilteredLockedItems() )
+            return 0;
+
+        selection = filtered;
     }
 
     // Did we filter everything out?  If so, don't try to operate further
@@ -2678,8 +2686,21 @@ static void mirrorPad( PAD& aPad, const VECTOR2I& aMirrorPoint, FLIP_DIRECTION a
 
 
 const std::vector<KICAD_T> EDIT_TOOL::MirrorableItems = {
-    PCB_SHAPE_T, PCB_FIELD_T, PCB_TEXT_T,  PCB_TEXTBOX_T,   PCB_ZONE_T,  PCB_PAD_T,   PCB_TRACE_T,
-    PCB_ARC_T,   PCB_VIA_T,   PCB_GROUP_T, PCB_GENERATOR_T, PCB_POINT_T, PCB_TABLE_T, PCB_REFERENCE_IMAGE_T,
+    PCB_SHAPE_T,
+    PCB_FIELD_T,
+    PCB_TEXT_T,
+    PCB_TEXTBOX_T,
+    PCB_ZONE_T,
+    PCB_PAD_T,
+    PCB_TRACE_T,
+    PCB_ARC_T,
+    PCB_VIA_T,
+    PCB_GROUP_T,
+    PCB_GENERATOR_T,
+    PCB_POINT_T,
+    PCB_TABLE_T,
+    PCB_REFERENCE_IMAGE_T,
+    PCB_DRILL_CHART_T,
 };
 
 
@@ -2759,7 +2780,10 @@ int EDIT_TOOL::Mirror( const TOOL_EVENT& aEvent )
             static_cast<PCB_TEXTBOX*>( item )->Mirror( mirrorPoint, flipDirection );
             break;
 
-        case PCB_TABLE_T: static_cast<PCB_TABLE*>( item )->Mirror( mirrorPoint, flipDirection ); break;
+        case PCB_TABLE_T:
+        case PCB_DRILL_CHART_T:
+            static_cast<PCB_TABLE*>( item )->Mirror( mirrorPoint, flipDirection );
+            break;
 
         case PCB_PAD_T:
             mirrorPad( *static_cast<PAD*>( item ), mirrorPoint, flipDirection );
@@ -3058,6 +3082,7 @@ void EDIT_TOOL::DeleteItems( const PCB_SELECTION& aItems, bool aIsCut )
         case PCB_TEXTBOX_T:
         case PCB_BARCODE_T:
         case PCB_TABLE_T:
+        case PCB_DRILL_CHART_T:
         case PCB_REFERENCE_IMAGE_T:
         case PCB_DIMENSION_T:
         case PCB_DIM_ALIGNED_T:
@@ -3071,6 +3096,10 @@ void EDIT_TOOL::DeleteItems( const PCB_SELECTION& aItems, bool aIsCut )
             break;
 
         case PCB_TABLECELL_T:
+            // A drill chart's cells report the board, so there is no user text to clear
+            if( board_item->GetParent() && board_item->GetParent()->Type() == PCB_DRILL_CHART_T )
+                break;
+
             // Clear contents of table cell
             commit.Modify( board_item );
             static_cast<PCB_TABLECELL*>( board_item )->SetText( wxEmptyString );
@@ -3131,6 +3160,27 @@ void EDIT_TOOL::DeleteItems( const PCB_SELECTION& aItems, bool aIsCut )
             commit.Remove( board_item );
             itemsDeleted++;
             break;
+
+        case PCB_VIA_T:
+        {
+            if( !aIsCut )
+            {
+                EDA_GROUP* parent = board_item->GetParentGroup();
+                PCB_VIA_STITCH* stitch =
+                        parent ? dynamic_cast<PCB_VIA_STITCH*>( parent->AsEdaItem() ) : nullptr;
+
+                if( stitch && !aItems.Contains( stitch ) )
+                {
+                    // We need to mark the via as excluded on deletion
+                    commit.Modify( stitch );
+                    stitch->ExcludePosition( board_item->GetPosition() );
+                }
+            }
+
+            commit.Remove( board_item );
+            itemsDeleted++;
+            break;
+        }
 
         case PCB_GENERATOR_T:
         {
@@ -3459,7 +3509,7 @@ int EDIT_TOOL::Duplicate( const TOOL_EVENT& aEvent )
             case PCB_DIM_RADIAL_T:
             case PCB_DIM_ORTHOGONAL_T:
             case PCB_DIM_LEADER_T:
-            case PCB_GRIDITEM_T:
+            case PCB_GRID_ITEM_T:
                 if( m_isFootprintEditor )
                     dupe_item = parentFootprint->DuplicateItem( true, &commit, orig_item );
                 else
@@ -3502,6 +3552,11 @@ int EDIT_TOOL::Duplicate( const TOOL_EVENT& aEvent )
                 idMap[orig_item->m_Uuid] = dupe_item->m_Uuid;
                 new_items.push_back( dupe_item );
                 commit.Add( dupe_item );
+                break;
+
+            case PCB_DRILL_CHART_T:
+                // A second chart of the same holes says nothing the first does not, and it
+                // would land on top of it
                 break;
 
             case PCB_GENERATOR_T:
@@ -3689,7 +3744,7 @@ bool EDIT_TOOL::updateModificationPoint( PCB_SELECTION& aSelection )
         return false;
 
     // When there is only one item selected, the reference point is its position...
-    if( aSelection.Size() == 1 && aSelection.Front()->Type() != PCB_TABLE_T )
+    if( aSelection.Size() == 1 && BaseType( aSelection.Front()->Type() ) != PCB_TABLE_T )
     {
         if( aSelection.Front()->IsBOARD_ITEM() )
         {
@@ -3926,16 +3981,17 @@ int EDIT_TOOL::copyToClipboardAsText( const TOOL_EVENT& aEvent )
                 {
                     // These can all go via the PCB_TEXT class
                     const PCB_TEXT& text = static_cast<const PCB_TEXT&>( aItem );
-                    return text.GetShownText( true );
+                    return text.GetShownText( FOR_CANVAS );
                 }
                 case PCB_TEXTBOX_T:
                 case PCB_TABLECELL_T:
                 {
                     // This one goes via EDA_TEXT
                     const PCB_TEXTBOX& textBox = static_cast<const PCB_TEXTBOX&>( aItem );
-                    return textBox.GetShownText( true );
+                    return textBox.GetShownText( FOR_CANVAS );
                 }
                 case PCB_TABLE_T:
+                case PCB_DRILL_CHART_T:
                 {
                     const PCB_TABLE& table = static_cast<const PCB_TABLE&>( aItem );
                     wxString         s;
@@ -3945,7 +4001,7 @@ int EDIT_TOOL::copyToClipboardAsText( const TOOL_EVENT& aEvent )
                         for( int col = 0; col < table.GetColCount(); ++col )
                         {
                             const PCB_TABLECELL* cell = table.GetCell( row, col );
-                            s << cell->GetShownText( true );
+                            s << cell->GetShownText( FOR_CANVAS );
 
                             if( col < table.GetColCount() - 1 )
                                 s << '\t';

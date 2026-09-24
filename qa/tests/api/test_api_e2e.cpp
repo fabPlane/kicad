@@ -17,16 +17,20 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include "api_e2e_utils.h"
+
 #include <utility>
 
 #include <chrono>
 
 #include <boost/test/unit_test.hpp>
 #include <wx/ffile.h>
+#include <qa_utils/file_utils.h>
+
+#include <magic_enum.hpp>
+
 #include <wx/filefn.h>
 #include <wx/filename.h>
-
-#include "api_e2e_utils.h"
 
 #include <api/board/board.pb.h>
 #include <api/board/board_commands.pb.h>
@@ -37,10 +41,9 @@
 class TEMP_KITCHEN_SINK_COPY
 {
 public:
-    ~TEMP_KITCHEN_SINK_COPY()
+    TEMP_KITCHEN_SINK_COPY() :
+            m_tempRoot( "kicad_api_e2e" )
     {
-        if( !m_tempDir.IsEmpty() && wxFileName::DirExists( m_tempDir ) )
-            wxFileName::Rmdir( m_tempDir, wxPATH_RMDIR_RECURSIVE );
     }
 
     bool Create( wxString* aError )
@@ -50,31 +53,9 @@ public:
         wxFileName srcPro( testDataDir, wxS( "api_kitchen_sink.kicad_pro" ) );
         wxFileName srcDru( testDataDir, wxS( "api_kitchen_sink.kicad_dru" ) );
 
-        wxString tempToken = wxFileName::CreateTempFileName( wxS( "kicad-api-e2e-" ) );
-
-        if( tempToken.IsEmpty() )
-        {
-            if( aError )
-                *aError = wxS( "Failed to create temporary file name" );
-
-            return false;
-        }
-
-        wxRemoveFile( tempToken );
-
-        if( !wxFileName::Mkdir( tempToken, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL ) )
-        {
-            if( aError )
-                *aError = wxS( "Failed to create temporary directory" );
-
-            return false;
-        }
-
-        m_tempDir = tempToken;
-
-        wxFileName dstPcb( m_tempDir, srcPcb.GetFullName() );
-        wxFileName dstPro( m_tempDir, srcPro.GetFullName() );
-        wxFileName dstDru( m_tempDir, srcDru.GetFullName() );
+        wxFileName dstPcb( m_tempRoot.PathStr(), srcPcb.GetFullName() );
+        wxFileName dstPro( m_tempRoot.PathStr(), srcPro.GetFullName() );
+        wxFileName dstDru( m_tempRoot.PathStr(), srcDru.GetFullName() );
 
         if( !wxCopyFile( srcPcb.GetFullPath(), dstPcb.GetFullPath(), true )
             || !wxCopyFile( srcPro.GetFullPath(), dstPro.GetFullPath(), true )
@@ -93,8 +74,8 @@ public:
     const wxString& BoardPath() const { return m_boardPath; }
 
 private:
-    wxString m_tempDir;
-    wxString m_boardPath;
+    KI_TEST::SCOPED_TEMP_DIR m_tempRoot;
+    wxString                 m_boardPath;
 };
 
 
@@ -721,4 +702,121 @@ BOOST_FIXTURE_TEST_CASE( OpenLibraryItemSwitchesHeadlessFootprint, API_SERVER_E2
 
     BOOST_REQUIRE( Client().CloseAllDocuments() );
 }
+
+
+BOOST_FIXTURE_TEST_CASE( CreateDocument, API_SERVER_E2E_FIXTURE )
+{
+    BOOST_REQUIRE_MESSAGE( Start(), LastError() );
+
+    auto test =
+        [&]( kiapi::common::types::DocumentType aType, const wxString& aExpectedExt )
+        {
+            KI_TEST::SCOPED_TEMP_DIR tempDir( "kicad_api_e2e_createdoc" );
+
+            wxString   tempFn = tempDir.ChildPathStr( "new_doc" );
+            wxFileName fileWithExt( tempDir.ChildPathStr( "new_doc" + aExpectedExt ) );
+            wxFileName projectWithExt( tempDir.ChildPathStr( "new_doc.kicad_pro" ) );
+
+            kiapi::common::types::DocumentSpecifier document;
+
+            BOOST_REQUIRE_MESSAGE( Client().CreateDocument( tempFn, aType, &document ),
+                                   "CreateDocument failed: " + Client().LastError() );
+
+            BOOST_CHECK( document.type() == aType );
+            BOOST_CHECK( document.project().name() == projectWithExt.GetName() );
+            BOOST_CHECK( document.project().path() == projectWithExt.GetPath( true ) );
+
+            kiapi::common::ApiResponse response;
+            kiapi::common::commands::GetDocumentModifiedState state;
+            state.mutable_document()->CopyFrom( document );
+            BOOST_CHECK( Client().SendCommand( state, &response ) );
+
+            // Just creating the document doesn't save it
+            BOOST_CHECK( !wxFileName( fileWithExt ).FileExists() );
+            BOOST_CHECK( !wxFileName( projectWithExt ).FileExists() );
+
+            kiapi::common::commands::SaveDocument save;
+            save.mutable_document()->CopyFrom( document );
+            BOOST_CHECK( Client().SendCommand( save, &response ) );
+
+            BOOST_CHECK( wxFileName( fileWithExt ).FileExists() );
+            BOOST_CHECK( wxFileName( projectWithExt ).FileExists() );
+        };
+
+    std::map<kiapi::common::types::DocumentType, wxString> cases = {
+        { kiapi::common::types::DOCTYPE_PCB, wxS( ".kicad_pcb" )},
+        { kiapi::common::types::DOCTYPE_SCHEMATIC, wxS( ".kicad_sch" ) }
+    };
+
+    for( const auto& [docType, ext] : cases )
+    {
+        BOOST_TEST_CONTEXT( magic_enum::enum_name( docType ) )
+        {
+            test( docType, ext );
+        }
+    }
+}
+
+
+BOOST_FIXTURE_TEST_CASE( CreateDocumentRejectsUnsavedModifications, API_SERVER_E2E_FIXTURE )
+{
+    using namespace kiapi::common::commands;
+
+    BOOST_REQUIRE_MESSAGE( Start(), LastError() );
+
+    auto test =
+        [&]( kiapi::common::types::DocumentType aType, const wxString& aExistingPath )
+        {
+            KI_TEST::SCOPED_TEMP_DIR tempDir( "kicad_api_e2e_createdoc" );
+            wxString                 docFileName = tempDir.ChildPathStr( "new_doc" );
+
+            kiapi::common::types::DocumentSpecifier existingDoc;
+
+            BOOST_REQUIRE_MESSAGE( Client().OpenDocument( aExistingPath, aType, &existingDoc ),
+                                   "OpenDocument failed: " + Client().LastError() );
+
+            SetPageSettings modify;
+            modify.mutable_document()->CopyFrom( existingDoc );
+            modify.mutable_page_settings()->set_orientation( kiapi::common::types::PO_PORTRAIT );
+            kiapi::common::ApiResponse response;
+            BOOST_CHECK( Client().SendCommand( modify, &response ) );
+
+            GetDocumentModifiedState stateQuery;
+            stateQuery.mutable_document()->CopyFrom( existingDoc );
+            BOOST_CHECK( Client().SendCommand( stateQuery, &response ) );
+            GetDocumentModifiedStateResponse state;
+            BOOST_CHECK( response.message().UnpackTo( &state ) );
+            BOOST_CHECK( state.state() == DocumentModifiedState::DMS_MODIFIED );
+
+            kiapi::common::types::DocumentSpecifier newDoc;
+
+            BOOST_REQUIRE( !Client().CreateDocument( docFileName, aType, &newDoc ) );
+
+            BOOST_CHECK( Client().LastError().Contains( wxS( "save or revert" ) ) );
+
+            kiapi::common::commands::RevertDocument revert;
+            revert.mutable_document()->CopyFrom( existingDoc );
+            BOOST_CHECK( Client().SendCommand( revert, &response ) );
+
+            BOOST_REQUIRE( Client().CreateDocument( docFileName, aType, &newDoc ) );
+
+            BOOST_CHECK( Client().CloseAllDocuments() );
+        };
+
+    std::map<kiapi::common::types::DocumentType, wxString> cases = {
+        { kiapi::common::types::DOCTYPE_PCB,
+          wxString::FromUTF8( KI_TEST::GetPcbnewTestDataDir() ) + wxS( "api_kitchen_sink.kicad_pcb" ) },
+        { kiapi::common::types::DOCTYPE_SCHEMATIC,
+          wxString::FromUTF8( KI_TEST::GetEeschemaTestDataDir() ) + wxS( "api_kitchen_sink.kicad_sch" ) }
+    };
+
+    for( const auto& [docType, path] : cases )
+    {
+        BOOST_TEST_CONTEXT( magic_enum::enum_name( docType ) )
+        {
+            test( docType, path );
+        }
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -78,7 +78,7 @@ public:
 
     void RebuildRows() override;
 
-    void ApplyData( BOARD_COMMIT& aCommit, TEMPLATES& aTemplateFieldnames, const wxString& aVariantName );
+    void ApplyData( BOARD_COMMIT& aCommit, TEMPLATES& aTemplateFieldnames );
 
     void  SetScope( SCOPE aScope ) { m_scope = aScope; }
     SCOPE GetScope() { return m_scope; }
@@ -98,6 +98,8 @@ public:
     bool ColIsReadOnly( int aCol ) const override;
 
 private:
+    bool fieldSupportsVariants( const wxString& aFieldName ) const override;
+
     bool unitMatch( const FOOTPRINT_REF& lhItem, const FOOTPRINT_REF& rhItem ) override;
 
     /**
@@ -109,7 +111,7 @@ private:
     wxString getAttributeValue( const FOOTPRINT_REF& aRef, const wxString& aAttributeName,
                                 const wxString& aVariantNames );
     bool     getLiveFieldValueForVariant( const FOOTPRINT_REF& aRef, const wxString& aFieldName,
-                                          const wxString& aVariantName, wxString& aValue );
+                                          const wxString& aVariantName, wxString& aValue ) override;
 
     /**
      * Get the default (non-variant) value for a field.
@@ -175,7 +177,14 @@ public:
     bool ApplyData( std::function<bool( FOOTPRINT& )> aChangeHandler );
 
 private:
+    bool fieldSupportsVariants( const wxString& aFieldName ) const override { return false; }
     bool fieldIsItemProperty( const wxString& aFieldName ) const override;
+
+    bool getLiveFieldValueForVariant( const FOOTPRINT_REF& aRef, const wxString& aFieldName, const wxString& aVariant,
+                                      wxString& aValue ) override
+    {
+        return getLiveFieldValue( aRef, aFieldName, aValue );
+    }
 
     bool getLiveFieldValue( const FOOTPRINT_REF& aRef, const wxString& aFieldName,
                             wxString& aValue ) override;

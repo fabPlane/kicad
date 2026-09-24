@@ -38,7 +38,6 @@
 #include <wx/chartype.h>
 #include <wx/string.h>
 
-#include <schematic.h>
 #include <symbol.h>
 #include <sch_field.h>
 #include <sch_pin.h>
@@ -207,13 +206,13 @@ public:
      * @return the associated LIB_SYMBOL's description field (or wxEmptyString).
      */
     wxString GetDescription() const override;
-    wxString GetShownDescription( int aDepth = 0 ) const override;
+    wxString GetShownDescription( RESOLUTION_CONTEXT aContext, int aDepth = 0 ) const override;
 
     /**
      * @return the associated LIB_SYMBOL's keywords field (or wxEmptyString).
      */
     wxString GetKeyWords() const override;
-    wxString GetShownKeyWords( int aDepth = 0 ) const override;
+    wxString GetShownKeyWords( RESOLUTION_CONTEXT aContext, int aDepth = 0 ) const override;
 
     /**
      * Return the documentation text for the given part alias
@@ -463,6 +462,7 @@ public:
     const std::vector<SCH_FIELD>& GetFields() const { return m_fields; }
 
     std::vector<PROPERTY_BASE*> GetDynamicProperties() const override;
+    std::vector<PROPERTY_BASE*> GetDynamicProperties( const SCH_SHEET_PATH* aPath ) const;
 
     /**
      * Add a field to the symbol.
@@ -505,37 +505,28 @@ public:
     /**
      * @return the value for the instance on the given sheet.
      */
-    const wxString GetValue( bool aResolve, const SCH_SHEET_PATH* aPath,
-                             bool aAllowExtraText, const wxString& aVariantName = wxEmptyString ) const override;
+    const wxString GetValue( const SCH_SHEET_PATH* aPath, RESOLUTION_CONTEXT aContext,
+                             const wxString& aVariantName = wxEmptyString ) const override;
 
     void SetValueFieldText( const wxString& aValue, const SCH_SHEET_PATH* aInstance = nullptr,
                             const wxString& aVariantName = wxEmptyString );
 
-    const wxString GetFootprintFieldText( bool aResolve, const SCH_SHEET_PATH* aPath,
-                                          bool aAllowExtraText, const wxString& aVariantName = wxEmptyString ) const;
+    const wxString GetFootprintFieldText( const SCH_SHEET_PATH* aPath, RESOLUTION_CONTEXT aContext,
+                                          const wxString& aVariantName = wxEmptyString ) const;
     void SetFootprintFieldText( const wxString& aFootprint );
 
     /*
      * Field access for property manager
      */
-    wxString GetRefProp() const
-    {
-        return GetRef( &Schematic()->CurrentSheet() );
-    }
+    wxString GetRefProp() const;
 
     void SetRefProp( const wxString& aRef );
 
-    wxString GetValueProp() const
-    {
-        return GetValue( false, &Schematic()->CurrentSheet(), false, Schematic()->GetCurrentVariant() );
-    }
+    wxString GetValueProp() const;
 
     void SetValueProp( const wxString& aValue );  // Implemented in sch_symbol.cpp for tracing
 
-    int GetUnitProp() const
-    {
-        return GetUnitSelection( &Schematic()->CurrentSheet() );
-    }
+    int GetUnitProp() const;
 
     void SetFieldText( const wxString& aFieldName, const wxString& aFieldText, const SCH_SHEET_PATH* aPath = nullptr,
                        const wxString& aVariantName = wxEmptyString );
@@ -543,11 +534,7 @@ public:
     wxString GetFieldText( const wxString& aFieldName, const SCH_SHEET_PATH* aPath = nullptr,
                            const wxString& aVariantName = wxEmptyString ) const;
 
-    void SetUnitProp( int aUnit )
-    {
-        SetUnitSelection( &Schematic()->CurrentSheet(), aUnit );
-        SetUnit( aUnit );
-    }
+    void SetUnitProp( int aUnit );
 
     wxString GetBodyStyleProp() const override
     {
@@ -689,6 +676,7 @@ public:
 
 
     std::vector<std::unique_ptr<SCH_PIN>>& GetRawPins() { return m_pins; }
+    const std::vector<std::unique_ptr<SCH_PIN>>& GetRawPins() const { return m_pins; }
 
     /**
      * Set the reference for the given sheet path for this symbol.
@@ -737,10 +725,9 @@ public:
     virtual bool GetDNP( const SCH_SHEET_PATH* aInstance = nullptr,
                          const wxString& aVariantName = wxEmptyString ) const override;
 
-    bool GetDNPProp() const { return GetDNP( &Schematic()->CurrentSheet(), Schematic()->GetCurrentVariant() ); }
+    bool GetDNPProp() const;
 
-    void SetDNPProp( bool aEnable ) { SetDNP( aEnable, &Schematic()->CurrentSheet(),
-                                              Schematic()->GetCurrentVariant() ); }
+    void SetDNPProp( bool aEnable );
 
     /**
      * Set the per-instance pin-to-pad map override (issue #2282).
@@ -765,60 +752,36 @@ public:
     bool GetExcludedFromBOM( const SCH_SHEET_PATH* aInstance = nullptr,
                              const wxString& aVariantName = wxEmptyString ) const override;
 
-    bool GetExcludedFromBOMProp() const
-    {
-        return GetExcludedFromBOM( &Schematic()->CurrentSheet(), Schematic()->GetCurrentVariant() );
-    }
+    bool GetExcludedFromBOMProp() const;
 
-    void SetExcludedFromBOMProp( bool aEnable )
-    {
-        SetExcludedFromBOM( aEnable, &Schematic()->CurrentSheet(), Schematic()->GetCurrentVariant() );
-    }
+    void SetExcludedFromBOMProp( bool aEnable );
 
     void SetExcludedFromSim( bool aEnable, const SCH_SHEET_PATH* aInstance = nullptr,
                              const wxString& aVariantName = wxEmptyString ) override;
     bool GetExcludedFromSim( const SCH_SHEET_PATH* aInstance = nullptr,
                              const wxString& aVariantName = wxEmptyString ) const override;
 
-    bool GetExcludedFromSimProp() const
-    {
-        return GetExcludedFromSim( &Schematic()->CurrentSheet(), Schematic()->GetCurrentVariant() );
-    }
+    bool GetExcludedFromSimProp() const;
 
-    void SetExcludedFromSimProp( bool aEnable )
-    {
-        SetExcludedFromSim( aEnable, &Schematic()->CurrentSheet(), Schematic()->GetCurrentVariant() );
-    }
+    void SetExcludedFromSimProp( bool aEnable );
 
     void SetExcludedFromBoard( bool aEnable, const SCH_SHEET_PATH* aInstance = nullptr,
                                const wxString& aVariantName = wxEmptyString ) override;
     bool GetExcludedFromBoard( const SCH_SHEET_PATH* aInstance = nullptr,
                                const wxString& aVariantName = wxEmptyString ) const override;
 
-    bool GetExcludedFromBoardProp() const
-    {
-        return GetExcludedFromBoard( &Schematic()->CurrentSheet(), Schematic()->GetCurrentVariant() );
-    }
+    bool GetExcludedFromBoardProp() const;
 
-    void SetExcludedFromBoardProp( bool aEnable )
-    {
-        SetExcludedFromBoard( aEnable, &Schematic()->CurrentSheet(), Schematic()->GetCurrentVariant() );
-    }
+    void SetExcludedFromBoardProp( bool aEnable );
 
     void SetExcludedFromPosFiles( bool aEnable, const SCH_SHEET_PATH* aInstance = nullptr,
                                   const wxString& aVariantName = wxEmptyString ) override;
     bool GetExcludedFromPosFiles( const SCH_SHEET_PATH* aInstance = nullptr,
                                   const wxString& aVariantName = wxEmptyString ) const override;
 
-    bool GetExcludedFromPosFilesProp() const
-    {
-        return GetExcludedFromPosFiles( &Schematic()->CurrentSheet(), Schematic()->GetCurrentVariant() );
-    }
+    bool GetExcludedFromPosFilesProp() const;
 
-    void SetExcludedFromPosFilesProp( bool aEnable )
-    {
-        SetExcludedFromPosFiles( aEnable, &Schematic()->CurrentSheet(), Schematic()->GetCurrentVariant() );
-    }
+    void SetExcludedFromPosFilesProp( bool aEnable );
 
     /**
      * SCH_SYMBOLs don't currently support embedded files, but their LIB_SYMBOL counterparts
@@ -891,17 +854,17 @@ public:
     };
 
     PASSTHROUGH_MODE GetPassthroughMode() const { return m_passthroughMode; }
-    void SetPassthroughMode( PASSTHROUGH_MODE aMode ) { m_passthroughMode = aMode; }
-
-    // Back-compat helpers used by existing code and old file formats
-    bool GetPassthrough() const { return m_passthroughMode != PASSTHROUGH_MODE::BLOCK; }
-    void SetPassthrough( bool aEnable )
+    void SetPassthroughMode( PASSTHROUGH_MODE aMode )
     {
-        m_passthroughMode = aEnable ? PASSTHROUGH_MODE::FORCE : PASSTHROUGH_MODE::BLOCK;
+        if( m_passthroughMode != aMode )
+        {
+            m_passthroughMode = aMode;
+            SetConnectivityDirty();
+        }
     }
 
     const wxString& GetNetChainName() const { return m_signalName; }
-    void SetNetChainName( const wxString& aName ) { m_signalName = aName; }
+    void SetNetChainName( wxString aName ) noexcept { m_signalName.swap( aName ); }
 
     std::vector<VECTOR2I> GetConnectionPoints() const override;
 
@@ -1115,11 +1078,17 @@ protected:
     void swapData( SCH_ITEM* aItem ) override;
 
 private:
+    // Copy construction must relink pins without invalidating the live source screen.
+    void updatePins();
+
     BOX2I doGetBoundingBox( bool aIncludePins, bool aIncludeFields ) const;
 
     bool doIsConnected( const VECTOR2I& aPosition ) const override;
 
     void Init( const VECTOR2I& pos = VECTOR2I( 0, 0 ) );
+
+    void setVariantAttribute( bool aEnable, const SCH_SHEET_PATH* aInstance, const wxString& aVariantName,
+                              bool SCH_SYMBOL::*aBase, bool SCH_SYMBOL_VARIANT::*aOverride );
 
     SCH_SYMBOL_INSTANCE* getInstance( const KIID_PATH& aPath );
     const SCH_SYMBOL_INSTANCE* getInstance( const KIID_PATH& aPath ) const;

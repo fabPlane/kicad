@@ -24,6 +24,8 @@
 #include <netlist_reader/pcb_netlist.h>
 #include <pcb_edit_frame.h>
 #include <reporter.h>
+#include <board.h>
+#include <project.h>
 
 
 class PCB_EDIT_FRAME_CONTEXT : public PCB_CONTEXT
@@ -98,6 +100,18 @@ public:
     {
         bool runDragCommand = false;
         m_frame->OnNetlistChanged( aUpdater, &runDragCommand );
+    }
+
+    bool RevertToSaved() override
+    {
+        wxFileName fn = m_frame->Prj().AbsolutePath( m_frame->GetBoard()->GetFileName() );
+
+        if( fn.GetFullPath().IsEmpty() || !wxFileExists( fn.GetFullPath() ) )
+            return false;
+
+        m_frame->GetScreen()->SetContentModified( false );
+        m_frame->ReleaseFile();
+        return m_frame->OpenProjectFiles( std::vector<wxString>( 1, fn.GetFullPath() ), KICTL_REVERT );
     }
 
 private:

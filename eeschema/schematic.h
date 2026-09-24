@@ -22,12 +22,14 @@
 
 #include <eda_item.h>
 #include <embedded_files.h>
+#include <erc/erc_exclusion.h>
 #include <properties/property_mgr.h>
 #include <schematic_holder.h>
 #include <sch_rtree.h>
 #include <sch_sheet_path.h>
 #include <schematic_settings.h>
 #include <project.h>
+#include <import_net_map.h>
 
 #include <memory>
 #include <optional>
@@ -51,6 +53,12 @@ class SCH_REFERENCE;
 class PROGRESS_REPORTER;
 class TOOL_MANAGER;
 class PICKED_ITEMS_LIST;
+
+namespace SCH_CONNECTIVITY
+{
+class FACADE;
+class NETCHAIN_MANAGER;
+}
 
 namespace KIFONT
 {
@@ -122,6 +130,10 @@ struct SCHEMATIC_CONTENT
     SCH_SHEET_LIST                    hierarchy;
     std::optional<SCH_SHEET_PATH>     currentSheet;
     std::unique_ptr<CONNECTION_GRAPH> connectionGraph;
+
+    /// Keep the schematic's net chains instead of the staged graph's, for append.
+    bool preserveNetChains = false;
+
     std::optional<EMBEDDED_FILES>     embeddedFiles;
     wxString                          drawingSheetFileName;
 };
@@ -147,6 +159,13 @@ public:
 
     /// Initialize this schematic to a blank one, unloading anything existing.
     void Reset();
+
+    const IMPORT_NET_MAP* GetImportNetMap() const
+    {
+        return m_importNetMap ? &*m_importNetMap : nullptr;
+    }
+
+    void SetImportNetMap( IMPORT_NET_MAP aMap ) { m_importNetMap = std::move( aMap ); }
 
     /// Return a reference to the project this schematic is part of
     PROJECT& Project() const { return *m_project; }
@@ -294,6 +313,9 @@ public:
 
     SCH_SCREEN* GetCurrentScreen() const { return CurrentSheet().LastScreen(); }
 
+    SCH_CONNECTIVITY::FACADE& Connectivity() const { return *m_connectivity; }
+    SCH_CONNECTIVITY::NETCHAIN_MANAGER& NetChains() const { return *m_netChains; }
+
     CONNECTION_GRAPH* ConnectionGraph() const
     {
         return m_connectionGraph;
@@ -320,6 +342,9 @@ public:
     void AddBusAlias( std::shared_ptr<BUS_ALIAS> aAlias );
 
     void SetBusAliases( const std::vector<std::shared_ptr<BUS_ALIAS>>& aAliases );
+
+    // An explicit project table, including an empty one, supersedes legacy sheet definitions.
+    bool HasProjectBusAliases() const;
 
     const std::vector<std::shared_ptr<BUS_ALIAS>>& GetAllBusAliases() const
     {
@@ -412,13 +437,18 @@ public:
      *
      * This function is needed for some plugins (e.g. Legacy and Cadstar) in order to retain
      * connectivity after loading.
+     * @param aOnSplit receives the retained wire and its new segment to preserve import provenance.
      */
-    int FixupJunctionsAfterImport();
+    int FixupJunctionsAfterImport( const std::function<void( SCH_LINE*, SCH_LINE* )>& aOnSplit = {} );
 
     /**
      * Scan existing markers and record data from any that are Excluded.
      */
     void RecordERCExclusions();
+
+    size_t GetUnresolvedERCExclusionCount() const { return m_unresolvedErcExclusions.size(); }
+
+    void ClearUnresolvedERCExclusions( int aErrorCode = -1 );
 
     /**
      * Update markers to match recorded exclusions.
@@ -517,15 +547,26 @@ public:
      */
     void CleanUp( SCH_COMMIT* aCommit, SCH_SCREEN* aScreen = nullptr );
 
+    // Prepare source geometry and intersheet references before rebuilding connectivity.
+    void CleanUpConnections( SCH_COMMIT* aCommit, SCH_CLEANUP_FLAGS aCleanupFlags,
+                             const std::set<SCH_SCREEN*>& aLocalScreens = {} );
+
+    // Fully rebuild the selected connectivity backend without changing source geometry.
+    void RebuildConnectivity( std::function<void( SCH_ITEM* )>* aChangedItemHandler = nullptr,
+                              PROGRESS_REPORTER* aProgressReporter = nullptr,
+                              KIGFX::SCH_VIEW* aSchView = nullptr );
+
     /**
      * Generate the connection data for the entire schematic hierarchy.
+     * @param aCleanupDone the commit already applied cleanup; flags still select the rebuild scope.
      */
     void RecalculateConnections( SCH_COMMIT* aCommit, SCH_CLEANUP_FLAGS aCleanupFlags,
                                  TOOL_MANAGER* aToolManager,
                                  PROGRESS_REPORTER* aProgressReporter = nullptr,
                                  KIGFX::SCH_VIEW* aSchView = nullptr,
                                  std::function<void( SCH_ITEM* )>* aChangedItemHandler = nullptr,
-                                 PICKED_ITEMS_LIST*                aLastChangeList = nullptr );
+                                 PICKED_ITEMS_LIST*                aLastChangeList = nullptr,
+                                 bool aCleanupDone = false );
 
     /**
      * Store all existing annotations in the REFDES_TRACKER.
@@ -634,11 +675,6 @@ public:
      */
     void LoadVariants();
 
-    /**
-     * True if a SCHEMATIC exists, false if not
-     */
-    static bool m_IsSchematicExists;
-
 #if defined(DEBUG)
     void Show( int nestLevel, std::ostream& os ) const override {}
 #endif
@@ -663,6 +699,8 @@ public:
     std::weak_ptr<void> GetHistoryLifetimeToken() const { return m_historyLifetime; }
 
 private:
+    bool resolveCrossReference( wxString* aToken, int aDepth ) const;
+
     friend class SCH_EDIT_FRAME;
 
     template <typename Func, typename... Args>
@@ -678,6 +716,7 @@ private:
     void rebuildHierarchyState( bool aResetConnectionGraph );
 
     PROJECT* m_project;
+    std::optional<IMPORT_NET_MAP> m_importNetMap;
 
     /// Sentinel whose expiry signals to LOCAL_HISTORY that this schematic has been destroyed.
     std::shared_ptr<void> m_historyLifetime = std::make_shared<char>();
@@ -699,6 +738,8 @@ private:
 
     /// Hold and calculate connectivity information of this schematic.
     CONNECTION_GRAPH* m_connectionGraph;
+    std::unique_ptr<SCH_CONNECTIVITY::FACADE> m_connectivity;
+    std::unique_ptr<SCH_CONNECTIVITY::NETCHAIN_MANAGER> m_netChains;
 
     wxString m_highlightedNetChain;
 
@@ -723,6 +764,9 @@ private:
      * Cache of the entire schematic hierarchy sorted by sheet page number.
      */
     SCH_SHEET_LIST m_hierarchy;
+
+    /// Exclusions whose saved identity cannot currently be reconstructed as a marker.
+    std::vector<ERC_EXCLUSION> m_unresolvedErcExclusions;
 
     /**
      * Currently installed listeners.

@@ -31,6 +31,7 @@
 #include <wildcards_and_files_ext.h>
 #include <confirm.h>
 #include <progress_reporter.h>
+#include <kiid.h>
 
 #include <kiplatform/io.h>
 
@@ -223,7 +224,9 @@ static bool isProjectDirectory( const wxString& aProjectPath )
 // "<projectname>-backups").
 static bool isRestoreProtectedEntry( const wxString& aName )
 {
-    return aName == wxS( ".history" ) || aName == wxS( ".git" ) || aName == wxS( "_restore_backup" )
+    return aName == wxS( ".history" ) || aName == wxS( ".history_old" )
+           || aName.StartsWith( wxS( ".history_old_" ) )
+           || aName == wxS( ".git" ) || aName == wxS( "_restore_backup" )
            || aName.StartsWith( wxS( "_restore_backup_" ) ) || aName == wxS( "_restore_temp" )
            || aName == wxS( "_restore_discard" ) || aName.EndsWith( PROJECT_BACKUPS_DIR_SUFFIX );
 }
@@ -1523,82 +1526,63 @@ static size_t dirSizeRecursive( const wxString& path )
     return total;
 }
 
-// Copy tree and all blob objects directly between ODBs
-static bool copyTreeObjects( git_repository* aSrcRepo, git_odb* aSrcOdb, git_odb* aDstOdb, const git_oid* aTreeOid,
-                             std::set<git_oid, bool ( * )( const git_oid&, const git_oid& )>& aCopied )
+static std::vector<wxString> listPackFiles( git_repository* aRepo )
 {
-    if( aCopied.count( *aTreeOid ) )
-        return true;
+    std::vector<wxString> packs;
+    wxString packPath = wxString::FromUTF8( git_repository_path( aRepo ) ) + wxS( "objects" )
+                        + wxFileName::GetPathSeparator() + wxS( "pack" );
+    wxDir packDir( packPath );
 
-    git_odb_object* obj = nullptr;
+    if( !packDir.IsOpened() )
+        return packs;
 
-    if( git_odb_read( &obj, aSrcOdb, aTreeOid ) != 0 )
-        return false;
+    wxString name;
+    bool     cont = packDir.GetFirst( &name, wxEmptyString, wxDIR_FILES );
 
-    git_oid written;
-    int     err = git_odb_write( &written, aDstOdb, git_odb_object_data( obj ), git_odb_object_size( obj ),
-                                 git_odb_object_type( obj ) );
-    git_odb_object_free( obj );
-
-    if( err != 0 )
-        return false;
-
-    aCopied.insert( *aTreeOid );
-
-    git_tree* tree = nullptr;
-
-    if( git_tree_lookup( &tree, aSrcRepo, aTreeOid ) != 0 )
-        return false;
-
-    size_t cnt = git_tree_entrycount( tree );
-
-    for( size_t i = 0; i < cnt; ++i )
+    while( cont )
     {
-        const git_tree_entry* entry = git_tree_entry_byindex( tree, i );
-        const git_oid*        entryId = git_tree_entry_id( entry );
+        if( name.EndsWith( wxS( ".pack" ) ) || name.EndsWith( wxS( ".idx" ) ) )
+            packs.push_back( packPath + wxFileName::GetPathSeparator() + name );
 
-        if( aCopied.count( *entryId ) )
-            continue;
-
-        if( git_tree_entry_type( entry ) == GIT_OBJECT_TREE )
-        {
-            if( !copyTreeObjects( aSrcRepo, aSrcOdb, aDstOdb, entryId, aCopied ) )
-            {
-                git_tree_free( tree );
-                return false;
-            }
-        }
-        else if( git_tree_entry_type( entry ) == GIT_OBJECT_BLOB )
-        {
-            git_odb_object* blobObj = nullptr;
-
-            if( git_odb_read( &blobObj, aSrcOdb, entryId ) == 0 )
-            {
-                git_oid blobWritten;
-
-                if( git_odb_write( &blobWritten, aDstOdb, git_odb_object_data( blobObj ),
-                                   git_odb_object_size( blobObj ), git_odb_object_type( blobObj ) )
-                    != 0 )
-                {
-                    git_odb_object_free( blobObj );
-                    git_tree_free( tree );
-                    return false;
-                }
-
-                git_odb_object_free( blobObj );
-                aCopied.insert( *entryId );
-            }
-        }
+        cont = packDir.GetNext( &name );
     }
 
-    git_tree_free( tree );
-    return true;
+    return packs;
+}
+
+
+static bool writePack( git_packbuilder* aPb, const wxString& aPackDir, PROGRESS_REPORTER* aReporter )
+{
+    // Leave libgit2 single threaded.  Its threads split the one long delta chain a KiCad history
+    // holds per file, so each split starts from a full copy and the pack grows several times over
+    if( aReporter )
+    {
+        git_packbuilder_set_callbacks(
+                aPb,
+                []( int aStage, uint32_t aCurrent, uint32_t aTotal, void* aPayload )
+                {
+                    auto* reporter = static_cast<PROGRESS_REPORTER*>( aPayload );
+
+                    if( aTotal > 0 )
+                        reporter->SetCurrentProgress( (double) aCurrent / aTotal );
+
+                    reporter->KeepRefreshing();
+                    return 0;
+                },
+                aReporter );
+    }
+
+    std::string packDir = aPackDir.utf8_string();
+
+    return git_packbuilder_write( aPb, aPackDir.IsEmpty() ? nullptr : packDir.c_str(), 0, nullptr, nullptr ) == 0;
 }
 
 
 // Compact loose objects into a packfile and remove the originals.
 // Equivalent to git gc
-static bool compactRepository( git_repository* aRepo, PROGRESS_REPORTER* aReporter = nullptr )
+// Prior packs are reported via aSupersededPacks, not deleted, since libgit2 keeps them open
+static bool compactRepository( git_repository* aRepo, PROGRESS_REPORTER* aReporter = nullptr,
+                               std::vector<wxString>* aSupersededPacks = nullptr )
 {
     git_packbuilder* pb = nullptr;
 
@@ -1613,6 +1597,8 @@ static bool compactRepository( git_repository* aRepo, PROGRESS_REPORTER* aReport
         return false;
     }
 
+    // Walk every ref so pruning cannot drop objects only a Save_/Last_Save_ tag still holds
+    git_revwalk_push_glob( walk, "refs/*" );
     git_revwalk_push_head( walk );
     git_oid oid;
 
@@ -1628,27 +1614,24 @@ static bool compactRepository( git_repository* aRepo, PROGRESS_REPORTER* aReport
 
     git_revwalk_free( walk );
 
-    if( aReporter )
-    {
-        git_packbuilder_set_callbacks(
-                pb,
-                []( int aStage, uint32_t aCurrent, uint32_t aTotal, void* aPayload )
-                {
-                    auto* reporter = static_cast<PROGRESS_REPORTER*>( aPayload );
-
-                    if( aTotal > 0 )
-                        reporter->SetCurrentProgress( (double) aCurrent / aTotal );
-
-                    reporter->KeepRefreshing();
-                    return 0;
-                },
-                aReporter );
-    }
-
-    if( git_packbuilder_write( pb, nullptr, 0, nullptr, nullptr ) != 0 )
+    if( !writePack( pb, wxEmptyString, aReporter ) )
     {
         git_packbuilder_free( pb );
         return false;
+    }
+
+    // Pack names are content addressed, so an unchanged repo rewrites the same file; exclude it
+    const char* newPackName = git_packbuilder_name( pb );
+
+    if( aSupersededPacks && newPackName )
+    {
+        wxString newPackStem = wxS( "pack-" ) + wxString::FromUTF8( newPackName );
+
+        for( const wxString& pack : listPackFiles( aRepo ) )
+        {
+            if( wxFileName( pack ).GetName() != newPackStem )
+                aSupersededPacks->push_back( pack );
+        }
     }
 
     git_packbuilder_free( pb );
@@ -1710,12 +1693,27 @@ bool LOCAL_HISTORY::EnforceSizeLimit( const wxString& aProjectPath, size_t aMaxB
         aReporter->Report( _( "Compacting local history..." ) );
 
     // Pack loose objects first. Can bring size within limit without a full rebuild.
-    compactRepository( repo, aReporter );
+    std::vector<wxString> supersededPacks;
+    compactRepository( repo, aReporter, &supersededPacks );
+
+    // libgit2 holds the packs open, so release the repository before deleting them
+    lock.ReleaseRepository();
+
+    for( const wxString& pack : supersededPacks )
+        wxRemoveFile( pack );
 
     current = dirSizeRecursive( hist );
 
-    if( current <= aMaxBytes )
+    // Settle below the limit so the following sessions do not each pay for another full repack
+    const size_t target = aMaxBytes / 4 * 3;
+
+    if( current <= target )
         return true; // within limit after compaction
+
+    repo = lock.ReopenRepository();
+
+    if( !repo )
+        return false;
 
     // Collect commits newest-first using revwalk
     git_revwalk* walk = nullptr;
@@ -1739,6 +1737,12 @@ bool LOCAL_HISTORY::EnforceSizeLimit( const wxString& aProjectPath, size_t aMaxB
             {
                 return memcmp( &a, &b, sizeof( git_oid ) ) < 0;
             } );
+
+    // The plain file copies beside .git are rewritten by every save, so they cannot be trimmed away
+    wxString gitDir = wxString::FromUTF8( git_repository_path( repo ) );
+    size_t   gitBytes = dirSizeRecursive( gitDir );
+    size_t   copyBytes = current > gitBytes ? current - gitBytes : 0;
+    size_t   budget = target > copyBytes ? target - copyBytes : 0;
 
     size_t keptBytes = 0;
     std::vector<git_oid> keep;
@@ -1799,7 +1803,7 @@ bool LOCAL_HISTORY::EnforceSizeLimit( const wxString& aProjectPath, size_t aMaxB
         git_tree_free( tree );
         git_commit_free( c );
 
-        if( keep.empty() || keptBytes + add <= aMaxBytes )
+        if( keep.empty() || keptBytes + add <= budget )
         {
             keep.push_back( cOid );
             keptBytes += add;
@@ -1810,6 +1814,9 @@ bool LOCAL_HISTORY::EnforceSizeLimit( const wxString& aProjectPath, size_t aMaxB
 
     if( keep.empty() )
         keep.push_back( commits.front() );
+
+    if( odb )
+        git_odb_free( odb );
 
     // Collect tags we want to preserve (Save_*/Last_Save_*). We'll recreate them if their
     // target commit is retained. Also ensure tagged commits are ALWAYS kept.
@@ -1877,31 +1884,26 @@ bool LOCAL_HISTORY::EnforceSizeLimit( const wxString& aProjectPath, size_t aMaxB
     git_repository* newRepo = nullptr;
 
     if( git_repository_init( &newRepo, trimPath.mb_str().data(), 0 ) != 0 )
-    {
-        git_odb_free( odb );
         return false;
-    }
 
-    git_odb* dstOdb = nullptr;
+    wxString newPackDir = wxString::FromUTF8( git_repository_path( newRepo ) ) + wxS( "objects" )
+                          + wxFileName::GetPathSeparator() + wxS( "pack" );
+    git_repository_free( newRepo );
+    newRepo = nullptr;
 
-    if( git_repository_odb( &dstOdb, newRepo ) != 0 )
-    {
-        git_repository_free( newRepo );
-        git_odb_free( odb );
+    // The rewritten commits go into the current repo, where their trees and blobs already live, so the
+    // trimmed history can be packed straight into the new repo without copying objects one by one
+    git_packbuilder* pb = nullptr;
+
+    if( git_packbuilder_new( &pb, repo ) != 0 )
         return false;
-    }
-
-    std::set<git_oid, bool ( * )( const git_oid&, const git_oid& )> copiedObjects(
-            []( const git_oid& a, const git_oid& b )
-            {
-                return memcmp( &a, &b, sizeof( git_oid ) ) < 0;
-            } );
 
     // Replay kept commits chronologically (oldest first) to preserve order.
     std::reverse( keep.begin(), keep.end() );
     git_commit* parent = nullptr;
     struct MAP_ENTRY { git_oid orig; git_oid neu; };
     std::vector<MAP_ENTRY> commitMap;
+    bool rewriteOk = true;
 
     if( aReporter )
     {
@@ -1909,10 +1911,13 @@ bool LOCAL_HISTORY::EnforceSizeLimit( const wxString& aProjectPath, size_t aMaxB
         aReporter->SetCurrentProgress( 0 );
     }
 
-    for( size_t idx = 0; idx < keep.size(); ++idx )
+    for( size_t idx = 0; idx < keep.size() && rewriteOk; ++idx )
     {
         if( aReporter )
+        {
             aReporter->SetCurrentProgress( (double) idx / keep.size() );
+            aReporter->KeepRefreshing();
+        }
 
         const git_oid& co = keep[idx];
         git_commit* orig = nullptr;
@@ -1921,14 +1926,12 @@ bool LOCAL_HISTORY::EnforceSizeLimit( const wxString& aProjectPath, size_t aMaxB
             continue;
 
         git_tree* tree = nullptr;
-        git_commit_tree( &tree, orig );
 
-        copyTreeObjects( repo, odb, dstOdb, git_tree_id( tree ), copiedObjects );
-
-        git_tree* newTree = nullptr;
-        git_tree_lookup( &newTree, newRepo, git_tree_id( tree ) );
-
-        git_tree_free( tree );
+        if( git_commit_tree( &tree, orig ) != 0 )
+        {
+            git_commit_free( orig );
+            continue;
+        }
 
         // Recreate original author/committer signatures preserving timestamp.
         const git_signature* origAuthor = git_commit_author( orig );
@@ -1951,28 +1954,86 @@ bool LOCAL_HISTORY::EnforceSizeLimit( const wxString& aProjectPath, size_t aMaxB
         }
 
         git_oid newCommitOid;
-        git_commit_create( &newCommitOid, newRepo, "HEAD", sigAuthor, sigCommitter, nullptr, git_commit_message( orig ),
-                           newTree, parentCount, parentCount ? parents : nullptr );
 
-        if( parent )
-            git_commit_free( parent );
+        if( git_commit_create( &newCommitOid, repo, nullptr, sigAuthor, sigCommitter, nullptr,
+                               git_commit_message( orig ), tree, parentCount, parentCount ? parents : nullptr )
+                    != 0 )
+        {
+            rewriteOk = false;
+        }
+        else
+        {
+            if( parent )
+                git_commit_free( parent );
 
-        git_commit_lookup( &parent, newRepo, &newCommitOid );
-
-        commitMap.push_back( MAP_ENTRY{ co, newCommitOid } );
+            parent = nullptr;
+            git_commit_lookup( &parent, repo, &newCommitOid );
+            commitMap.push_back( MAP_ENTRY{ co, newCommitOid } );
+        }
 
         git_signature_free( sigAuthor );
         git_signature_free( sigCommitter );
-        git_tree_free( newTree );
+        git_tree_free( tree );
         git_commit_free( orig );
     }
 
     if( parent )
+        git_commit_free( parent );
+
+    // libgit2 breaks delta ties and lays out the pack by insertion order, which it expects newest first
+    for( auto it = commitMap.rbegin(); it != commitMap.rend() && rewriteOk; ++it )
+    {
+        if( git_packbuilder_insert_commit( pb, &it->neu ) != 0 )
+            rewriteOk = false;
+    }
+
+    if( !rewriteOk || commitMap.empty() )
+    {
+        git_packbuilder_free( pb );
+        return false;
+    }
+
+    if( aReporter )
+        aReporter->AdvancePhase( _( "Compacting trimmed history..." ) );
+
+    bool packed = writePack( pb, newPackDir, aReporter );
+    git_packbuilder_free( pb );
+
+    if( !packed || git_repository_open( &newRepo, trimPath.mb_str().data() ) != 0 )
+        return false;
+
+    const git_oid& newHeadOid = commitMap.back().neu;
+    git_reference* headRef = nullptr;
+    bool           headOk = false;
+
+    if( git_reference_lookup( &headRef, newRepo, "HEAD" ) == 0 )
+    {
+        const char*    branch = git_reference_symbolic_target( headRef );
+        git_reference* branchRef = nullptr;
+
+        if( branch && git_reference_create( &branchRef, newRepo, branch, &newHeadOid, 1, nullptr ) == 0 )
+        {
+            headOk = true;
+            git_reference_free( branchRef );
+        }
+
+        git_reference_free( headRef );
+    }
+
+    if( !headOk )
+    {
+        git_repository_free( newRepo );
+        return false;
+    }
+
+    git_commit* newHead = nullptr;
+
+    if( git_commit_lookup( &newHead, newRepo, &newHeadOid ) == 0 )
     {
         git_tree*  newHeadTree = nullptr;
         git_index* newIndex = nullptr;
 
-        if( git_commit_tree( &newHeadTree, parent ) == 0 && git_repository_index( &newIndex, newRepo ) == 0 )
+        if( git_commit_tree( &newHeadTree, newHead ) == 0 && git_repository_index( &newIndex, newRepo ) == 0 )
         {
             git_index_read_tree( newIndex, newHeadTree );
             git_index_write( newIndex );
@@ -1984,7 +2045,7 @@ bool LOCAL_HISTORY::EnforceSizeLimit( const wxString& aProjectPath, size_t aMaxB
         if( newHeadTree )
             git_tree_free( newHeadTree );
 
-        git_commit_free( parent );
+        git_commit_free( newHead );
     }
 
     // Recreate preserved tags pointing to new commit OIDs where possible.
@@ -2014,25 +2075,33 @@ bool LOCAL_HISTORY::EnforceSizeLimit( const wxString& aProjectPath, size_t aMaxB
         }
     }
 
-    if( aReporter )
-        aReporter->AdvancePhase( _( "Compacting trimmed history..." ) );
-
-    compactRepository( newRepo, aReporter );
-
-    // Free ODBs and close repos before swapping directories to avoid file locking issues.
-    // Note: The lock manager will automatically free the original repo when it goes out of scope,
-    // but we need to manually free the ODBs and new trimmed repo we created.
-    git_odb_free( dstOdb );
-    git_odb_free( odb );
+    // Close repos before swapping directories to avoid file locking issues
     git_repository_free( newRepo );
 
     lock.ReleaseRepository();
 
     // Replace old history dir with trimmed one
-    wxString backupOld = hist + wxS("_old");
-    wxRenameFile( hist, backupOld );
-    wxRenameFile( trimPath, hist );
-    wxFileName::Rmdir( backupOld, wxPATH_RMDIR_RECURSIVE );
+    wxString backupOld = hist + wxS( "_old_" ) + KIID().AsString();
+
+    if( wxFileExists( backupOld ) || wxDirExists( backupOld ) )
+        return false;
+
+    if( !wxRenameFile( hist, backupOld, false ) )
+        return false;
+
+    if( !wxRenameFile( trimPath, hist, false ) )
+    {
+        if( !wxRenameFile( backupOld, hist, false ) )
+            wxLogError( _( "Could not restore local history '%s'. The previous history is preserved at '%s'." ),
+                        hist, backupOld );
+
+        return false;
+    }
+
+    if( !wxFileName::Rmdir( backupOld, wxPATH_RMDIR_RECURSIVE ) )
+        wxLogTrace( traceAutoSave, wxS( "[history] Trimmed history installed; previous history retained at %s" ),
+                    backupOld );
+
     return true;
 }
 

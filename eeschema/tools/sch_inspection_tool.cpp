@@ -18,6 +18,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <tool/tool_manager.h>
 #include "tools/sch_inspection_tool.h"
 #include "dialog_change_symbols.h"
 
@@ -1345,9 +1346,8 @@ int SCH_INSPECTION_TOOL::ShowDatasheet( const TOOL_EVENT& aEvent )
         SCH_SYMBOL* symbol = (SCH_SYMBOL*) selection.Front();
         SCH_FIELD*  field = symbol->GetField( FIELD_T::DATASHEET );
 
-        // Use GetShownText() to resolve any text variables, but don't allow adding extra text
-        // (ie: the field name)
-        datasheet = field->GetShownText( &symbol->Schematic()->CurrentSheet(), false );
+        // Use GetShownText() to resolve any text variables
+        datasheet = field->GetShownText( &symbol->Schematic()->CurrentSheet(), FOR_GUI );
         filesStack.push_back( symbol->Schematic() );
 
         if( symbol->GetLibSymbolRef() )

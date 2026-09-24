@@ -68,6 +68,7 @@ class WX_INFOBAR;
 class KICAD_API_SERVER;
 class API_HANDLER_PCB;
 class API_HANDLER_COMMON;
+class API_HANDLER_LIBRARIES;
 
 enum LAST_PATH_TYPE : unsigned int;
 
@@ -323,6 +324,14 @@ public:
 
     ///< @copydoc EDA_DRAW_FRAME::UseGalCanvas()
     void ActivateGalCanvas() override;
+
+    /**
+     * Tell every hole to redraw its drill symbol.
+     *
+     * A cached GAL group replays until its own item is updated, so changing a map or a
+     * symbol assignment is invisible until the holes themselves are refreshed.
+     */
+    void RefreshDrillSymbols( int aUpdateFlags ) override;
 
     void ShowBoardSetupDialog( const wxString& aInitialPage = wxEmptyString, wxWindow* aParent = nullptr );
 
@@ -891,6 +900,7 @@ private:
 
     std::unique_ptr<API_HANDLER_PCB>    m_apiHandler;
     std::unique_ptr<API_HANDLER_COMMON> m_apiHandlerCommon;
+    std::unique_ptr<API_HANDLER_LIBRARIES> m_apiLibrariesHandler;
 };
 
 #endif  // __PCB_EDIT_FRAME_H__

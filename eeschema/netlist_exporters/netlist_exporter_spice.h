@@ -74,12 +74,12 @@ public:
                                | OPTION_SAVE_ALL_EVENTS
     };
 
-    NETLIST_EXPORTER_SPICE( SCHEMATIC* aSchematic );
+    NETLIST_EXPORTER_SPICE( SCHEMATIC* aSchematic, KIWAY* aKiway );
 
     /**
      * Write to specified output file.
      */
-    bool WriteNetlist( const wxString& aOutFileName, unsigned aNetlistOptions,
+    bool writeNetlist( const wxString& aOutFileName, unsigned aNetlistOptions,
                        REPORTER& aReporter ) override;
 
     /**
@@ -107,7 +107,8 @@ public:
     virtual bool ReadSchematicAndLibraries( unsigned aNetlistOptions, REPORTER& aReporter );
 
     /**
-     * Remove formatting wrappers and replace illegal spice net name characters with underscores.
+     * Convert an escaped schematic net name to SPICE, preserving literal slashes when mapping ground names.
+     * Remove formatting wrappers and replace illegal SPICE characters with underscores.
      */
     static void ConvertToSpiceMarkup( wxString* aNetName );
 

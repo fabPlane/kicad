@@ -33,6 +33,7 @@
 #include <board_item_container.h>
 #include <board_item.h>
 #include <embedded_files.h>
+#include <jumper_group.h>
 #include <layer_ids.h> // ALL_LAYERS definition.
 #include <lset.h>
 #include <lib_id.h>
@@ -68,6 +69,11 @@ class VIEW;
 
 namespace KIFONT {
 class OUTLINE_FONT;
+}
+
+namespace kiapi::board::types
+{
+class Footprint;
 }
 
 /**
@@ -325,6 +331,9 @@ public:
     void Serialize( google::protobuf::Any &aContainer ) const override;
     bool Deserialize( const google::protobuf::Any &aContainer ) override;
 
+    void SerializeDefinition( kiapi::board::types::Footprint* aOutput ) const;
+    bool DeserializeDefinition( const kiapi::board::types::Footprint& aInput );
+
     static inline bool ClassOf( const EDA_ITEM* aItem )
     {
         return aItem && aItem->Type() == PCB_FOOTPRINT_T;
@@ -437,8 +446,8 @@ public:
 
     void SetLayer( PCB_LAYER_ID aLayer ) override;
 
-    // to make property magic work
-    PCB_LAYER_ID GetLayer() const override { return BOARD_ITEM::GetLayer(); }
+    // A footprint's m_layer is set to F_Cu or B_Cu to encode which side of the board it's on.
+    PCB_LAYER_ID GetLayer() const override { return m_layer; }
 
     const TRANSFORM_TRS& GetTransform() const { return m_transform; }
 
@@ -1155,6 +1164,9 @@ public:
      *
      * If the variant doesn't exist or doesn't override the field, returns the default field value.
      *
+     * NB: variant values do NOT resolve text variable references.  Any such refereneces are considered
+     * to be in schematic scope and are resolved before the footprint gets them.
+     *
      * @param aVariantName The variant name (empty for default).
      * @param aFieldName The field name.
      * @return The field value for the specified variant.
@@ -1225,11 +1237,8 @@ public:
      * Each jumper pad group is a set of pad numbers that should be treated as internally connected.
      * @return The list of jumper pad groups in this footprint
      */
-    std::vector<std::set<wxString>>& JumperPadGroups() { return m_jumperPadGroups; }
-    const std::vector<std::set<wxString>>& JumperPadGroups() const { return m_jumperPadGroups; }
-
-    /// Retrieves the jumper group containing the specified pad number, if one exists
-    std::optional<const std::set<wxString>> GetJumperPadGroup( const wxString& aPadNumber ) const;
+    JUMPER_GROUP_SET&       JumperPadGroups() { return m_jumperPadGroups; }
+    const JUMPER_GROUP_SET& JumperPadGroups() const { return m_jumperPadGroups; }
 
     /**
      * Position Reference and Value fields at the top and bottom of footprint's bounding box.
@@ -1515,7 +1524,7 @@ private:
 
     /// A list of jumper pad groups, each of which is a set of pad numbers that should be jumpered
     /// together (treated as internally connected for the purposes of connectivity)
-    std::vector<std::set<wxString>> m_jumperPadGroups;
+    JUMPER_GROUP_SET m_jumperPadGroups;
 
     /// Flag that this footprint should automatically treat sets of two or more pads with the same
     /// number as jumpered pin groups

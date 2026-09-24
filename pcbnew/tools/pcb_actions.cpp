@@ -439,6 +439,28 @@ TOOL_ACTION PCB_ACTIONS::placeStackup( TOOL_ACTION_ARGS()
         .ToolbarState( TOOLBAR_STATE::TOGGLE )
         .Flags( AF_ACTIVATE ) );
 
+TOOL_ACTION PCB_ACTIONS::placeDrillChart( TOOL_ACTION_ARGS()
+        .Name( "pcbnew.InteractiveDrawing.placeDrillChart" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Add Drill Chart" ) )
+        .Tooltip( _( "Add a drill chart that tracks the board's holes" ) )
+        .ToolbarState( TOOLBAR_STATE::TOGGLE )
+        .Flags( AF_ACTIVATE ) );
+
+TOOL_ACTION PCB_ACTIONS::placeDrillMap( TOOL_ACTION_ARGS()
+        .Name( "pcbnew.InteractiveDrawing.placeDrillMap" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Add Drill Map" ) )
+        .Tooltip( _( "Draw drill symbols at the holes on a documentation layer" ) )
+        .ToolbarState( TOOLBAR_STATE::TOGGLE )
+        .Flags( AF_ACTIVATE ) );
+
+TOOL_ACTION PCB_ACTIONS::showDrillGroups( TOOL_ACTION_ARGS()
+        .Name( "pcbnew.InteractiveDrawing.showDrillGroups" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Drill Groups..." ) )
+        .Tooltip( _( "Inspect drill groups and assign symbols" ) ) );
+
 TOOL_ACTION PCB_ACTIONS::placePoint( TOOL_ACTION_ARGS()
         .Name( "pcbnew.InteractiveDrawing.placePoint" )
         .Scope( AS_GLOBAL )
@@ -3271,11 +3293,11 @@ TOOL_ACTION PCB_ACTIONS::showDiffPhaseSkew( TOOL_ACTION_ARGS()
 
 
 /// Grid Item
-TOOL_ACTION PCB_ACTIONS::placeGridItem( TOOL_ACTION_ARGS()
+TOOL_ACTION PCB_ACTIONS::placeSubGrid( TOOL_ACTION_ARGS()
         .Name( "pcbnew.GridItem.place" )
         .Scope( AS_GLOBAL )
-        .FriendlyName( _( "Place Grid Item" ) )
-        .Tooltip( _( "Adds a grid item to the board" ) )
+        .FriendlyName( _( "Place Sub-grid" ) )
+        .Tooltip( _( "Adds a subgrid to the board" ) )
         .Icon( BITMAPS::add_grid_item ) );
 
 

@@ -18,6 +18,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <tool/tool_manager.h>
+#include <tools/sch_selection_tool.h>
 #include "symbol_editor_pin_tool.h"
 
 #include <sch_commit.h>
@@ -92,7 +94,7 @@ bool SYMBOL_EDITOR_PIN_TOOL::Init()
             {
                 SYMBOL_EDIT_FRAME* editor = static_cast<SYMBOL_EDIT_FRAME*>( m_frame );
 
-                return editor && editor->IsSymbolEditable() && !editor->IsSymbolAlias();
+                return editor && editor->IsSymbolGraphicallyEditable();
             };
 
     static const std::vector<KICAD_T> pinTypes = { SCH_PIN_T };

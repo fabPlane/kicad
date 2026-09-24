@@ -27,9 +27,10 @@
 #include <template_fieldnames.h>
 #include <general.h>
 #include <string_utils.h>
-#include "scintilla_tricks.h"
 #include <algorithm>
 
+class SCINTILLA_TRICKS;
+class wxStyledTextEvent;
 class SCH_EDIT_FRAME;
 class SCH_TEXT;
 
@@ -145,9 +146,9 @@ public:
     {
         return IsMandatory() ? (int) m_id : m_ordinal;
     }
-    void SetOrdinal( int aOrdinal )
+    void SetOrdinal( int aOrdinal, FIELD_T aType )
     {
-        m_id = FIELD_T::USER;
+        m_id = aType;
         m_ordinal = aOrdinal;
     }
 
@@ -157,10 +158,10 @@ public:
      * with the ${} stripped.
      */
     wxString GetShownName() const;
-    wxString GetShownText( const SCH_SHEET_PATH* aPath, bool aAllowExtraText, int aDepth = 0,
-                           const wxString& aVariantName = wxEmptyString ) const;
+    wxString GetShownText( const SCH_SHEET_PATH* aPath, RESOLUTION_CONTEXT aContext,
+                           const wxString& aVariantName = wxEmptyString, int aDepth = 0 ) const;
 
-    wxString GetShownText( bool aAllowExtraText, int aDepth = 0 ) const override;
+    wxString GetShownText( RESOLUTION_CONTEXT aContextx, int aDepth = 0 ) const override;
 
     /**
      * Return the text of a field.
@@ -447,7 +448,7 @@ inline std::string GetFieldValue( const std::vector<SCH_FIELD>* aFields, const w
         return "";
 
     if( const SCH_FIELD* field = FindField( *aFields, aFieldName ) )
-        return ( aResolve ? field->GetShownText( false, aDepth ) : field->GetText() ).ToStdString();
+        return ( aResolve ? field->GetShownText( INTERNAL, aDepth ) : field->GetText() ).ToStdString();
 
     return "";
 }
@@ -465,9 +466,9 @@ inline void SetFieldValue( std::vector<SCH_FIELD>& aFields, const wxString& aFie
         if( aValue == "" )
         {
             std::erase_if( aFields, [&]( const SCH_FIELD& field )
-                                     {
-                                         return field.GetName() == aFieldName;
-                                     } );
+                                    {
+                                        return field.GetName() == aFieldName;
+                                    } );
             return;
         }
 

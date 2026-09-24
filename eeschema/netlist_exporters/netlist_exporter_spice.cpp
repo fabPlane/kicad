@@ -60,8 +60,8 @@ std::string NAME_GENERATOR::Generate( const std::string& aProposedName )
 }
 
 
-NETLIST_EXPORTER_SPICE::NETLIST_EXPORTER_SPICE( SCHEMATIC* aSchematic ) :
-    NETLIST_EXPORTER_BASE( aSchematic ),
+NETLIST_EXPORTER_SPICE::NETLIST_EXPORTER_SPICE( SCHEMATIC* aSchematic, KIWAY* aKiway ) :
+    NETLIST_EXPORTER_BASE( aSchematic, aKiway ),
     m_libMgr( &aSchematic->Project() )
 {
     std::vector<EMBEDDED_FILES*> embeddedFilesStack;
@@ -70,7 +70,7 @@ NETLIST_EXPORTER_SPICE::NETLIST_EXPORTER_SPICE( SCHEMATIC* aSchematic ) :
 }
 
 
-bool NETLIST_EXPORTER_SPICE::WriteNetlist( const wxString& aOutFileName, unsigned aNetlistOptions,
+bool NETLIST_EXPORTER_SPICE::writeNetlist( const wxString& aOutFileName, unsigned aNetlistOptions,
                                            REPORTER& aReporter )
 {
     try
@@ -131,6 +131,8 @@ void NETLIST_EXPORTER_SPICE::WriteTail( OUTPUTFORMATTER& aFormatter, unsigned aN
 bool NETLIST_EXPORTER_SPICE::ReadSchematicAndLibraries( unsigned aNetlistOptions,
                                                         REPORTER& aReporter )
 {
+    CONNECTIVITY_SCOPE connectivity( *this );
+
     std::set<std::string> refNames; // Set of reference names to check for duplication.
     int                   ncCounter = 1;
     wxString              variant = m_schematic->GetCurrentVariant();
@@ -206,7 +208,7 @@ bool NETLIST_EXPORTER_SPICE::ReadSchematicAndLibraries( unsigned aNetlistOptions
             try
             {
                 SPICE_ITEM            spiceItem;
-                std::vector<PIN_INFO> pins = CreatePinList( symbol, sheet, true );
+                std::vector<PIN_INFO> pins = CreatePinList( symbol, sheet );
 
                 for( const SCH_FIELD& field : symbol->GetFields() )
                 {
@@ -215,7 +217,7 @@ bool NETLIST_EXPORTER_SPICE::ReadSchematicAndLibraries( unsigned aNetlistOptions
                     if( field.GetId() == FIELD_T::REFERENCE )
                         spiceItem.fields.back().SetText( symbol->GetRef( &sheet ) );
                     else
-                        spiceItem.fields.back().SetText( field.GetShownText( &sheet, false, 0, variant ) );
+                        spiceItem.fields.back().SetText( field.GetShownText( &sheet, FOR_NETNAME, variant ) );
 
                     // The simulator retains these resolved values after source symbols are deleted.
                     spiceItem.fields.back().SetParent( nullptr );
@@ -243,6 +245,8 @@ bool NETLIST_EXPORTER_SPICE::ReadSchematicAndLibraries( unsigned aNetlistOptions
 
 void NETLIST_EXPORTER_SPICE::ConvertToSpiceMarkup( wxString* aNetName )
 {
+    const bool literalSlash = UnescapeString( aNetName->AfterLast( '/' ) ).Contains( '/' );
+    *aNetName = UnescapeString( *aNetName );
     MARKUP::MARKUP_PARSER         markupParser( aNetName->ToStdString() );
     std::unique_ptr<MARKUP::NODE> root = markupParser.Parse();
 
@@ -287,15 +291,14 @@ void NETLIST_EXPORTER_SPICE::ConvertToSpiceMarkup( wxString* aNetName )
     aNetName->Replace( '~', '_' );
     aNetName->Replace( ' ', '_' );
 
-    // Make sure that SPICE zero should be zero anywhere, independent if it is local or not.
-    // Therefore any signal ending with '/0' is rewritten as '0' to be recognized by SPICE.
-    if( aNetName->EndsWith( wxS( "/0" ) ) && !aNetName->EndsWith( wxS( "//0" ) ) )
-        aNetName->assign( wxS( "0" ) );
+    // SPICE reserves ground names even when schematic power is local to a subsheet.
+    const wxString localName = aNetName->AfterLast( '/' );
 
-    // Make sure that local ground signals with leading slash ('/gnd') are rewritten as gloabal gnd to be recognized
-    // by SPICE as zero.
-    if( aNetName->IsSameAs( wxS( "/gnd" ), false /* caseSensitive=false */ ) )
-        aNetName->assign( aNetName->Mid( 1 ) );
+    if( !literalSlash && ( localName == wxS( "0" ) || localName.IsSameAs( wxS( "gnd" ), false ) )
+        && !aNetName->EndsWith( wxS( "//" ) + localName ) )
+    {
+        aNetName->assign( localName );
+    }
 
     // A net name on the root sheet with a label '/foo' is going to get titled "//foo".  This
     // will trip up ngspice as "//" opens a line comment.
@@ -345,9 +348,9 @@ void NETLIST_EXPORTER_SPICE::ReadDirectives( unsigned aNetlistOptions )
                 continue;
 
             if( item->Type() == SCH_TEXT_T )
-                text = static_cast<SCH_TEXT*>( item )->GetShownText( &sheet, false );
+                text = static_cast<SCH_TEXT*>( item )->GetShownText( &sheet, FOR_NETNAME );
             else if( item->Type() == SCH_TEXTBOX_T )
-                text = static_cast<SCH_TEXTBOX*>( item )->GetShownText( nullptr, &sheet, false );
+                text = static_cast<SCH_TEXTBOX*>( item )->GetShownText( nullptr, &sheet, FOR_NETNAME );
             else
                 continue;
 
@@ -480,7 +483,7 @@ wxString NETLIST_EXPORTER_SPICE::collectMergedSimPins( SCH_SYMBOL& aSymbol,
 
     // First, parse pins from the current symbol
     if( SCH_FIELD* pinsField = aSymbol.GetField( SIM_PINS_FIELD ) )
-        parsePins( pinsField->GetShownText( &aSheet, false, 0, aVariantName ) );
+        parsePins( pinsField->GetShownText( &aSheet, FOR_NETNAME, aVariantName ) );
 
     // Then, find all other units with the same reference and collect their Sim.Pins
     for( const SCH_SHEET_PATH& sheet : m_schematic->Hierarchy() )
@@ -496,7 +499,7 @@ wxString NETLIST_EXPORTER_SPICE::collectMergedSimPins( SCH_SYMBOL& aSymbol,
                 continue;
 
             if( SCH_FIELD* pinsField = other->GetField( SIM_PINS_FIELD ) )
-                parsePins( pinsField->GetShownText( &sheet, false, 0, aVariantName ) );
+                parsePins( pinsField->GetShownText( &sheet, FOR_NETNAME, aVariantName ) );
         }
     }
 
@@ -540,7 +543,7 @@ std::vector<UNIT_PIN_MAP> NETLIST_EXPORTER_SPICE::collectUnitPinMaps( SCH_SYMBOL
                 if( !pinsField )
                     return;
 
-                wxString pins = pinsField->GetShownText( &aUnitSheet, false, 0, aVariantName );
+                wxString pins = pinsField->GetShownText( &aUnitSheet, FOR_NETNAME, aVariantName );
 
                 // The same logical unit can be reached more than once through a reused hierarchical
                 // sheet; gather it only once so it does not synthesize duplicate instances.
@@ -595,7 +598,7 @@ SIM_DECOMPOSITION NETLIST_EXPORTER_SPICE::getDecomposition( SCH_SYMBOL& aSymbol,
             [&]( SCH_SYMBOL& aUnit, const SCH_SHEET_PATH& aUnitSheet ) -> wxString
             {
                 if( SCH_FIELD* field = aUnit.GetField( SIM_DECOMPOSITION_FIELD ) )
-                    return field->GetShownText( &aUnitSheet, false, 0, aVariantName );
+                    return field->GetShownText( &aUnitSheet, FOR_NETNAME, aVariantName );
 
                 return wxEmptyString;
             };
@@ -935,7 +938,7 @@ void NETLIST_EXPORTER_SPICE::WriteDirectives( const wxString& aSimCommand, unsig
 wxString NETLIST_EXPORTER_SPICE::GenerateItemPinNetName( const wxString& aNetName,
                                                          int& aNcCounter ) const
 {
-    wxString netName = UnescapeString( aNetName );
+    wxString netName = aNetName;
 
     ConvertToSpiceMarkup( &netName );
 
@@ -948,17 +951,14 @@ wxString NETLIST_EXPORTER_SPICE::GenerateItemPinNetName( const wxString& aNetNam
 
 SCH_SHEET_LIST NETLIST_EXPORTER_SPICE::BuildSheetList( unsigned aNetlistOptions ) const
 {
-    SCH_SHEET_LIST sheets;
-
-    if( aNetlistOptions & OPTION_CUR_SHEET_AS_ROOT )
-        sheets = SCH_SHEET_LIST( m_schematic->CurrentSheet().Last() );
-    else
-        sheets = m_schematic->Hierarchy();
+    SCH_SHEET_LIST sheets = m_exportSheets;
 
     std::erase_if( sheets,
                     [&]( const SCH_SHEET_PATH& sheet )
                     {
-                        return sheet.GetExcludedFromSim();
+                        return sheet.GetExcludedFromSim( m_schematic->GetCurrentVariant() )
+                               || ( ( aNetlistOptions & OPTION_CUR_SHEET_AS_ROOT )
+                                    && !sheet.IsContainedWithin( m_schematic->CurrentSheet() ) );
                     } );
 
     return sheets;

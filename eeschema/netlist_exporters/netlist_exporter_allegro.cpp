@@ -22,7 +22,6 @@
 #include <sch_edit_frame.h>
 #include <sch_reference_list.h>
 #include <string_utils.h>
-#include <connection_graph.h>
 #include <core/kicad_algo.h>
 #include <netlist.h>
 #include "netlist_exporter_allegro.h"
@@ -31,7 +30,7 @@
 #include <fmt.h>
 #include <fmt/ranges.h>
 
-bool NETLIST_EXPORTER_ALLEGRO::WriteNetlist( const wxString& aOutFileName,
+bool NETLIST_EXPORTER_ALLEGRO::writeNetlist( const wxString& aOutFileName,
                                              unsigned /* aNetlistOptions */,
                                              REPORTER& aReporter )
 {
@@ -138,7 +137,7 @@ void NETLIST_EXPORTER_ALLEGRO::extractComponentsInfo()
     m_referencesAlreadyFound.Clear();
     m_libParts.clear();
 
-    for( const SCH_SHEET_PATH& sheet : m_schematic->Hierarchy() )
+    for( const SCH_SHEET_PATH& sheet : m_exportSheets )
     {
         m_schematic->SetCurrentSheet( sheet );
 
@@ -202,37 +201,17 @@ void NETLIST_EXPORTER_ALLEGRO::extractComponentsInfo()
 
     std::vector<NET_RECORD*> nets;
 
-    for( const auto& it : m_schematic->ConnectionGraph()->GetNetMap() )
+    for( const EXPORT_NET& net : m_exportNets )
     {
-        wxString                                 net_name  = it.first.Name;
-        const std::vector<CONNECTION_SUBGRAPH*>& subgraphs = it.second;
-        NET_RECORD*                              net_record = nullptr;
+        nets.emplace_back( new NET_RECORD( net.name ) );
+        NET_RECORD* net_record = nets.back();
 
-        if( subgraphs.empty() )
-            continue;
-
-        nets.emplace_back( new NET_RECORD( net_name ) );
-        net_record = nets.back();
-
-        for( CONNECTION_SUBGRAPH* subgraph : subgraphs )
+        for( const auto& [pin, sheet] : net.pins )
         {
-            bool nc = subgraph->GetNoConnect() &&
-                      subgraph->GetNoConnect()->Type() == SCH_NO_CONNECT_T;
-            const SCH_SHEET_PATH& sheet = subgraph->GetSheet();
+            SYMBOL* symbol = pin->GetParentSymbol();
 
-            for( SCH_ITEM* item : subgraph->GetItems() )
-            {
-                if( item->Type() == SCH_PIN_T )
-                {
-                    SCH_PIN* pin = static_cast<SCH_PIN*>( item );
-                    SYMBOL*  symbol = pin->GetParentSymbol();
-
-                    if( !symbol || symbol->GetExcludedFromBoard() )
-                        continue;
-
-                    net_record->m_Nodes.emplace_back( pin, sheet, nc );
-                }
-            }
+            if( symbol && !symbol->GetExcludedFromBoard() )
+                net_record->m_Nodes.emplace_back( pin, sheet );
         }
     }
 
@@ -305,14 +284,14 @@ void NETLIST_EXPORTER_ALLEGRO::toAllegroPackages()
         for( auto it = m_orderedSymbolsSheetpath.begin(); it != m_orderedSymbolsSheetpath.end();
              ++it )
         {
-            if( it->first->GetValue( false, &it->second, false )
-                != first_ele.first->GetValue( false, &first_ele.second, false ) )
+            if( it->first->GetValue( &it->second, RAW_VALUE )
+                != first_ele.first->GetValue( &first_ele.second, RAW_VALUE ) )
             {
                 continue;
             }
 
-            if( it->first->GetFootprintFieldText( false, &it->second, false )
-                != first_ele.first->GetFootprintFieldText( false, &first_ele.second, false ) )
+            if( it->first->GetFootprintFieldText( &it->second, RAW_VALUE )
+                != first_ele.first->GetFootprintFieldText( &first_ele.second, RAW_VALUE ) )
             {
                 continue;
             }
@@ -354,8 +333,8 @@ void NETLIST_EXPORTER_ALLEGRO::toAllegroPackages()
         SCH_SYMBOL* sym = ( beginIter->second ).first;
         SCH_SHEET_PATH sheetPath = ( beginIter->second ).second;
 
-        wxString valueText = sym->GetValue( false, &sheetPath, false );
-        wxString footprintText = sym->GetFootprintFieldText( false, &sheetPath, false);
+        wxString valueText = sym->GetValue( &sheetPath, RAW_VALUE );
+        wxString footprintText = sym->GetFootprintFieldText( &sheetPath, RAW_VALUE );
         wxString deviceType = valueText + wxString("_") + footprintText;
 
         while( deviceType.GetChar(deviceType.Length()-1) == '_' )
@@ -560,9 +539,9 @@ wxString NETLIST_EXPORTER_ALLEGRO::formatText( wxString aString )
         return wxEmptyString;
 
     // Replace 'µ' ("\u00b5") by 'u' to keep ASCII7 constraint
-    wxString mu = "µ";      // also could be "\u03BC" (grec symbol mu);
+    wxString mu( wxUniChar( 0x00B5 ) );
     aString.Replace( mu, "u" );
-    mu = "\u03BC";          // grec mu
+    mu = wxUniChar( 0x03BC );
     aString.Replace( mu, "u" );
 
     std::regex reg( "[!']|[^ -~]" );
@@ -622,8 +601,7 @@ wxString NETLIST_EXPORTER_ALLEGRO::formatFunction( wxString aName, std::vector<S
 }
 
 
-wxString NETLIST_EXPORTER_ALLEGRO::getGroupField( int aGroupIndex, const wxArrayString& aFieldArray,
-                                                  bool aSanitize )
+wxString NETLIST_EXPORTER_ALLEGRO::getGroupField( int aGroupIndex, const wxArrayString& aFieldArray, bool aSanitize )
 {
     auto pairIter = m_componentGroups.equal_range( aGroupIndex );
 
@@ -636,7 +614,8 @@ wxString NETLIST_EXPORTER_ALLEGRO::getGroupField( int aGroupIndex, const wxArray
         {
             if( SCH_FIELD* fld = sym->FindFieldCaseInsensitive( field ) )
             {
-                wxString fieldText = fld->GetShownText( &sheetPath, true );
+                // TODO: FOR_CANVAS seems like an odd context here....
+                wxString fieldText = fld->GetShownText( &sheetPath, FOR_CANVAS );
 
                 if( !fieldText.IsEmpty() )
                 {
@@ -657,7 +636,7 @@ wxString NETLIST_EXPORTER_ALLEGRO::getGroupField( int aGroupIndex, const wxArray
         {
             if( SCH_FIELD* fld = sym->GetLibSymbolRef()->FindFieldCaseInsensitive( field ) )
             {
-                wxString fieldText = fld->GetShownText( false, 0 );
+                wxString fieldText = fld->GetShownText( RESOLVED );
 
                 if( !fieldText.IsEmpty() )
                 {

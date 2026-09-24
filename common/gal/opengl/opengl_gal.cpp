@@ -49,7 +49,6 @@
 #include <thread_pool.h>
 
 #include <core/profile.h>
-#include <trace_helpers.h>
 
 #include <functional>
 #include <limits>
@@ -107,6 +106,9 @@ public:
     {}
 
     ~GL_BITMAP_CACHE();
+
+    /// Drop the cached texture names without deleting them
+    void Abandon() { m_bitmaps.clear(); }
 
     GLuint RequestBitmap( const BITMAP_BASE* aBitmap );
 
@@ -364,6 +366,7 @@ OPENGL_GAL::OPENGL_GAL( const KIGFX::VC_SETTINGS& aVcSettings, GAL_DISPLAY_OPTIO
         m_overlayBuffer( 0 ),
         m_tempBuffer( 0 ),
         m_isContextLocked( false ),
+        m_isContextValid( false ),
         m_lockClientCookie( 0 )
 {
     if( m_glMainContext == nullptr )
@@ -465,15 +468,37 @@ OPENGL_GAL::~OPENGL_GAL()
 
     if( gl_mgr )
     {
-        gl_mgr->LockCtx( m_glPrivContext, this );
+        // wxMSW destroys child windows before their C++ objects, so our own device context
+        // can already be gone and the teardown below would run against a sibling's context
+        m_isContextValid = gl_mgr->LockCtx( m_glPrivContext, this );
 
         --m_instanceCounter;
 
-        if( m_isInitialized )
+        if( !m_isContextValid )
+        {
+            // Whichever context is still current may belong to another share group, so every
+            // delete below would be aimed at an unrelated object of the same name
+            m_compositor->Abandon();
+            m_bitmapCache->Abandon();
+            m_shader->Abandon();
+
+            if( m_isInitialized )
+            {
+                m_cachedManager->Abandon();
+                m_nonCachedManager->Abandon();
+                m_overlayManager->Abandon();
+                m_tempManager->Abandon();
+            }
+        }
+        else if( m_isInitialized )
+        {
             glFlush();
-        
+        }
+
         gluDeleteTess( m_tesselator );
-        ClearCache();
+
+        if( m_isContextValid )
+            ClearCache();
 
         delete m_compositor;
 
@@ -497,9 +522,7 @@ OPENGL_GAL::~OPENGL_GAL()
         // Are we destroying the last GAL instance?
         if( m_instanceCounter == 0 )
         {
-            gl_mgr->LockCtx( m_glMainContext, this );
-
-            if( m_isBitmapFontLoaded )
+            if( gl_mgr->LockCtx( m_glMainContext, this ) && m_isBitmapFontLoaded )
             {
                 glDeleteTextures( 1, &g_fontTexture );
                 m_isBitmapFontLoaded = false;
@@ -573,7 +596,9 @@ bool OPENGL_GAL::updatedGalDisplayOptions( const GAL_DISPLAY_OPTIONS& aOptions )
 
     bool refresh = false;
 
-    if( m_options.antialiasing_mode != m_compositor->GetAntialiasingMode() )
+    // Options arrive before the canvas is realized, so the context is not current yet.  Only
+    // the compositor needs it; BeginDrawing reconciles the mode once we can bind
+    if( m_isContextValid && m_options.antialiasing_mode != m_compositor->GetAntialiasingMode() )
     {
         m_compositor->SetAntialiasingMode( m_options.antialiasing_mode );
         m_isFramebufferInitialized = false;
@@ -628,6 +653,13 @@ void OPENGL_GAL::BeginDrawing()
     // Create the screen transformation (Do the RH-LH conversion here)
     glOrtho( 0, (GLint) m_screenSize.x, (GLsizei) m_screenSize.y, 0,
              -m_depthRange.x, -m_depthRange.y );
+
+    // An antialiasing change that arrived without a current context never reached the compositor
+    if( m_options.antialiasing_mode != m_compositor->GetAntialiasingMode() )
+    {
+        m_compositor->SetAntialiasingMode( m_options.antialiasing_mode );
+        m_isFramebufferInitialized = false;
+    }
 
     if( !m_isFramebufferInitialized )
     {
@@ -848,6 +880,9 @@ bool OPENGL_GAL::GetScreenshot( wxImage& aDstImage )
 
     GAL_CONTEXT_LOCKER locker( this );
 
+    if( !m_isContextValid )
+        return false;
+
     m_compositor->SetBuffer( m_mainBuffer );
 
     GLint viewport[4];
@@ -906,7 +941,7 @@ void OPENGL_GAL::LockContext( int aClientCookie )
     if( !mgr )
         return;
 
-    mgr->LockCtx( m_glPrivContext, this );
+    m_isContextValid = mgr->LockCtx( m_glPrivContext, this );
 }
 
 
@@ -3444,6 +3479,10 @@ void OPENGL_GAL::init()
         throw std::runtime_error( "No GL context is current (glGetString returned NULL)" );
 
     SetOpenGLInfo( vendor, renderer, version );
+
+    wxLogTrace( traceGalContext, wxS( "GL context %p ready on canvas %p: %s | %s | %s" ),
+                m_glPrivContext, this, wxString::FromUTF8( vendor ),
+                wxString::FromUTF8( renderer ), wxString::FromUTF8( version ) );
 
     // Check the OpenGL version (minimum 2.1 is required)
     if( !GLAD_GL_VERSION_2_1 )

@@ -22,8 +22,11 @@
 #include <sstream>
 #include <string>
 
-#include <boost/test/unit_test.hpp>
 #include <wx/filename.h>
+
+#include <boost/test/unit_test.hpp>
+#include <qa_utils/file_utils.h>
+#include <qa_utils/wx_utils/unit_test_utils.h>
 
 #include "api_e2e_utils.h"
 
@@ -97,22 +100,6 @@ bool textFilesMatch( const wxString& aGoldenPath, const wxString& aGeneratedPath
 }
 
 
-/**
- * Read @a aPath into a string, or return an empty string if it cannot be opened.
- */
-static std::string readFile( const wxString& aPath )
-{
-    std::ifstream stream( aPath.ToStdString(), std::ios::binary );
-
-    if( !stream.is_open() )
-        return {};
-
-    std::ostringstream contents;
-    contents << stream.rdbuf();
-    return contents.str();
-}
-
-
 static size_t countOccurrences( const std::string& aHaystack, const std::string& aNeedle )
 {
     size_t count = 0;
@@ -168,9 +155,9 @@ BOOST_FIXTURE_TEST_CASE( ExportBoardSvg, API_SERVER_E2E_FIXTURE )
     BOOST_REQUIRE_MESSAGE( Client().OpenDocument( boardPath.GetFullPath(), &document ),
                            "OpenDocument failed: " + Client().LastError() );
 
-    wxString   tempFile = wxFileName::CreateTempFileName( wxS( "api_job_svg_" ) );
-    wxFileName outputPath( tempFile );
-    outputPath.SetExt( wxS( "svg" ) );
+
+    KI_TEST::SCOPED_TEMP_DIR tempDir( "api_job_svg" );
+    wxFileName               outputPath( tempDir.ChildPathStr( "plot.svg" ) );
 
     kiapi::board::jobs::RunBoardJobExportSvg request;
     *request.mutable_job_settings()->mutable_document() = document;
@@ -196,7 +183,7 @@ BOOST_FIXTURE_TEST_CASE( ExportBoardSvg, API_SERVER_E2E_FIXTURE )
 
     // Plot fidelity is covered by the kicad-cli SVG regression tests, which rasterize and compare
     // against golden artwork.  All this test has to establish is that the job honoured the request.
-    const std::string svg = readFile( generatedPath );
+    const std::string svg = KI_TEST::LoadStringData( generatedPath );
 
     BOOST_REQUIRE_MESSAGE( !svg.empty(), "Generated SVG is empty or unreadable: " + generatedPath );
     BOOST_CHECK( svg.find( "<svg" ) != std::string::npos );
@@ -216,17 +203,163 @@ BOOST_FIXTURE_TEST_CASE( ExportBoardSvg, API_SERVER_E2E_FIXTURE )
 
     // F.Cu of this board is dense; a near-empty plot means the layer selection was dropped
     BOOST_CHECK_GT( countOccurrences( svg, "<path" ), 100u );
+}
 
-    if( wxFileName::FileExists( generatedPath ) )
-        wxRemoveFile( generatedPath );
 
-    // A per-layer export turns the requested output path into a directory
-    if( wxFileName::DirExists( outputPath.GetFullPath() ) )
-        wxFileName::Rmdir( outputPath.GetFullPath(), wxPATH_RMDIR_RECURSIVE );
-    else if( wxFileName::FileExists( outputPath.GetFullPath() ) )
-        wxRemoveFile( outputPath.GetFullPath() );
+// Reads the pixel dimensions out of the IHDR chunk of a PNG file.
+// Returns true on success; on failure aWidth/aHeight are untouched.
+static bool pngDimensions( const wxString& aPath, uint32_t& aWidth, uint32_t& aHeight )
+{
+    std::ifstream stream( aPath.ToStdString(), std::ios::binary );
 
-    wxRemoveFile( tempFile );
+    if( !stream.is_open() )
+        return false;
+
+    char header[8];
+
+    if( !stream.read( header, 8 ) || memcmp( header, "\x89PNG\r\n\x1a\n", 8 ) != 0 )
+        return false;
+
+    char ihdr[16];
+
+    if( !stream.read( ihdr, 16 ) )
+        return false;
+
+    auto readBE32 = []( const char* aBytes )
+    {
+        return ( static_cast<uint32_t>( static_cast<unsigned char>( aBytes[0] ) ) << 24 )
+             | ( static_cast<uint32_t>( static_cast<unsigned char>( aBytes[1] ) ) << 16 )
+             | ( static_cast<uint32_t>( static_cast<unsigned char>( aBytes[2] ) ) << 8 )
+             | ( static_cast<uint32_t>( static_cast<unsigned char>( aBytes[3] ) ) );
+    };
+
+    aWidth = readBE32( ihdr + 8 );
+    aHeight = readBE32( ihdr + 12 );
+    return true;
+}
+
+
+BOOST_FIXTURE_TEST_CASE( ExportSchematicPng, API_SERVER_E2E_FIXTURE )
+{
+    BOOST_REQUIRE_MESSAGE( Start(), LastError() );
+
+    wxString testDataDir = wxString::FromUTF8( KI_TEST::GetTestDataRootDir() ) + wxS( "cli/basic_test/" );
+
+    wxFileName schPath( testDataDir, wxS( "basic_test.kicad_sch" ) );
+
+    kiapi::common::types::DocumentSpecifier document;
+
+    BOOST_REQUIRE_MESSAGE(
+            Client().OpenDocument( schPath.GetFullPath(), kiapi::common::types::DOCTYPE_SCHEMATIC, &document ),
+            "OpenDocument failed: " + Client().LastError() );
+
+    // --- All-sheets mode: output path is a directory
+    KI_TEST::SCOPED_TEMP_DIR tempDir( "api_job_sch_png" );
+    wxString                 outputDir = tempDir.CreateChildDirStr( "all" ) + wxFileName::GetPathSeparator();
+
+    {
+        kiapi::schematic::jobs::RunSchematicJobExportPng request;
+        *request.mutable_job_settings()->mutable_document() = document;
+        request.mutable_job_settings()->set_output_path( outputDir.ToUTF8().data() );
+        request.mutable_plot_settings()->set_sheet_mode( kiapi::schematic::jobs::SJSM_ALL_SHEETS );
+        request.mutable_plot_settings()->set_black_and_white( true );
+        request.set_dpi( 150 );
+
+        kiapi::common::types::RunJobResponse response;
+        BOOST_REQUIRE_MESSAGE( Client().RunJob( request, &response ),
+                               "RunJob failed: " + Client().LastError() );
+
+        BOOST_REQUIRE_MESSAGE( response.status() == kiapi::common::types::JS_SUCCESS,
+                               "Job failed: " + wxString::FromUTF8( response.message() ) );
+        BOOST_REQUIRE_MESSAGE( response.output_path_size() > 0, "Job returned no output paths" );
+
+        wxString generatedPath = wxString::FromUTF8( response.output_path( 0 ) );
+        BOOST_REQUIRE_MESSAGE( wxFileName::FileExists( generatedPath ),
+                               "Generated PNG does not exist: " + generatedPath );
+
+        // basic_test.kicad_sch is A4 landscape; 297mm at 150dpi = 1754px (+/- rounding)
+        uint32_t width = 0, height = 0;
+        BOOST_REQUIRE_MESSAGE( pngDimensions( generatedPath, width, height ),
+                               "Generated file is not a valid PNG: " + generatedPath );
+        BOOST_CHECK_MESSAGE( width >= 1750 && width <= 1758,
+                             "Unexpected PNG width " << width << " for 150dpi A4 landscape" );
+        BOOST_CHECK_MESSAGE( height >= 1236 && height <= 1244,
+                             "Unexpected PNG height " << height << " for 150dpi A4 landscape" );
+    }
+
+    // --- Single-sheet mode: output path is a file name
+    wxFileName singlePath( tempDir.ChildPathStr( "single.png" ) );
+
+    {
+        kiapi::schematic::jobs::RunSchematicJobExportPng request;
+        *request.mutable_job_settings()->mutable_document() = document;
+        request.mutable_job_settings()->set_output_path( singlePath.GetFullPath().ToUTF8().data() );
+        request.mutable_plot_settings()->set_sheet_mode( kiapi::schematic::jobs::SJSM_SINGLE_SHEET );
+        request.mutable_plot_settings()->set_black_and_white( true );
+        request.set_dpi( 300 );
+
+        kiapi::common::types::RunJobResponse response;
+        BOOST_REQUIRE_MESSAGE( Client().RunJob( request, &response ),
+                               "Single-sheet RunJob failed: " + Client().LastError() );
+
+        BOOST_REQUIRE_MESSAGE( response.status() == kiapi::common::types::JS_SUCCESS,
+                               "Single-sheet job failed: " + wxString::FromUTF8( response.message() ) );
+        BOOST_REQUIRE_MESSAGE( response.output_path_size() > 0,
+                               "Single-sheet job returned no output paths" );
+
+        wxString generatedPath = wxString::FromUTF8( response.output_path( 0 ) );
+        BOOST_REQUIRE_MESSAGE( wxFileName::FileExists( generatedPath ),
+                               "Generated PNG does not exist: " + generatedPath );
+
+        // 297mm at 300dpi = 3508px (+/- rounding)
+        uint32_t width = 0, height = 0;
+        BOOST_REQUIRE_MESSAGE( pngDimensions( generatedPath, width, height ),
+                               "Generated file is not a valid PNG: " + generatedPath );
+        BOOST_CHECK_MESSAGE( width >= 3500 && width <= 3516,
+                             "Unexpected PNG width " << width << " for 300dpi A4 landscape" );
+
+        // The single-file output path must be honored exactly
+        BOOST_CHECK_MESSAGE( generatedPath == singlePath.GetFullPath(),
+                             "Single-sheet output path not honored: " + generatedPath );
+    }
+
+    // --- Out-of-range dpi is rejected with a bad-request error
+    {
+        kiapi::schematic::jobs::RunSchematicJobExportPng request;
+        *request.mutable_job_settings()->mutable_document() = document;
+        request.mutable_job_settings()->set_output_path( outputDir.ToUTF8().data() );
+        request.mutable_plot_settings()->set_sheet_mode( kiapi::schematic::jobs::SJSM_ALL_SHEETS );
+        request.set_dpi( 10 );
+
+        kiapi::common::types::RunJobResponse response;
+        BOOST_CHECK_MESSAGE( !Client().RunJob( request, &response ),
+                             "Out-of-range dpi was not rejected" );
+    }
+
+    // --- Omitted dpi falls back to the GUI default (300)
+    {
+        wxString defaultDir = tempDir.CreateChildDirStr( "default" ) + wxFileName::GetPathSeparator();
+
+        kiapi::schematic::jobs::RunSchematicJobExportPng request;
+        *request.mutable_job_settings()->mutable_document() = document;
+        request.mutable_job_settings()->set_output_path( defaultDir.ToUTF8().data() );
+        request.mutable_plot_settings()->set_sheet_mode( kiapi::schematic::jobs::SJSM_ALL_SHEETS );
+
+        kiapi::common::types::RunJobResponse response;
+        BOOST_REQUIRE_MESSAGE( Client().RunJob( request, &response ),
+                               "Default-dpi RunJob failed: " + Client().LastError() );
+        BOOST_REQUIRE_MESSAGE( response.status() == kiapi::common::types::JS_SUCCESS,
+                               "Default-dpi job failed: " + wxString::FromUTF8( response.message() ) );
+        BOOST_REQUIRE_MESSAGE( response.output_path_size() > 0,
+                               "Default-dpi job returned no output paths" );
+
+        uint32_t width = 0, height = 0;
+        wxString generatedPath = wxString::FromUTF8( response.output_path( 0 ) );
+        BOOST_REQUIRE_MESSAGE( pngDimensions( generatedPath, width, height ),
+                               "Generated file is not a valid PNG: " + generatedPath );
+        BOOST_CHECK_MESSAGE( width >= 3500 && width <= 3516,
+                             "Default dpi should be 300; got width " << width );
+    }
 }
 
 
@@ -243,9 +376,8 @@ BOOST_FIXTURE_TEST_CASE( ExportBoardDrill, API_SERVER_E2E_FIXTURE )
     BOOST_REQUIRE_MESSAGE( Client().OpenDocument( boardPath.GetFullPath(), &document ),
                            "OpenDocument failed: " + Client().LastError() );
 
-    wxString outputDir = wxFileName::GetTempDir() + wxFileName::GetPathSeparator() + wxS( "api_job_drill_" )
-                         + wxString::Format( "%ld", wxGetProcessId() ) + wxFileName::GetPathSeparator();
-    wxFileName::Mkdir( outputDir, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL );
+    KI_TEST::SCOPED_TEMP_DIR tempDir( "api_job_drill" );
+    wxString                 outputDir = tempDir.CreateChildDirStr( "drill" ) + wxFileName::GetPathSeparator();
 
     kiapi::board::jobs::RunBoardJobExportDrill request;
     *request.mutable_job_settings()->mutable_document() = document;
@@ -279,8 +411,90 @@ BOOST_FIXTURE_TEST_CASE( ExportBoardDrill, API_SERVER_E2E_FIXTURE )
     wxString goldenPath = testDataDir + wxS( "basic_test_excellon_inches.drl" );
     BOOST_CHECK_MESSAGE( textFilesMatch( goldenPath, generatedDrillPath, 5 ),
                          "Drill output does not match golden file" );
+}
 
-    wxFileName::Rmdir( outputDir, wxPATH_RMDIR_RECURSIVE );
+
+BOOST_FIXTURE_TEST_CASE( ExportBoardPng, API_SERVER_E2E_FIXTURE )
+{
+    BOOST_REQUIRE_MESSAGE( Start(), LastError() );
+
+    wxString testDataDir =
+            wxString::FromUTF8( KI_TEST::GetTestDataRootDir() ) + wxS( "cli/artwork_generation_regressions/" );
+
+    wxFileName boardPath( testDataDir, wxS( "ZoneFill-4.0.7.kicad_pcb" ) );
+
+    kiapi::common::types::DocumentSpecifier document;
+
+    BOOST_REQUIRE_MESSAGE( Client().OpenDocument( boardPath.GetFullPath(), &document ),
+                           "OpenDocument failed: " + Client().LastError() );
+
+    KI_TEST::SCOPED_TEMP_DIR tempDir( "api_job_pcb_png" );
+
+    // --- MULTI mode: one file per layer into a directory
+    {
+        wxString outputDir = tempDir.CreateChildDirStr( "multi" ) + wxFileName::GetPathSeparator();
+
+        kiapi::board::jobs::RunBoardJobExportPng request;
+        *request.mutable_job_settings()->mutable_document() = document;
+        request.mutable_job_settings()->set_output_path( outputDir.ToUTF8().data() );
+        request.mutable_plot_settings()->add_layers( kiapi::board::types::BL_F_Cu );
+        request.mutable_plot_settings()->set_black_and_white( true );
+        request.set_page_mode( kiapi::board::jobs::BJPM_EACH_LAYER_OWN_FILE );
+        request.set_dpi( 150 );
+
+        kiapi::common::types::RunJobResponse response;
+        BOOST_REQUIRE_MESSAGE( Client().RunJob( request, &response ),
+                               "RunJob failed: " + Client().LastError() );
+
+        BOOST_REQUIRE_MESSAGE( response.status() == kiapi::common::types::JS_SUCCESS,
+                               "Job failed: " + wxString::FromUTF8( response.message() ) );
+        BOOST_REQUIRE_MESSAGE( response.output_path_size() > 0, "Job returned no output paths" );
+
+        wxString generatedPath = wxString::FromUTF8( response.output_path( 0 ) );
+        BOOST_REQUIRE_MESSAGE( wxFileName::FileExists( generatedPath ),
+                               "Generated PNG does not exist: " + generatedPath );
+
+        uint32_t width = 0, height = 0;
+        BOOST_REQUIRE_MESSAGE( pngDimensions( generatedPath, width, height ),
+                               "Generated file is not a valid PNG: " + generatedPath );
+        BOOST_CHECK_MESSAGE( width >= 1750 && width <= 1758,
+                             "Unexpected PNG width " << width << " for 150dpi A4 landscape" );
+    }
+
+    // --- SINGLE mode: all layers composited into one file
+    {
+        wxFileName outputPath( tempDir.ChildPathStr( "single.png" ) );
+
+        kiapi::board::jobs::RunBoardJobExportPng request;
+        *request.mutable_job_settings()->mutable_document() = document;
+        request.mutable_job_settings()->set_output_path( outputPath.GetFullPath().ToUTF8().data() );
+        request.mutable_plot_settings()->add_layers( kiapi::board::types::BL_F_Cu );
+        request.mutable_plot_settings()->add_layers( kiapi::board::types::BL_F_SilkS );
+        request.mutable_plot_settings()->set_black_and_white( true );
+        request.set_page_mode( kiapi::board::jobs::BJPM_ALL_LAYERS_ONE_PAGE );
+        request.set_dpi( 300 );
+
+        kiapi::common::types::RunJobResponse response;
+        BOOST_REQUIRE_MESSAGE( Client().RunJob( request, &response ),
+                               "Single-mode RunJob failed: " + Client().LastError() );
+
+        BOOST_REQUIRE_MESSAGE( response.status() == kiapi::common::types::JS_SUCCESS,
+                               "Single-mode job failed: " + wxString::FromUTF8( response.message() ) );
+        BOOST_REQUIRE_MESSAGE( response.output_path_size() > 0,
+                               "Single-mode job returned no output paths" );
+
+        wxString generatedPath = wxString::FromUTF8( response.output_path( 0 ) );
+        BOOST_REQUIRE_MESSAGE( wxFileName::FileExists( generatedPath ),
+                               "Generated PNG does not exist: " + generatedPath );
+        BOOST_CHECK_MESSAGE( generatedPath == outputPath.GetFullPath(),
+                             "Single-mode output path not honored: " + generatedPath );
+
+        uint32_t width = 0, height = 0;
+        BOOST_REQUIRE_MESSAGE( pngDimensions( generatedPath, width, height ),
+                               "Generated file is not a valid PNG: " + generatedPath );
+        BOOST_CHECK_MESSAGE( width >= 3500 && width <= 3516,
+                             "Unexpected PNG width " << width << " for 300dpi A4 landscape" );
+    }
 }
 
 
@@ -298,8 +512,8 @@ BOOST_FIXTURE_TEST_CASE( ExportSchematicNetlist, API_SERVER_E2E_FIXTURE )
             Client().OpenDocument( schPath.GetFullPath(), kiapi::common::types::DOCTYPE_SCHEMATIC, &document ),
             "OpenDocument failed: " + Client().LastError() );
 
-    wxFileName outputPath = wxFileName::CreateTempFileName( wxS( "api_job_netlist_" ) );
-    outputPath.SetExt( wxS( "cadstar" ) );
+    KI_TEST::SCOPED_TEMP_DIR tempDir( "api_job_netlist" );
+    wxFileName               outputPath( tempDir.ChildPathStr( "netlist.cadstar" ) );
 
     kiapi::schematic::jobs::RunSchematicJobExportNetlist request;
     *request.mutable_job_settings()->mutable_document() = document;
@@ -321,13 +535,6 @@ BOOST_FIXTURE_TEST_CASE( ExportSchematicNetlist, API_SERVER_E2E_FIXTURE )
     // 3 header lines to skip (contain timestamp/version)
     wxString goldenPath = testDataDir + wxS( "basic_test.netlist.cadstar" );
     BOOST_CHECK_MESSAGE( textFilesMatch( goldenPath, generatedPath, 3 ), "Netlist output does not match golden file" );
-
-    // Clean up
-    if( wxFileName::FileExists( generatedPath ) )
-        wxRemoveFile( generatedPath );
-
-    if( wxFileName::FileExists( outputPath.GetFullPath() ) )
-        wxRemoveFile( outputPath.GetFullPath() );
 }
 
 
@@ -345,8 +552,8 @@ BOOST_FIXTURE_TEST_CASE( ExportSchematicBom, API_SERVER_E2E_FIXTURE )
             Client().OpenDocument( schPath.GetFullPath(), kiapi::common::types::DOCTYPE_SCHEMATIC, &document ),
             "OpenDocument failed: " + Client().LastError() );
 
-    wxFileName outputPath = wxFileName::CreateTempFileName( wxS( "api_job_bom_" ) );
-    outputPath.SetExt( wxS( "csv" ) );
+    KI_TEST::SCOPED_TEMP_DIR tempDir( "api_job_bom" );
+    wxFileName               outputPath( tempDir.ChildPathStr( "bom.csv" ) );
 
     kiapi::schematic::jobs::RunSchematicJobExportBOM request;
     *request.mutable_job_settings()->mutable_document() = document;
@@ -413,12 +620,6 @@ BOOST_FIXTURE_TEST_CASE( ExportSchematicBom, API_SERVER_E2E_FIXTURE )
 
     generatedStream.close();
     goldenStream.close();
-
-    if( wxFileName::FileExists( generatedPath ) )
-        wxRemoveFile( generatedPath );
-
-    if( wxFileName::FileExists( outputPath.GetFullPath() ) )
-        wxRemoveFile( outputPath.GetFullPath() );
 }
 
 

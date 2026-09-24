@@ -749,7 +749,7 @@ void PCB_DIMENSION_BASE::Mirror( const VECTOR2I& axis_pos, FLIP_DIRECTION aFlipD
 
         VECTOR2I libTextPos = EDA_TEXT::GetTextPos();
         mirrorPt( libTextPos );
-        EDA_TEXT::SetTextPos( libTextPos );
+        SetLibTextPos( libTextPos );
 
         EDA_ANGLE newLibAngle =
                 aFlipDirection == FLIP_DIRECTION::LEFT_RIGHT ? ANGLE_180 - GetLibTextAngle() : -GetLibTextAngle();
@@ -979,7 +979,7 @@ const BOX2I PCB_DIMENSION_BASE::GetBoundingBox() const
 wxString PCB_DIMENSION_BASE::GetItemDescription( UNITS_PROVIDER* aUnitsProvider, bool aFull ) const
 {
     return wxString::Format( _( "Dimension '%s' on %s" ),
-                             aFull ? GetShownText( false ) : KIUI::EllipsizeMenuText( GetText() ),
+                             aFull ? GetShownText( FOR_GUI ) : KIUI::EllipsizeMenuText( GetText() ),
                              GetLayerName() );
 }
 

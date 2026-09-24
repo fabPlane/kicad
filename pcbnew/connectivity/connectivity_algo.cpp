@@ -22,7 +22,7 @@
 
 
 #include <algorithm>
-#include <future>
+#include <chrono>
 #include <limits>
 #include <mutex>
 #include <ranges>
@@ -117,9 +117,6 @@ void CN_CONNECTIVITY_ALGO::markItemNetAsDirty( const BOARD_ITEM* aItem )
 
 bool CN_CONNECTIVITY_ALGO::Add( BOARD_ITEM* aItem )
 {
-    if( !aItem->IsOnCopperLayer() )
-        return false;
-
     auto alreadyAdded =
             [this]( BOARD_ITEM* item )
             {
@@ -145,6 +142,9 @@ bool CN_CONNECTIVITY_ALGO::Add( BOARD_ITEM* aItem )
 
         for( PAD* pad : static_cast<FOOTPRINT*>( aItem )->Pads() )
         {
+            if( !pad->IsOnCopperLayer() )
+                continue;
+
             if( alreadyAdded( pad ) )
                 return false;
 
@@ -156,6 +156,9 @@ bool CN_CONNECTIVITY_ALGO::Add( BOARD_ITEM* aItem )
 
     case PCB_PAD_T:
     {
+        if( !aItem->IsOnCopperLayer() )
+            return false;
+
         if( FOOTPRINT* fp = aItem->GetParentFootprint() )
         {
             if( fp->GetAttributes() & FP_JUST_ADDED )
@@ -191,6 +194,9 @@ bool CN_CONNECTIVITY_ALGO::Add( BOARD_ITEM* aItem )
         break;
 
     case PCB_SHAPE_T:
+        if( !aItem->IsOnCopperLayer() )
+            return false;
+
         if( alreadyAdded( aItem ) )
             return false;
 
@@ -202,6 +208,9 @@ bool CN_CONNECTIVITY_ALGO::Add( BOARD_ITEM* aItem )
 
     case PCB_ZONE_T:
     {
+        if( !aItem->IsOnCopperLayer() )
+            return false;
+
         ZONE* zone = static_cast<ZONE*>( aItem );
 
         if( alreadyAdded( aItem ) )
@@ -567,41 +576,39 @@ void CN_CONNECTIVITY_ALGO::Build( BOARD* aBoard, PROGRESS_REPORTER* aReporter )
     // Generate RTrees for CN_ZONE_LAYER items (in parallel)
     //
     thread_pool& tp = GetKiCadThreadPool();
-    std::vector<std::future<size_t>> returns( zitems.size() );
-
-    auto cache_zones =
-            [aReporter]( CN_ZONE_LAYER* aZoneLayer ) -> size_t
+    // Extra blocks let the pool balance islands with different fill sizes
+    auto returns = tp.submit_loop( size_t( 0 ), zitems.size(),
+            [aReporter, &zitems]( const size_t ii )
             {
-                if( aReporter && aReporter->IsCancelled() )
-                    return 0;
+                try
+                {
+                    if( aReporter && aReporter->IsCancelled() )
+                        return;
 
-                aZoneLayer->BuildRTree();
+                    zitems[ii]->BuildRTree();
 
-                if( aReporter )
-                    aReporter->AdvanceProgress();
+                    if( aReporter )
+                        aReporter->AdvanceProgress();
+                }
+                catch( ... )
+                {
+                    // Preserve per-island failure isolation within a shared task
+                }
+            }, 4 * tp.get_thread_count() );
 
-                return 1;
-            };
-
-    for( size_t ii = 0; ii < zitems.size(); ++ii )
+    try
     {
-        CN_ZONE_LAYER* ptr = zitems[ii];
-        returns[ii] = tp.submit_task(
-            [cache_zones, ptr] { return cache_zones( ptr ); } );
-    }
-
-    for( const std::future<size_t>& ret : returns )
-    {
-        std::future_status status = ret.wait_for( std::chrono::milliseconds( 250 ) );
-
-        while( status != std::future_status::ready )
+        while( !returns.wait_for( std::chrono::milliseconds( 250 ) ) )
         {
             if( aReporter )
                 aReporter->KeepRefreshing();
-
-            status = ret.wait_for( std::chrono::milliseconds( 250 ) );
         }
-
+    }
+    catch( ... )
+    {
+        // Workers must release zitems before this frame unwinds
+        returns.wait();
+        throw;
     }
 
     // Add CN_ZONE_LAYERS, tracks, and pads to connectivity
@@ -1124,11 +1131,11 @@ void CN_CONNECTIVITY_ALGO::updateJumperPads()
             }
         }
 
-        for( const std::set<wxString>& group : footprint->JumperPadGroups() )
+        for( const JUMPER_GROUP& group : footprint->JumperPadGroups().GetAll() )
         {
             std::vector<CN_ITEM*> toConnect;
 
-            for( const wxString& padNumber : group )
+            for( const wxString& padNumber : group.GetNames() )
                 std::ranges::copy( padsMap[padNumber], std::back_inserter( toConnect ) );
 
             for( size_t i = 0; i < toConnect.size(); ++i )

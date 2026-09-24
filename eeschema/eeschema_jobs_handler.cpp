@@ -38,6 +38,7 @@
 #include <jobs/job_sym_export_svg.h>
 #include <jobs/job_sym_upgrade.h>
 #include <schematic.h>
+#include <import_net_map.h>
 #include <schematic_settings.h>
 #include <sch_screen.h>
 #include <sch_sheet.h>
@@ -202,10 +203,11 @@ void EESCHEMA_JOBS_HANDLER::ClearCachedSchematic()
 
     delete m_cliSchematic;
     m_cliSchematic = nullptr;
+    m_cliSchematicRootValidated = false;
 }
 
 
-SCHEMATIC* EESCHEMA_JOBS_HANDLER::getSchematic( const wxString& aPath )
+SCHEMATIC* EESCHEMA_JOBS_HANDLER::getSchematic( const wxString& aPath, bool aRequireRoot )
 {
     SCHEMATIC* sch = nullptr;
 
@@ -222,8 +224,15 @@ SCHEMATIC* EESCHEMA_JOBS_HANDLER::getSchematic( const wxString& aPath )
             schPath = path.GetFullPath();
         }
 
+        if( m_cliSchematic && aRequireRoot && !m_cliSchematicRootValidated )
+            ClearCachedSchematic();
+
         if( !m_cliSchematic )
-            m_cliSchematic = EESCHEMA_HELPERS::LoadSchematic( schPath, true, false, &project );
+        {
+            m_cliSchematic = EESCHEMA_HELPERS::LoadSchematic(
+                    schPath, true, false, &project, true, aRequireRoot ? m_reporter : nullptr );
+            m_cliSchematicRootValidated = aRequireRoot;
+        }
 
         sch = m_cliSchematic;
     }
@@ -236,7 +245,8 @@ SCHEMATIC* EESCHEMA_JOBS_HANDLER::getSchematic( const wxString& aPath )
     }
     else if( !aPath.IsEmpty() )
     {
-        sch = EESCHEMA_HELPERS::LoadSchematic( aPath, true, false );
+        sch = EESCHEMA_HELPERS::LoadSchematic(
+                aPath, true, false, nullptr, true, aRequireRoot ? m_reporter : nullptr );
     }
 
     if( !sch )
@@ -419,6 +429,10 @@ int EESCHEMA_JOBS_HANDLER::JobExportPlot( JOB* aJob )
     plotOpts.m_plotAll = aPlotJob->m_plotAll;
     plotOpts.m_plotDrawingSheet = aPlotJob->m_plotDrawingSheet;
     plotOpts.m_plotPages = aPlotJob->m_plotPages;
+
+    if( !aPlotJob->m_sheetPath.IsEmpty() )
+        plotOpts.m_sheetPath = sch->Hierarchy().GetSheetPathByKIIDPath( KIID_PATH( aPlotJob->m_sheetPath ) );
+
     plotOpts.m_theme = aPlotJob->m_theme;
     plotOpts.m_useBackgroundColor = aPlotJob->m_useBackgroundColor;
     plotOpts.m_plotHopOver = aPlotJob->m_show_hop_over;
@@ -506,43 +520,43 @@ int EESCHEMA_JOBS_HANDLER::JobExportNetlist( JOB* aJob )
     {
     case JOB_EXPORT_SCH_NETLIST::FORMAT::KICADSEXPR:
         fileExt = FILEEXT::NetlistFileExtension;
-        helper = std::make_unique<NETLIST_EXPORTER_KICAD>( sch );
+        helper = std::make_unique<NETLIST_EXPORTER_KICAD>( sch, m_kiway );
         break;
 
     case JOB_EXPORT_SCH_NETLIST::FORMAT::ORCADPCB2:
         fileExt = FILEEXT::OrCadPcb2NetlistFileExtension;
-        helper = std::make_unique<NETLIST_EXPORTER_ORCADPCB2>( sch );
+        helper = std::make_unique<NETLIST_EXPORTER_ORCADPCB2>( sch, m_kiway );
         break;
 
     case JOB_EXPORT_SCH_NETLIST::FORMAT::CADSTAR:
         fileExt = FILEEXT::CadstarNetlistFileExtension;
-        helper = std::make_unique<NETLIST_EXPORTER_CADSTAR>( sch );
+        helper = std::make_unique<NETLIST_EXPORTER_CADSTAR>( sch, m_kiway );
         break;
 
     case JOB_EXPORT_SCH_NETLIST::FORMAT::SPICE:
         fileExt = FILEEXT::SpiceFileExtension;
         netlistOption = NETLIST_EXPORTER_SPICE::OPTION_SIM_COMMAND;
-        helper = std::make_unique<NETLIST_EXPORTER_SPICE>( sch );
+        helper = std::make_unique<NETLIST_EXPORTER_SPICE>( sch, m_kiway );
         break;
 
     case JOB_EXPORT_SCH_NETLIST::FORMAT::SPICEMODEL:
         fileExt = FILEEXT::SpiceFileExtension;
-        helper = std::make_unique<NETLIST_EXPORTER_SPICE_MODEL>( sch );
+        helper = std::make_unique<NETLIST_EXPORTER_SPICE_MODEL>( sch, m_kiway );
         break;
 
     case JOB_EXPORT_SCH_NETLIST::FORMAT::KICADXML:
         fileExt = wxS( "xml" );
-        helper = std::make_unique<NETLIST_EXPORTER_XML>( sch );
+        helper = std::make_unique<NETLIST_EXPORTER_XML>( sch, m_kiway );
         break;
 
     case JOB_EXPORT_SCH_NETLIST::FORMAT::PADS:
         fileExt = wxS( "asc" );
-        helper = std::make_unique<NETLIST_EXPORTER_PADS>( sch );
+        helper = std::make_unique<NETLIST_EXPORTER_PADS>( sch, m_kiway );
         break;
 
     case JOB_EXPORT_SCH_NETLIST::FORMAT::ALLEGRO:
         fileExt = wxS( "txt" );
-        helper = std::make_unique<NETLIST_EXPORTER_ALLEGRO>( sch );
+        helper = std::make_unique<NETLIST_EXPORTER_ALLEGRO>( sch, m_kiway );
         break;
 
     default:
@@ -566,8 +580,6 @@ int EESCHEMA_JOBS_HANDLER::JobExportNetlist( JOB* aJob )
         m_reporter->Report( _( "Failed to create output directory\n" ), RPT_SEVERITY_ERROR );
         return CLI::EXIT_CODES::ERR_INVALID_OUTPUT_CONFLICT;
     }
-
-    helper->SetKiway( m_kiway );
 
     bool res = helper->WriteNetlist( outPath, netlistOption, *m_reporter );
 
@@ -984,7 +996,7 @@ int EESCHEMA_JOBS_HANDLER::JobExportPythonBom( JOB* aJob )
     if( erc.TestDuplicateSheetNames( false ) > 0 )
         m_reporter->Report( _( "Warning: duplicate sheet names.\n" ), RPT_SEVERITY_WARNING );
 
-    std::unique_ptr<NETLIST_EXPORTER_XML> xmlNetlist = std::make_unique<NETLIST_EXPORTER_XML>( sch );
+    std::unique_ptr<NETLIST_EXPORTER_XML> xmlNetlist = std::make_unique<NETLIST_EXPORTER_XML>( sch, m_kiway );
 
     if( aNetJob->GetConfiguredOutputPath().IsEmpty() )
     {
@@ -1352,8 +1364,24 @@ int EESCHEMA_JOBS_HANDLER::JobSchErc( JOB* aJob )
     ERC_TESTER ercTester( sch );
 
     std::unique_ptr<DS_PROXY_VIEW_ITEM> drawingSheet( getDrawingSheetProxyView( sch ) );
-    ercTester.RunTests( drawingSheet.get(), nullptr, m_kiway->KiFACE( KIWAY::FACE_CVPCB ), &sch->Project(),
+    SCH_EDIT_FRAME* editFrame = nullptr;
+
+    if( Pgm().IsGUI() )
+    {
+        editFrame = static_cast<SCH_EDIT_FRAME*>( m_kiway->Player( FRAME_SCH, false ) );
+
+        if( editFrame && &editFrame->Schematic() != sch )
+            editFrame = nullptr;
+    }
+
+    if( editFrame )
+        editFrame->ClearErcMarkers();
+
+    ercTester.RunTests( drawingSheet.get(), editFrame, m_kiway->KiFACE( KIWAY::FACE_CVPCB ), &sch->Project(),
                         m_progressReporter );
+
+    if( editFrame )
+        editFrame->RefreshErcMarkers();
 
     markersProvider->SetSeverities( ercJob->m_severity );
 
@@ -1394,7 +1422,7 @@ int EESCHEMA_JOBS_HANDLER::JobUpgrade( JOB* aJob )
     if( aUpgradeJob == nullptr )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
 
-    SCHEMATIC* sch = getSchematic( aUpgradeJob->m_filename );
+    SCHEMATIC* sch = getSchematic( aUpgradeJob->m_filename, false );
 
     if( !sch )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
@@ -1441,6 +1469,8 @@ int EESCHEMA_JOBS_HANDLER::JobImport( JOB* aJob )
 
     if( !job )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
+
+    job->m_netNameMap.clear();
 
     if( !wxFile::Exists( job->m_inputFile ) )
     {
@@ -1603,6 +1633,7 @@ int EESCHEMA_JOBS_HANDLER::JobImport( JOB* aJob )
         {
             SCH_COMMIT dummyCommit( toolManager.get() );
             schematic->RecalculateConnections( &dummyCommit, GLOBAL_CLEANUP, toolManager.get() );
+            dummyCommit.Push( _( "Schematic Cleanup" ), SKIP_UNDO | SKIP_CONNECTIVITY | DELETE_REMOVED_ITEMS );
         }
 
         schematic->SetSheetNumberAndCount();
@@ -1669,6 +1700,10 @@ int EESCHEMA_JOBS_HANDLER::JobImport( JOB* aJob )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
     }
 
+    // The board job renames its nets from this; nothing is written beside the schematic.
+    if( const IMPORT_NET_MAP* map = schematic->GetImportNetMap() )
+        job->m_netNameMap = GetBoardNetNameMap( *map, *m_reporter );
+
     m_reporter->Report( wxString::Format( _( "Successfully saved imported schematic to '%s'\n" ),
                                           outputFn.GetFullPath() ),
                         RPT_SEVERITY_INFO );
@@ -1734,6 +1769,8 @@ int EESCHEMA_JOBS_HANDLER::JobImport( JOB* aJob )
             { wxS( "symbols" ), symbolCount },
             { wxS( "sheets" ), sheetCount }
         };
+
+        reportData.m_statistics.emplace_back( wxS( "renamed_board_nets" ), job->m_netNameMap.size() );
 
         WriteImportReport( m_reporter, job->m_reportFormat, job->m_reportFile, reportData );
     }
@@ -2490,9 +2527,7 @@ int EESCHEMA_JOBS_HANDLER::runSymLibMerge( const wxString& aAncestor, const wxSt
     const bool hadSilentFallback = applier.GetReport().mergePropsFallback > 0;
 
     // Serialize via the sexpr lib cache: create at output path, add each
-    // merged symbol, save. The cache owns its symbols once added; clone
-    // before handing off so the applier's unique_ptrs stay intact for the
-    // post-save report.
+    // merged symbol, save. The cache owns its symbols once added.
     wxFileName outFn( aOutput );
     outFn.MakeAbsolute();
 
@@ -2500,13 +2535,12 @@ int EESCHEMA_JOBS_HANDLER::runSymLibMerge( const wxString& aAncestor, const wxSt
     {
         SCH_IO_KICAD_SEXPR_LIB_CACHE cache( outFn.GetFullPath() );
 
-        // SCH_IO_LIB_CACHE::AddSymbol takes ownership of the raw pointer; the
-        // cache destructor deletes from m_symbols. Release the unique_ptrs so
-        // we don't double-free.
+        // SCH_IO_LIB_CACHE::AddSymbol takes ownership; the cache destructor
+        // deletes the symbols it holds.
         for( auto& sym : merged )
         {
             if( sym )
-                cache.AddSymbol( sym.release() );
+                cache.AddSymbol( std::move( sym ) );
         }
 
         cache.SetModified( true );
