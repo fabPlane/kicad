@@ -749,7 +749,7 @@ BOOST_FIXTURE_TEST_CASE( ExportBoardSvgAsyncWithInlineOutput, API_SERVER_E2E_FIX
     const std::string& svg = status.result().inline_outputs( 0 ).data();
     BOOST_CHECK_EQUAL( status.result().inline_outputs( 0 ).path(), status.result().output_path( 0 ) );
     BOOST_CHECK( svg.find( "<svg" ) != std::string::npos );
-    BOOST_CHECK_EQUAL( svg, readFile( wxString::FromUTF8( status.result().output_path( 0 ) ) ) );
+    BOOST_CHECK_EQUAL( svg, KI_TEST::LoadStringData( wxString::FromUTF8( status.result().output_path( 0 ) ) ) );
 
     // An unknown id is a bad request
     statusRequest.set_job_id( "not-a-job" );
@@ -822,7 +822,7 @@ BOOST_FIXTURE_TEST_CASE( ExportBoardSpecctra, API_SERVER_E2E_FIXTURE )
     BOOST_REQUIRE_EQUAL( response.inline_outputs_size(), 1 );
     const std::string& dsn = response.inline_outputs( 0 ).data();
     BOOST_CHECK_EQUAL( response.inline_outputs( 0 ).path(), response.output_path( 0 ) );
-    BOOST_CHECK_EQUAL( dsn, readFile( outputPath.GetFullPath() ) );
+    BOOST_CHECK_EQUAL( dsn, KI_TEST::LoadStringData( outputPath.GetFullPath() ) );
 
     // The design carries the board's copper layers, outline, footprints and nets, in micrometers
     BOOST_CHECK_EQUAL( dsn.rfind( "(pcb ", 0 ), 0u );
