@@ -117,6 +117,9 @@ private:
 
     HANDLER_RESULT<commands::OpenDocumentResponse> createDocument( const commands::CreateDocument& aRequest );
 
+    /// Whether an open board or schematic has unsaved changes (asked through the server)
+    bool documentModified( const OPEN_DOCUMENT& aDoc, const PROJECT& aProject );
+
     HANDLER_RESULT<Empty> closeDocument( const commands::CloseDocument& aRequest );
 
     HANDLER_RESULT<Empty> closeAllDocuments( const commands::CloseAllDocuments& aRequest );

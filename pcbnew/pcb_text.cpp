@@ -127,12 +127,20 @@ void PCB_TEXT::Serialize( kiapi::board::types::BoardText& boardText ) const
 
     PackVector2( *text->mutable_position(), GetPosition() );
 
-    // The angle is kept relative to the parent footprint; GetTextAngle() resolves it.  That
-    // sum is not normalized, so normalize it here: SetTextAngle() on the far side stores the
-    // value verbatim in the EDA_TEXT attributes, and an out-of-range copy of an in-range
-    // angle is not the same object.
+    // The angle is kept relative to the parent footprint; GetTextAngle() resolves it.
+    // SetTextAngle() on the far side stores the value verbatim in the EDA_TEXT attributes, so
+    // send the stored attribute angle when it is the resolved angle (the loader may keep it out
+    // of range, e.g. -90), and otherwise the resolved sum, normalized: an out-of-range copy of an
+    // in-range angle is not the same object.
     EDA_ANGLE angle = GetTextAngle();
     angle.Normalize();
+    EDA_ANGLE stored = GetAttributes().m_Angle;
+    EDA_ANGLE storedNormalized = stored;
+    storedNormalized.Normalize();
+
+    if( storedNormalized == angle )
+        angle = stored;
+
     text->mutable_attributes()->mutable_angle()->set_value_degrees( angle.AsDegrees() );
 
     if( FOOTPRINT* parent = GetParentFootprint() )

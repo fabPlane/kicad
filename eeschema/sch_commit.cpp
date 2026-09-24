@@ -187,7 +187,6 @@ void SCH_COMMIT::pushLibEdit( const wxString& aMessage, int aCommitFlags )
 
 void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
 {
-
     // Objects potentially interested in changes:
     PICKED_ITEMS_LIST   undoList;
     KIGFX::VIEW*        view = m_toolMgr->GetView();
@@ -208,7 +207,9 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
         return;
     }
 
-    if( !frame )
+    // Frameless commits have nowhere to keep undo history unless a headless API session
+    // installed a sink
+    if( !frame && !m_toolMgr->GetUndoRedoSink() )
         aCommitFlags |= SKIP_UNDO;
 
     undoList.SetDescription( aMessage );

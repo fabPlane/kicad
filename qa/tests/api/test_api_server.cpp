@@ -163,12 +163,17 @@ BOOST_AUTO_TEST_CASE( SupportedCommandsReportsHeadlessCapability )
     // Commands that need an editor frame are listed but flagged as not available headless
     for( const std::string& guiOnly : { typeUrl( kiapi::common::commands::GetSelection() ),
                                         typeUrl( kiapi::common::commands::SaveSelectionToString() ),
-                                        typeUrl( kiapi::board::commands::GetActiveLayer() ),
-                                        typeUrl( kiapi::common::commands::RevertDocument() ) } )
+                                        typeUrl( kiapi::board::commands::GetActiveLayer() ) } )
     {
         BOOST_REQUIRE_MESSAGE( commands.contains( guiOnly ), guiOnly << " not listed" );
         BOOST_CHECK_MESSAGE( !commands[guiOnly].headless(), guiOnly << " should be GUI-only" );
     }
+
+    // RevertDocument reloads boards and schematics headless since the upstream merge (the footprint
+    // editor's revert still needs a frame, but the board handler answers first)
+    std::string revert = typeUrl( kiapi::common::commands::RevertDocument() );
+    BOOST_REQUIRE( commands.contains( revert ) );
+    BOOST_CHECK( commands[revert].headless() );
 
     // ExpandTextVariables is served by both the common and the board handler; it is listed once
     // and is headless-capable

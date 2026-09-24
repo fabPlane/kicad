@@ -308,7 +308,8 @@ BOOST_FIXTURE_TEST_CASE( BoardOpsTeardropsAndFootprints, API_SERVER_E2E_FIXTURE 
         std::set<std::string> missing( response.missing().begin(), response.missing().end() );
         BOOST_CHECK( missing.contains( "D1" ) );
         BOOST_CHECK( missing.contains( "P2" ) );
-        BOOST_CHECK_EQUAL( response.messages_size(), 6 );
+        // One message per footprint not found in a library (upstream added the ScrollWheel footprint)
+        BOOST_CHECK_EQUAL( response.messages_size(), 7 );
 
         request.mutable_new_footprint()->set_library_nickname( "Resistor_SMD" );
         BOOST_CHECK_EQUAL( SendStatus( Client(), request ), kiapi::common::AS_BAD_REQUEST );
