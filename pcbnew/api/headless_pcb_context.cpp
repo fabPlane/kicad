@@ -275,10 +275,18 @@ bool HEADLESS_PCB_CONTEXT::RevertToSaved()
     if( !reloaded )
         return false;
 
+    // The undo history holds copies of the old board's items and points at it: drop it before
+    // the board goes, and start a fresh one for the reloaded file
+    m_toolManager->SetUndoRedoSink( nullptr );
+    m_undoStack.reset();
+
     m_board = std::move( reloaded );
     m_board->SetProject( m_project );
     m_toolManager->SetEnvironment( m_board.get(), nullptr, nullptr, GetAppSettings<PCBNEW_SETTINGS>( "pcbnew" ),
                                    nullptr );
+
+    m_undoStack = MakeBoardUndoStack( m_board.get() );
+    m_toolManager->SetUndoRedoSink( m_undoStack.get() );
     m_contentModified = false;
 
     return true;

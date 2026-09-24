@@ -199,11 +199,11 @@ HANDLER_RESULT<SaveLibraryItemResponse> API_HANDLER_SYMBOL_LIBRARY::handleSaveLi
     if( !aCtx.Request.overwrite() && adapter()->LoadSymbol( id ) )
         return tl::unexpected( badRequest( fmt::format( "'{}' already exists and overwrite is not set", id.Format().c_str() ) ) );
 
-    // The plugin's cache takes ownership of the symbol it is given (see SCH_IO_LIB_CACHE::AddSymbol),
-    // so it gets its own copy, as the symbol editor does
+    // The adapter takes ownership of the symbol it is given, so it gets its own copy, as the
+    // symbol editor does
     try
     {
-        if( adapter()->SaveSymbol( nickname, new LIB_SYMBOL( *symbol ), true ) != SYMBOL_LIBRARY_ADAPTER::SAVE_OK )
+        if( adapter()->SaveSymbol( nickname, std::make_unique<LIB_SYMBOL>( *symbol ), true ) != SYMBOL_LIBRARY_ADAPTER::SAVE_OK )
             return tl::unexpected( badRequest( fmt::format( "'{}' was not saved", id.Format().c_str() ) ) );
     }
     catch( const IO_ERROR& ioe )
