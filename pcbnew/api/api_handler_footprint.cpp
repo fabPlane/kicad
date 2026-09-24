@@ -141,9 +141,6 @@ HANDLER_RESULT<FOOTPRINT*> API_HANDLER_FOOTPRINT::validateAndGetFootprint(
 HANDLER_RESULT<Empty> API_HANDLER_FOOTPRINT::handleOpenLibraryItem(
     const HANDLER_CONTEXT<OpenLibraryItem>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> headless = checkForHeadless( "OpenLibraryItem" ) )
-        return tl::unexpected( *headless );
-
     if( aCtx.Request.type() != DocumentType::DOCTYPE_FOOTPRINT )
     {
         ApiResponseStatus e;
