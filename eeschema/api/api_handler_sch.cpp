@@ -2463,7 +2463,7 @@ HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExpo
     plotJob->m_antialias = aCtx.Request.antialiasing() != types::AntialiasingMode::AAM_NONE;
     plotJob->m_useBackgroundColor = aCtx.Request.plot_background_color();
 
-    return ExecuteSchematicJob( m_context->GetKiway(), *plotJob );
+    return runSchematicJob( aCtx.Request.job_settings(), std::move( plotJob ) );
 }
 
 
@@ -4136,12 +4136,12 @@ HANDLER_RESULT<AnnotateResponse> API_HANDLER_SCH::handleAnnotate( const HANDLER_
 
         if( prevRef.Length() )
         {
-            msg.Printf( _( "Updated %s from %s to %s." ), symbol->GetValue( true, sheetPath, false ), prevRef,
+            msg.Printf( _( "Updated %s from %s to %s." ), symbol->GetValue( sheetPath, FOR_GUI ), prevRef,
                         newRef );
         }
         else
         {
-            msg.Printf( _( "Annotated %s as %s." ), symbol->GetValue( true, sheetPath, false ), newRef );
+            msg.Printf( _( "Annotated %s as %s." ), symbol->GetValue( sheetPath, FOR_GUI ), newRef );
         }
 
         response.add_messages( msg.ToUTF8() );
@@ -4212,7 +4212,7 @@ API_HANDLER_SCH::handleClearAnnotation( const HANDLER_CONTEXT<ClearAnnotation>& 
                 commit->Modify( aSymbol, aScreen );
 
                 wxString msg;
-                msg.Printf( _( "Cleared annotation for %s." ), aSymbol->GetValue( true, aSheet, false ) );
+                msg.Printf( _( "Cleared annotation for %s." ), aSymbol->GetValue( aSheet, FOR_GUI ) );
 
                 aSymbol->ClearAnnotation( aSheet, false );
                 response.set_annotated_count( response.annotated_count() + 1 );
@@ -4339,10 +4339,9 @@ API_HANDLER_SCH::handleSyncSchematicToBoard( const HANDLER_CONTEXT<SyncSchematic
         sch->RecalculateConnections( &dummyCommit, NO_CLEANUP, toolManager() );
     }
 
-    NETLIST_EXPORTER_KICAD exporter( sch );
+    NETLIST_EXPORTER_KICAD exporter( sch, m_context->GetKiway() );
     STRING_FORMATTER       formatter;
 
-    exporter.SetKiway( m_context->GetKiway() );
     exporter.Format( &formatter, GNL_ALL | GNL_OPT_KICAD );
 
     wxString netlistPath = wxFileName::CreateTempFileName( wxS( "kicad-api-netlist-" ) );
@@ -4713,8 +4712,8 @@ API_HANDLER_SCH::handleGetSymbolFieldsTable( const HANDLER_CONTEXT<GetSymbolFiel
             switch( field.GetId() )
             {
             case FIELD_T::REFERENCE: value = symbol->GetRef( &path, false );                       break;
-            case FIELD_T::VALUE:     value = symbol->GetValue( false, &path, false, variant );         break;
-            case FIELD_T::FOOTPRINT: value = symbol->GetFootprintFieldText( false, &path, false, variant ); break;
+            case FIELD_T::VALUE:     value = symbol->GetValue( &path, RAW_VALUE, variant );         break;
+            case FIELD_T::FOOTPRINT: value = symbol->GetFootprintFieldText( &path, RAW_VALUE, variant ); break;
             default:                 value = field.GetText();                                         break;
             }
 
@@ -4947,7 +4946,7 @@ wxString API_HANDLER_SCH::attachSheetFile( SCH_SHEET* aSheet, const SCH_SHEET_PA
     wxString    baseDir = parentFile.GetPath().IsEmpty() ? project().GetProjectPath() : parentFile.GetPath();
 
     // Sheet file names are relative to the parent sheet's file, as in the sheet dialog
-    wxFileName fn( ExpandTextVars( fileName, &project() ) );
+    wxFileName fn( ExpandTextVars( fileName, &project(), INTERNAL ) );
 
     if( !fn.Normalize( FN_NORMALIZE_FLAGS | wxPATH_NORM_ENV_VARS, baseDir ) )
         return wxString::Format( wxS( "cannot resolve sheet file '%s' against '%s'" ), fileName, baseDir );

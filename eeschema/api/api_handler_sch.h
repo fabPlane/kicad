@@ -133,10 +133,6 @@ private:
     HANDLER_RESULT<commands::SavedSelectionResponse>
     handleSaveSelectionToString( const HANDLER_CONTEXT<commands::SaveSelectionToString>& aCtx );
 
-    HANDLER_RESULT<commands::CreateItemsResponse>
-    handleParseAndCreateItemsFromString(
-            const HANDLER_CONTEXT<commands::ParseAndCreateItemsFromString>& aCtx );
-
     HANDLER_RESULT<commands::GetOpenDocumentsResponse>
     handleGetOpenDocuments( const HANDLER_CONTEXT<commands::GetOpenDocuments>& aCtx );
 
