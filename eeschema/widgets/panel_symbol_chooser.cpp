@@ -375,7 +375,7 @@ wxPanel* PANEL_SYMBOL_CHOOSER::constructRightPanel( wxWindow* aParent )
     if( m_frame->GetCanvas() )
         backend = m_frame->GetCanvas()->GetBackend();
     else if( COMMON_SETTINGS* cfg = Pgm().GetCommonSettings() )
-        backend = static_cast<EDA_DRAW_PANEL_GAL::GAL_TYPE>( cfg->m_Graphics.canvas_type );
+        backend = EDA_DRAW_PANEL_GAL::ResolveStoredCanvasType( cfg->m_Graphics.canvas_type );
 
     wxPanel*    panel = new wxPanel( aParent );
     wxBoxSizer* sizer = new wxBoxSizer( wxVERTICAL );
@@ -738,6 +738,8 @@ void PANEL_SYMBOL_CHOOSER::onSymbolSelected( wxCommandEvent& aEvent )
 {
     LIB_TREE_NODE* node = m_tree->GetCurrentTreeNode();
 
+    m_field_edits.clear();
+
     if( node && node->m_LibId.IsValid() )
     {
         LIB_SYMBOL* symbol = m_frame->GetLibSymbol( node->m_LibId );
@@ -783,6 +785,7 @@ void PANEL_SYMBOL_CHOOSER::onSymbolSelected( wxCommandEvent& aEvent )
             m_fp_preview->SetStatusText( wxEmptyString );
 
         updateBodyStyleChoice( nullptr );
+        populateFootprintSelector( LIB_ID() );
     }
 }
 

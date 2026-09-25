@@ -193,7 +193,6 @@ bool REMOTE_SYMBOL_IMPORT_JOB::Import( const REMOTE_PROVIDER_METADATA& aProvider
 
             LIBRARY_MANAGER& libMgr = Pgm().GetLibraryManager();
             libMgr.ReloadLibraryEntry( LIBRARY_TABLE_TYPE::FOOTPRINT, nickname, scope );
-            libMgr.LoadLibraryEntry( LIBRARY_TABLE_TYPE::FOOTPRINT, nickname );
         }
 
         footprintLinks.push_back( fpLibId );
@@ -288,25 +287,19 @@ bool REMOTE_SYMBOL_IMPORT_JOB::Import( const REMOTE_PROVIDER_METADATA& aProvider
 
         if( strictLibraryTables )
         {
-            if( !EnsureRemoteLibraryEntry( LIBRARY_TABLE_TYPE::SYMBOL, outFile, nickname,
-                                           addToGlobal, true, aError ) )
-                return false;
-
             SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &m_frame->Prj() );
 
-            if( !adapter
-                || adapter->SaveSymbol( nickname, loaded.get(), true )
-                           != SYMBOL_LIBRARY_ADAPTER::SAVE_OK )
+            if( !adapter )
             {
-                aError = _( "Unable to save the downloaded symbol." );
+                aError = _( "Unable to access the symbol library manager." );
                 return false;
             }
 
-            (void) loaded.release();   // ownership transferred to library cache
-
-            LIBRARY_MANAGER& libMgr = Pgm().GetLibraryManager();
-            libMgr.ReloadLibraryEntry( LIBRARY_TABLE_TYPE::SYMBOL, nickname, scope );
-            libMgr.LoadLibraryEntry( LIBRARY_TABLE_TYPE::SYMBOL, nickname );
+            if( !SaveRemoteSymbolToLibrary( *adapter, outFile, nickname, addToGlobal, std::move( loaded ),
+                                            aError ) )
+            {
+                return false;
+            }
         }
         else
         {
@@ -330,8 +323,7 @@ bool REMOTE_SYMBOL_IMPORT_JOB::Import( const REMOTE_PROVIDER_METADATA& aProvider
                         return false;
                     }
 
-                    plugin->SaveSymbol( outFile.GetFullPath(), loaded.get() );
-                    (void) loaded.release();   // ownership transferred to plugin's cache
+                    plugin->SaveSymbol( outFile.GetFullPath(), std::move( loaded ) );
                 }
                 catch( const IO_ERROR& e )
                 {

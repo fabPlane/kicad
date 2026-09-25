@@ -306,7 +306,7 @@ void PCB_EDIT_FRAME::HandleRemoteNetHighlight( const std::vector<wxString>& aNet
     KIGFX::VIEW*            view = m_toolManager->GetView();
     KIGFX::RENDER_SETTINGS* renderSettings = view->GetPainter()->GetSettings();
 
-    if( aNetNames.empty() )
+    if( aNetNames.empty() || ( aNetNames.size() == 1 && aNetNames[0].empty() ) )
     {
         auto* pcbRender = dynamic_cast<KIGFX::PCB_RENDER_SETTINGS*>( renderSettings );
 
@@ -332,7 +332,7 @@ void PCB_EDIT_FRAME::HandleRemoteNetHighlight( const std::vector<wxString>& aNet
         return;
     }
 
-    if( aNetNames.size() == 1 && ( netinfo = pcb->FindNet( aNetNames[0] ) ) )
+    if( aNetNames.size() == 1 && ( netinfo = pcb->FindNet( aNetNames[0] ) ) != nullptr )
     {
         netcode = netinfo->GetNetCode();
 
@@ -469,14 +469,14 @@ static bool selectionSpecFromItem( const EDA_ITEM* aItem, SelectionSpec& aSpec )
     {
     case PCB_FOOTPRINT_T:
     {
-        auto footprint = static_cast<const FOOTPRINT*>( aItem );
+        const FOOTPRINT* footprint = static_cast<const FOOTPRINT*>( aItem );
         aSpec.mutable_footprint()->set_reference( footprint->GetReference().ToUTF8() );
         return true;
     }
 
     case PCB_PAD_T:
     {
-        auto pad = static_cast<const PAD*>( aItem );
+        const PAD* pad = static_cast<const PAD*>( aItem );
 
         if( const FOOTPRINT* footprint = pad->GetParentFootprint() )
         {
@@ -488,7 +488,8 @@ static bool selectionSpecFromItem( const EDA_ITEM* aItem, SelectionSpec& aSpec )
         break;
     }
 
-    default: break;
+    default:
+        break;
     }
 
     return false;
@@ -512,7 +513,26 @@ void PCB_EDIT_FRAME::SendSelectItemsToSch( const std::deque<EDA_ITEM*>& aItems,
         }
     }
 
+    std::vector<EDA_ITEM*> collectedItems;
+
     for( EDA_ITEM* item : aItems )
+    {
+        if( item->Type() == PCB_GROUP_T )
+        {
+            static_cast<const PCB_GROUP*>( item )->RunOnChildren(
+                    [&]( BOARD_ITEM* aChild )
+                    {
+                        if( aChild->Type() == PCB_FOOTPRINT_T || aChild->Type() == PCB_PAD_T )
+                            collectedItems.push_back( aChild );
+                    }, RECURSE_MODE::RECURSE );
+        }
+        else if( item->Type() == PCB_FOOTPRINT_T || item->Type() == PCB_PAD_T )
+        {
+            collectedItems.push_back( item );
+        }
+    }
+
+    for( EDA_ITEM* item : collectedItems )
         selectionSpecFromItem( item, *sync.add_items() );
 
     if( sync.items_size() == 0 )

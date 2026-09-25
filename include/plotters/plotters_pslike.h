@@ -263,6 +263,7 @@ public:
             m_totalOutlineNodes( 0 ),
             m_3dModelHandle( -1 ),
             m_3dExportMode( false ),
+            m_usedBase14Fonts( false ),
             m_strokeFontManager( nullptr ),
             m_outlineFontManager( nullptr )
     {
@@ -617,6 +618,10 @@ protected:
 
     int  m_3dModelHandle;
     bool m_3dExportMode;
+
+    /// Set when the non-embeddable font fallback references the base-14 /KicadFont* resources.
+    bool m_usedBase14Fonts;
+
     std::unique_ptr<PDF_STROKE_FONT_MANAGER> m_strokeFontManager;
     std::unique_ptr<PDF_OUTLINE_FONT_MANAGER> m_outlineFontManager;
 };
@@ -739,6 +744,8 @@ public:
                            void*                  aData = nullptr ) override;
 
 protected:
+    virtual VECTOR2D userToDeviceCoordinates( const VECTOR2I& aCoordinate ) override;
+
     /**
      * Initialize m_pen_rgb_color from reduced values r, g ,b
      * ( reduced values are 0.0 to 1.0 )

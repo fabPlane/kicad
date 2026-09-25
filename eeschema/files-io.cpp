@@ -154,8 +154,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
     if( is_new && !( aCtl & KICTL_CREATE ) )
     {
         // notify user that fullFileName does not exist, ask if user wants to create it.
-        msg.Printf( _( "Schematic '%s' does not exist.  Do you wish to create it?" ),
-                    fullFileName );
+        msg.Printf( _( "Schematic '%s' does not exist.  Do you wish to create it?" ), fullFileName );
 
         if( !IsOK( this, msg ) )
             return false;
@@ -178,8 +177,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
     if( KISTATUSBAR* statusBar = dynamic_cast<KISTATUSBAR*>( GetStatusBar() ) )
         statusBar->ClearWarningMessages( "load" );
 
-    WX_PROGRESS_REPORTER progressReporter( this, is_new ? _( "Create Schematic" )
-                                                        : _( "Load Schematic" ), 1,
+    WX_PROGRESS_REPORTER progressReporter( this, is_new ? _( "Create Schematic" ) : _( "Load Schematic" ), 1,
                                            PR_CAN_ABORT );
     WX_STRING_REPORTER loadReporter;
     LOAD_INFO_REPORTER_SCOPE loadReporterScope( &loadReporter );
@@ -280,9 +278,8 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         {
             if( aCtl & KICTL_KICAD_ONLY )
             {
-                msg.Printf( _( "'%s' is not a KiCad schematic file.\nUse File -> Import for "
-                               "non-KiCad schematic files." ),
-                            fullFileName );
+                msg.Printf( _( "'%s' is not a KiCad schematic file.\n"
+                               "Use File -> Import for non-KiCad schematic files." ), fullFileName );
             }
             else
             {
@@ -349,11 +346,8 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                             sheet->SetName( sheetInfo.name );
                             loadedSheets.push_back( sheet );
 
-                            wxLogTrace( tracePathsAndFiles,
-                                       wxS( "Loaded top-level sheet '%s' (UUID %s) from %s" ),
-                                       sheet->GetName(),
-                                       sheet->m_Uuid.AsString(),
-                                       sheetPath );
+                            wxLogTrace( tracePathsAndFiles, wxS( "Loaded top-level sheet '%s' (UUID %s) from %s" ),
+                                        sheet->GetName(), sheet->m_Uuid.AsString(), sheetPath );
                         }
                     }
 
@@ -364,7 +358,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                     else
                     {
                         wxLogTrace( tracePathsAndFiles,
-                                   wxS( "Loaded multi-root schematic with no top-level sheets!" ) );
+                                    wxS( "Loaded multi-root schematic with no top-level sheets!" ) );
                         newSchematic->CreateDefaultScreens();
                     }
                 }
@@ -382,14 +376,13 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                         if( SCH_SHEET* topSheet = newSchematic->GetTopLevelSheet() )
                             topSheet->SetName( _( "Root" ) );
 
-                        wxLogTrace( tracePathsAndFiles,
-                                   wxS( "Loaded schematic with root sheet UUID %s" ),
-                                   rootSheet->m_Uuid.AsString() );
+                        wxLogTrace( tracePathsAndFiles, wxS( "Loaded schematic with root sheet UUID %s" ),
+                                    rootSheet->m_Uuid.AsString() );
                         wxLogTrace( traceSchCurrentSheet,
-                                   "After loading: Current sheet path='%s', size=%zu, empty=%d",
-                                   newSchematic->CurrentSheet().Path().AsString(),
-                                   newSchematic->CurrentSheet().size(),
-                                   newSchematic->CurrentSheet().empty() ? 1 : 0 );
+                                    wxS( "After loading: Current sheet path='%s', size=%zu, empty=%d" ),
+                                    newSchematic->CurrentSheet().Path().AsString(),
+                                    newSchematic->CurrentSheet().size(),
+                                    newSchematic->CurrentSheet().empty() ? 1 : 0 );
                     }
                     else
                     {
@@ -476,11 +469,10 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         // fixed (modified).
         if( sheetList.IsModified() || repairedPageNumbers )
         {
-            DisplayInfoMessage( this,
-                                _( "An error was found when loading the schematic that has "
-                                   "been automatically fixed.  Please save the schematic to "
-                                   "repair the broken file or it may not be usable with other "
-                                   "versions of KiCad." ) );
+            DisplayInfoMessage( this, _( "An error was found when loading the schematic that has been "
+                                         "automatically fixed.  Please save the schematic to repair the "
+                                         "broken file or it may not be usable with other versions of "
+                                         "KiCad." ) );
         }
 
         UpdateFileHistory( fullFileName );
@@ -539,20 +531,17 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                 {
                     if( eeconfig()->m_Appearance.show_illegal_symbol_lib_dialog )
                     {
-                        wxRichMessageDialog invalidLibDlg(
-                                this,
-                                _( "Illegal entry found in project file symbol library list." ),
-                                _( "Project Load Warning" ),
-                                wxOK | wxCENTER | wxICON_EXCLAMATION );
-                        invalidLibDlg.ShowDetailedText(
-                                _( "Symbol libraries defined in the project file symbol library "
-                                   "list are no longer supported and will be removed.\n\n"
-                                   "This may cause broken symbol library links under certain "
-                                   "conditions." ) );
-                        invalidLibDlg.ShowCheckBox( _( "Do not show this dialog again." ) );
-                        invalidLibDlg.ShowModal();
-                        eeconfig()->m_Appearance.show_illegal_symbol_lib_dialog =
-                                !invalidLibDlg.IsCheckBoxChecked();
+                        wxRichMessageDialog dlg( this,
+                                                 _( "Illegal entry found in project file symbol library list." ),
+                                                 _( "Project Load Warning" ),
+                                                 wxOK | wxCENTER | wxICON_EXCLAMATION );
+                        dlg.ShowDetailedText( _( "Symbol libraries defined in the project file symbol library "
+                                                 "list are no longer supported and will be removed.\n\n"
+                                                 "This may cause broken symbol library links under certain "
+                                                 "conditions." ) );
+                        dlg.ShowCheckBox( _( "Do not show this dialog again." ) );
+                        dlg.ShowModal();
+                        eeconfig()->m_Appearance.show_illegal_symbol_lib_dialog = !dlg.IsCheckBoxChecked();
                     }
 
                     libNames.Clear();
@@ -606,7 +595,6 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
             if( legacyLibs->GetLibraryCount() == 0 )
             {
-                wxString extMsg;
                 wxFileName cacheFn = pro;
 
                 wxLogTrace( traceAutoSave, "[SetName dbg] cacheFn BEFORE path='%s' name='%s' full='%s' arg='%s'",
@@ -616,22 +604,19 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                             cacheFn.GetPath(), cacheFn.GetName(), cacheFn.GetFullPath() );
                 cacheFn.SetExt( FILEEXT::LegacySymbolLibFileExtension );
 
-                msg.Printf( _( "The project symbol library cache file '%s' was not found." ),
-                            cacheFn.GetFullName() );
-                extMsg = _( "This can result in a broken schematic under certain conditions.  "
-                            "If the schematic does not have any missing symbols upon opening, "
-                            "save it immediately before making any changes to prevent data "
-                            "loss.  If there are missing symbols, either manual recovery of "
-                            "the schematic or recovery of the symbol cache library file and "
-                            "reloading the schematic is required." );
+                msg.Printf( _( "The project symbol library cache file '%s' was not found." ), cacheFn.GetFullName() );
 
-                KICAD_MESSAGE_DIALOG dlgMissingCache( this, msg, _( "Warning" ),
-                                                      wxOK | wxCANCEL | wxICON_EXCLAMATION | wxCENTER );
-                dlgMissingCache.SetExtendedMessage( extMsg );
-                dlgMissingCache.SetOKCancelLabels( KICAD_MESSAGE_DIALOG::ButtonLabel( _( "Load Without Cache File" ) ),
-                                                   KICAD_MESSAGE_DIALOG::ButtonLabel( _( "Abort" ) ) );
+                KICAD_MESSAGE_DIALOG dlg( this, msg, _( "Warning" ), wxOK | wxCANCEL | wxICON_EXCLAMATION | wxCENTER );
+                dlg.SetExtendedMessage( _( "This can result in a broken schematic under certain conditions.  If the "
+                                           "schematic does not have any missing symbols upon opening, save it "
+                                           "immediately before making any changes to prevent data loss.  If there "
+                                           "are missing symbols, either manual recovery of the schematic or "
+                                           "recovery of the symbol cache library file and reloading the schematic is "
+                                           "required." ) );
+                dlg.SetOKCancelLabels( KICAD_MESSAGE_DIALOG::ButtonLabel( _( "Load Without Cache File" ) ),
+                                       KICAD_MESSAGE_DIALOG::ButtonLabel( _( "Abort" ) ) );
 
-                if( dlgMissingCache.ShowModal() == wxID_CANCEL )
+                if( dlg.ShowModal() == wxID_CANCEL )
                 {
                     Schematic().Reset();
                     CreateDefaultScreens();
@@ -704,10 +689,8 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         // instead of the default one.
         LoadDrawingSheet();
 
-        wxLogTrace( traceSchCurrentSheet,
-                   "Before CheckForMissingSymbolInstances: Current sheet path='%s', size=%zu",
-                   GetCurrentSheet().Path().AsString(),
-                   GetCurrentSheet().size() );
+        wxLogTrace( traceSchCurrentSheet, "Before CheckForMissingSymbolInstances: Current sheet path='%s', size=%zu",
+                    GetCurrentSheet().Path().AsString(), GetCurrentSheet().size() );
 
         // Check must run before pruning so variant data on a stale instance path is migrated
         // onto the new instance before the orphan is removed.
@@ -725,10 +708,17 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         if( repairedPageNumbers )
             OnModify();
 
-        wxLogTrace( traceSchCurrentSheet,
-                   "After SetScreen: Current sheet path='%s', size=%zu",
-                   GetCurrentSheet().Path().AsString(),
-                   GetCurrentSheet().size() );
+        wxLogTrace( traceSchCurrentSheet, "After SetScreen: Current sheet path='%s', size=%zu",
+                    GetCurrentSheet().Path().AsString(), GetCurrentSheet().size() );
+
+        // Older files can omit implied junctions. Repair them before publishing connectivity;
+        // repairing current files could instead connect an intentional wire crossing.
+        const bool nativeNeedsFixup = schFileType == SCH_IO_MGR::SCH_KICAD
+                                && Schematic().RootScreen()->GetFileFormatVersionAtLoad()
+                                           < SEXPR_SCHEMATIC_FILE_VERSION;
+
+        if( schFileType == SCH_IO_MGR::SCH_LEGACY || nativeNeedsFixup )
+            Schematic().FixupJunctionsAfterImport();
 
         SCH_COMMIT dummy( this );
 
@@ -736,6 +726,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         progressReporter.KeepRefreshing();
 
         RecalculateConnections( &dummy, GLOBAL_CLEANUP, &progressReporter );
+        dummy.Push( _( "Schematic Cleanup" ), SKIP_UNDO | SKIP_SET_DIRTY | SKIP_CONNECTIVITY | DELETE_REMOVED_ITEMS );
 
         // Migrate conflicting bus definitions, but only for files old enough to store them.
         // The connection graph must be rebuilt first so GetBusesNeedingMigration() can see the
@@ -760,6 +751,8 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
             // Relabeling the conflicting buses changes connectivity, so rebuild it.
             RecalculateConnections( &dummy, GLOBAL_CLEANUP, &progressReporter );
+            dummy.Push( _( "Schematic Cleanup" ),
+                        SKIP_UNDO | SKIP_SET_DIRTY | SKIP_CONNECTIVITY | DELETE_REMOVED_ITEMS );
         }
 
         if( schematic.HasSymbolFieldNamesWithWhiteSpace() )
@@ -779,27 +772,6 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
     RecomputeIntersheetRefs();
     GetCurrentSheet().UpdateAllScreenReferences();
 
-    // Re-create junctions if needed. Eeschema optimizes wires by merging
-    // colinear segments. If a schematic is saved without a valid
-    // cache library or missing installed libraries, this can cause connectivity errors
-    // unless junctions are added.
-    //
-    // TODO: (RFB) This really needs to be put inside the Load() function of the SCH_IO_KICAD_LEGACY
-    // I can't put it right now because of the extra code that is above to convert legacy bus-bus
-    // entries to bus wires
-    //
-    // A native s-expression schematic written by an older version can drop the junctions implied
-    // by merged colinear wires, so the fixup also runs for pre-current native files.  It is limited
-    // to older files because the current version writes those junctions on save; running it on a
-    // current file could silently connect an intentional wire crossing and mask an
-    // ERCE_LABEL_MULTIPLE_WIRES violation.  It is idempotent and only adds needed junctions.
-    bool nativeNeedsFixup = schFileType == SCH_IO_MGR::SCH_KICAD
-                            && Schematic().RootScreen()->GetFileFormatVersionAtLoad()
-                                       < SEXPR_SCHEMATIC_FILE_VERSION;
-
-    if( schFileType == SCH_IO_MGR::SCH_LEGACY || nativeNeedsFixup )
-        Schematic().FixupJunctionsAfterImport();
-
     SyncView();
     GetScreen()->ClearDrawingState();
 
@@ -809,10 +781,8 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
     CallAfter(
             [this]()
             {
-                if( m_netNavigator && m_netNavigator->IsEmpty() )
-                {
+                if( m_netNavigator && m_netNavigatorStale )
                     RefreshNetNavigator();
-                }
             } );
 
     wxCommandEvent changedEvt( EDA_EVT_SCHEMATIC_CHANGED );
@@ -850,8 +820,8 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
     {
         m_infoBar->RemoveAllButtons();
         m_infoBar->AddCloseButton();
-        m_infoBar->ShowMessage( _( "Schematic is read only." ),
-                                wxICON_WARNING, WX_INFOBAR::MESSAGE_TYPE::OUTDATED_SAVE );
+        m_infoBar->ShowMessage( _( "Schematic is read only." ), wxICON_WARNING,
+                                WX_INFOBAR::MESSAGE_TYPE::OUTDATED_SAVE );
     }
 
 #ifdef PROFILE
@@ -862,7 +832,8 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         GetCanvas()->DisplaySheet( GetCurrentSheet().LastScreen() );
 
     // Trigger a library load to handle any project-specific libraries
-    CallAfter( [&]()
+    CallAfter(
+            [&]()
             {
                 KIFACE *schface = Kiway().KiFACE( KIWAY::FACE_SCH );
                 schface->PreloadLibraries( &Kiway() );
@@ -922,8 +893,7 @@ void SCH_EDIT_FRAME::OnImportProject()
             allWildcardsStr << wxS( "*." ) << formatWildcardExt( ext ) << wxS( ";" );
     }
 
-    fileFiltersStr = _( "All supported formats" ) + wxS( "|" ) + allWildcardsStr + wxS( "|" )
-                     + fileFiltersStr;
+    fileFiltersStr = _( "All supported formats" ) + wxS( "|" ) + allWildcardsStr + wxS( "|" ) + fileFiltersStr;
 
     wxFileDialog dlg( this, _( "Import Schematic" ), path, wxEmptyString, fileFiltersStr,
                       wxFD_OPEN | wxFD_FILE_MUST_EXIST );
@@ -1051,8 +1021,7 @@ bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSave
     if( m_infoBar->GetMessageType() == WX_INFOBAR::MESSAGE_TYPE::OUTDATED_SAVE )
         m_infoBar->Dismiss();
 
-    SCH_IO_MGR::SCH_FILE_T pluginType = SCH_IO_MGR::GuessPluginTypeFromSchPath(
-            schematicFileName.GetFullPath() );
+    SCH_IO_MGR::SCH_FILE_T pluginType = SCH_IO_MGR::GuessPluginTypeFromSchPath( schematicFileName.GetFullPath() );
 
     if( pluginType == SCH_IO_MGR::SCH_FILE_UNKNOWN )
         pluginType = SCH_IO_MGR::SCH_KICAD;
@@ -1091,11 +1060,9 @@ bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSave
 }
 
 
-bool PrepareSaveAsFiles( SCHEMATIC& aSchematic, SCH_SCREENS& aScreens,
-                         const wxFileName& aOldRoot, const wxFileName& aNewRoot,
-                         bool aSaveCopy, bool aCopySubsheets, bool aIncludeExternSheets,
-                         std::unordered_map<SCH_SCREEN*, wxString>& aFilenameMap,
-                         wxString& aErrorMsg )
+bool PrepareSaveAsFiles( SCHEMATIC& aSchematic, SCH_SCREENS& aScreens, const wxFileName& aOldRoot,
+                         const wxFileName& aNewRoot, bool aSaveCopy, bool aCopySubsheets, bool aIncludeExternSheets,
+                         std::unordered_map<SCH_SCREEN*, wxString>& aFilenameMap, wxString& aErrorMsg )
 {
     SCH_SCREEN* screen;
 
@@ -1129,10 +1096,8 @@ bool PrepareSaveAsFiles( SCHEMATIC& aSchematic, SCH_SCREENS& aScreens,
             else
                 dest.Assign( aNewRoot.GetPath(), dest.GetFullName() );
 
-            wxLogTrace( tracePathsAndFiles,
-                        wxS( "Moving schematic from '%s' to '%s'." ),
-                        screen->GetFileName(),
-                        dest.GetFullPath() );
+            wxLogTrace( tracePathsAndFiles, wxS( "Moving schematic from '%s' to '%s'." ),
+                        screen->GetFileName(), dest.GetFullPath() );
 
             if( !dest.DirExists() && !dest.Mkdir() )
             {
@@ -1208,8 +1173,7 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
             savePath.SetName( wxEmptyString );
 
         wxFileDialog dlg( this, _( "Schematic Files" ), savePath.GetPath(), savePath.GetFullName(),
-                          FILEEXT::KiCadSchematicFileWildcard(),
-                          wxFD_SAVE | wxFD_OVERWRITE_PROMPT );
+                          FILEEXT::KiCadSchematicFileWildcard(), wxFD_SAVE | wxFD_OVERWRITE_PROMPT );
 
         FILEDLG_HOOK_SAVE_PROJECT newProjectHook;
 
@@ -1226,15 +1190,14 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
 
         newFileName = EnsureFileExtension( dlg.GetPath(), FILEEXT::KiCadSchematicFileExtension );
 
-        if( ( !newFileName.DirExists() && !newFileName.Mkdir() ) ||
-            !newFileName.IsDirWritable() )
+        if( ( !newFileName.DirExists() && !newFileName.Mkdir() )
+            || !newFileName.IsDirWritable() )
         {
             msg.Printf( _( "Folder '%s' could not be created.\n\n"
                            "Make sure you have write permissions and try again." ),
                         newFileName.GetPath() );
 
-            KICAD_MESSAGE_DIALOG dlgBadPath( this, msg, _( "Error" ),
-                                             wxOK | wxICON_EXCLAMATION | wxCENTER );
+            KICAD_MESSAGE_DIALOG dlgBadPath( this, msg, _( "Error" ), wxOK | wxICON_EXCLAMATION | wxCENTER );
 
             dlgBadPath.ShowModal();
             return false;
@@ -1258,11 +1221,10 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
             filenameMap[Schematic().RootScreen()] = newFileName.GetFullPath();
         }
 
-        if( !PrepareSaveAsFiles( Schematic(), screens, fn, newFileName, saveCopy,
-                                 copySubsheets, includeExternSheets, filenameMap, msg ) )
+        if( !PrepareSaveAsFiles( Schematic(), screens, fn, newFileName, saveCopy, copySubsheets, includeExternSheets,
+                                 filenameMap, msg ) )
         {
-            KICAD_MESSAGE_DIALOG dlgBadFilePath( this, msg, _( "Error" ),
-                                                 wxOK | wxICON_EXCLAMATION | wxCENTER );
+            KICAD_MESSAGE_DIALOG dlgBadFilePath( this, msg, _( "Error" ), wxOK | wxICON_EXCLAMATION | wxCENTER );
 
             dlgBadFilePath.ShowModal();
             return false;
@@ -1326,10 +1288,8 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
                 msg += "\n" + lockedFile;
         }
 
-        wxRichMessageDialog dlg( this, wxString::Format( _( "Failed to save %s." ),
-                                                         Schematic().Root().GetFileName() ),
-                                 _( "Locked File Warning" ),
-                                 wxOK | wxICON_WARNING | wxCENTER );
+        wxRichMessageDialog dlg( this, wxString::Format( _( "Failed to save %s." ), Schematic().Root().GetFileName() ),
+                                 _( "Locked File Warning" ), wxOK | wxICON_WARNING | wxCENTER );
         dlg.SetExtendedMessage( _( "You do not have write permissions to:\n\n" ) + msg );
 
         dlg.ShowModal();
@@ -1346,10 +1306,8 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
                 msg += "\n" + overwrittenFile;
         }
 
-        wxRichMessageDialog dlg( this, _( "Saving will overwrite existing files." ),
-                                 _( "Save Warning" ),
-                                 wxOK | wxCANCEL | wxCANCEL_DEFAULT | wxCENTER |
-                                 wxICON_EXCLAMATION );
+        wxRichMessageDialog dlg( this, _( "Saving will overwrite existing files." ), _( "Save Warning" ),
+                                 wxOK | wxCANCEL | wxCANCEL_DEFAULT | wxCENTER | wxICON_EXCLAMATION );
         dlg.ShowDetailedText( _( "The following files will be overwritten:\n\n" ) + msg );
         dlg.SetOKCancelLabels( KICAD_MESSAGE_DIALOG::ButtonLabel( _( "Overwrite Files" ) ),
                                KICAD_MESSAGE_DIALOG::ButtonLabel( _( "Abort Project Save" ) ) );
@@ -1381,8 +1339,7 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
                 SCH_SHEET* sheet = static_cast<SCH_SHEET*>( item );
                 wxFileName sheetFileName = sheet->GetFileName();
 
-                if( !sheetFileName.IsOk()
-                    || sheetFileName.GetExt() == FILEEXT::KiCadSchematicFileExtension )
+                if( !sheetFileName.IsOk() || sheetFileName.GetExt() == FILEEXT::KiCadSchematicFileExtension )
                     continue;
 
                 sheetFileName.SetExt( FILEEXT::KiCadSchematicFileExtension );
@@ -1426,10 +1383,9 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
 
         m_autoSavePending = false;
         m_autoSaveRequired = false;
-    }
 
-    if( aSaveAs && success )
         LockFile( Schematic().RootScreen()->GetFileName() );
+    }
 
     if( updateFileHistory )
         UpdateFileHistory( Schematic().RootScreen()->GetFileName() );
@@ -1446,9 +1402,7 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
 
         // Do not save the virtual root sheet
         if( !sheet->IsVirtualRootSheet() )
-        {
             sheets.emplace_back( std::make_pair( sheet->m_Uuid, sheet->GetName() ) );
-        }
     }
 
     wxASSERT( filenameMap.count( Schematic().RootScreen() ) );
@@ -1578,10 +1532,15 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
 
             pi->SetProgressReporter( &progressReporter );
 
-            SCH_SHEET* loadedSheet = pi->LoadSchematicFile( aFileName, newSchematic.get(), nullptr,
-                                                            aProperties );
+            SCH_SHEET* loadedSheet = pi->LoadSchematicFile( aFileName, newSchematic.get(), nullptr, aProperties );
 
             SetSchematic( newSchematic.release() );
+
+            LoadProjectSettings();
+
+            // SetSchematic() killed the previous schematic's history saver
+            // So we need a new one for the new schematic
+            ProjectChanged();
 
             if( loadedSheet )
             {
@@ -1597,8 +1556,7 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
                     Schematic().SetTopLevelSheets( { loadedSheet } );
 
                 // extract a project symbol library and re-link LIB_IDs so every symbol resolves
-                ReconcileImportedSymbols( *pi, Schematic(), Prj(), aFileName, aProperties,
-                                          loadReporter );
+                ReconcileImportedSymbols( *pi, Schematic(), Prj(), aFileName, aProperties, loadReporter );
 
                 // re-link footprint fields to the project lib so update-from-schematic works
                 {
@@ -1606,8 +1564,7 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
                     std::vector<wxString> sourceFpLibs;
                     IMPORT_PROJ_PROPS::ReadFootprintProps( aProperties, cacheNick, sourceFpLibs );
 
-                    SCH_FOOTPRINT_FIELD_RECONCILER fpReconciler( cacheNick, sourceFpLibs,
-                                                                 &loadReporter );
+                    SCH_FOOTPRINT_FIELD_RECONCILER fpReconciler( cacheNick, sourceFpLibs, &loadReporter );
                     fpReconciler.Reconcile( Schematic() );
                 }
 
@@ -1623,8 +1580,8 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
 
                 if( drawingSheetName.StartsWith( embeddedPrefix ) )
                 {
-                    embeddedWorksheet = Schematic().GetEmbeddedFiles()->GetEmbeddedFile(
-                            drawingSheetName.Mid( embeddedPrefix.length() ) );
+                    wxString sheetFile = drawingSheetName.Mid( embeddedPrefix.length() );
+                    embeddedWorksheet = Schematic().GetEmbeddedFiles()->GetEmbeddedFile( sheetFile );
                 }
 
                 if( !embeddedWorksheet
@@ -1654,7 +1611,7 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
                 progressReporter.Report( _( "Updating connections..." ) );
 
                 if( !progressReporter.KeepRefreshing() )
-                    THROW_IO_ERROR( _( "File import canceled by user." ) );
+                    THROW_IO_CANCELLED();
 
                 RecalculateConnections( nullptr, GLOBAL_CLEANUP, &progressReporter );
 
@@ -1684,8 +1641,7 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
             CreateDefaultScreens();
             m_toolManager->RunAction( ACTIONS::zoomFitScreen );
 
-            wxString msg = wxString::Format( _( "Unhandled exception occurred loading schematic "
-                                                "'%s'." ), aFileName );
+            wxString msg = wxString::Format( _( "Unhandled exception occurred loading schematic '%s'." ), aFileName );
             DisplayErrorMessage( this, msg, exc.what() );
 
             msg.Printf( _( "Failed to load '%s'." ), aFileName );
@@ -1706,10 +1662,8 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
         CallAfter(
                 [this]()
                 {
-                    if( m_netNavigator && m_netNavigator->IsEmpty() )
-                    {
+                    if( m_netNavigator && m_netNavigatorStale )
                         RefreshNetNavigator();
-                    }
                 } );
 
         wxCommandEvent e( EDA_EVT_SCHEMATIC_CHANGED );
@@ -1761,8 +1715,7 @@ bool SCH_EDIT_FRAME::AskToSaveChanges()
 
         if( screen->IsContentModified() )
         {
-            if( !HandleUnsavedChanges( this, _( "The current schematic has been modified.  "
-                                                "Save changes?" ),
+            if( !HandleUnsavedChanges( this, _( "The current schematic has been modified.  Save changes?" ),
                                        [&]() -> bool
                                        {
                                            return SaveProject();

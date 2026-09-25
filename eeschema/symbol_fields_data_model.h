@@ -68,7 +68,7 @@ public:
 
     void RebuildRows() override;
 
-    void ApplyData( SCH_COMMIT& aCommit, TEMPLATES& aTemplateFieldnames, const wxString& aVariantName );
+    void ApplyData( SCH_COMMIT& aCommit, TEMPLATES& aTemplateFieldnames );
 
     void  SetScope( SCOPE aScope ) { m_scope = aScope; }
     SCOPE GetScope() { return m_scope; }
@@ -86,6 +86,8 @@ public:
     const SCH_REFERENCE_LIST& GetReferenceList() const { return m_symbolsList; }
 
 private:
+    bool fieldSupportsVariants( const wxString& aFieldName ) const override;
+
     bool unitMatch( const SCH_REFERENCE& lhItem, const SCH_REFERENCE& rhItem ) override;
 
     /**
@@ -107,7 +109,7 @@ private:
     wxString getAttributeValue( const SCH_REFERENCE& aRef, const wxString& aAttributeName,
                                 const wxString& aVariantNames );
     bool     getLiveFieldValueForVariant( const SCH_REFERENCE& aRef, const wxString& aFieldName,
-                                          const wxString& aVariantName, wxString& aValue );
+                                          const wxString& aVariantName, wxString& aValue ) override;
 
     /**
      * Get the default (non-variant) value for a field.

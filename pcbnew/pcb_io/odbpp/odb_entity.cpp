@@ -31,6 +31,7 @@
 #include <font/font.h>
 #include <footprint.h>
 #include <hash_eda.h>
+#include <drill/drill_enumerator.h>
 #include <pad.h>
 #include <padstack.h>
 #include <pcb_dimension.h>
@@ -356,7 +357,9 @@ void ODB_MATRIX_ENTITY::AddDrillMatrixLayer()
             if( pad->GetAttribute() == PAD_ATTRIB::NPTH )
                 has_npth_layer = true;
 
-            if( pad->HasHole() && pad->GetDrillSizeX() != pad->GetDrillSizeY() )
+            // Shared with the drill writers and IPC-2581, which each used to decide this
+            // separately and disagreed on a circular drill shape with unequal sizes
+            if( IsDrillSlot( *pad ) )
                 slot_holes[std::make_pair( F_Cu, B_Cu )].push_back( pad );
             else if( pad->HasHole() )
             {
@@ -811,10 +814,8 @@ void ODB_LAYER_ENTITY::InitDrillData()
                 if( isNPTHLayer != padIsNPTH )
                     continue;
 
-                m_tools.value().AddDrillTools( padIsNPTH ? wxT( "NON_PLATED" ) : wxT( "PLATED" ),
-                                               ODB::SymDouble2String(
-                                                       std::min( pad->GetDrillSizeX(),
-                                                                pad->GetDrillSizeY() ) ) );
+                m_tools.value().AddDrillTool( padIsNPTH ? wxT( "NON_PLATED" ) : wxT( "PLATED" ),
+                                               std::min( pad->GetDrillSizeX(), pad->GetDrillSizeY() ) );
 
                 m_layerItems[pad->GetNetCode()].push_back( item );
             }
@@ -852,11 +853,10 @@ void ODB_LAYER_ENTITY::InitDrillData()
                         continue;
                     }
 
-                    m_tools.value().AddDrillTools(
+                    m_tools.value().AddDrillTool(
                             pad->GetAttribute() == PAD_ATTRIB::PTH ? wxT( "PLATED" )
                                                                     : wxT( "NON_PLATED" ),
-                            ODB::SymDouble2String(
-                                    std::min( pad->GetDrillSizeX(), pad->GetDrillSizeY() ) ) );
+                            std::min( pad->GetDrillSizeX(), pad->GetDrillSizeY() ) );
 
                     m_layerItems[pad->GetNetCode()].push_back( item );
                 }
@@ -910,19 +910,15 @@ void ODB_LAYER_ENTITY::InitDrillData()
                         if( diameter <= 0 )
                             continue;
 
-                        m_tools.value().AddDrillTools( wxT( "NON_PLATED" ),
-                                                       ODB::SymDouble2String( diameter ),
-                                                       wxT( "BLIND" ) );
+                        m_tools.value().AddDrillTool( wxT( "NON_PLATED" ), diameter, wxT( "BLIND" ) );
                     }
                     else if( isNonPlatedLayer )
                     {
-                        m_tools.value().AddDrillTools( wxT( "NON_PLATED" ),
-                                                       ODB::SymDouble2String( via->GetDrillValue() ) );
+                        m_tools.value().AddDrillTool( wxT( "NON_PLATED" ), via->GetDrillValue() );
                     }
                     else
                     {
-                        m_tools.value().AddDrillTools( wxT( "VIA" ),
-                                                       ODB::SymDouble2String( via->GetDrillValue() ) );
+                        m_tools.value().AddDrillTool( wxT( "VIA" ), via->GetDrillValue() );
                     }
 
                     m_layerItems[via->GetNetCode()].push_back( item );
@@ -948,8 +944,7 @@ void ODB_LAYER_ENTITY::InitDrillData()
                                                                            : wxT( "PLATED" );
                     wxString type2 = isBackdrillLayer ? wxT( "BLIND" ) : wxT( "STANDARD" );
 
-                    m_tools.value().AddDrillTools( typeLabel, ODB::SymDouble2String( drillSize ),
-                                                   type2 );
+                    m_tools.value().AddDrillTool( typeLabel, drillSize, type2 );
 
                     m_layerItems[pad->GetNetCode()].push_back( item );
                 }
@@ -981,8 +976,7 @@ void ODB_LAYER_ENTITY::InitDrillData()
                     {
                         PCB_VIA* via = static_cast<PCB_VIA*>( item );
 
-                        m_tools.value().AddDrillTools( wxT( "VIA" ),
-                                                       ODB::SymDouble2String( via->GetDrillValue() ) );
+                        m_tools.value().AddDrillTool( wxT( "VIA" ), via->GetDrillValue() );
 
                         m_layerItems[via->GetNetCode()].push_back( item );
                     }
@@ -996,10 +990,10 @@ void ODB_LAYER_ENTITY::InitDrillData()
                             continue;
                         }
 
-                        m_tools.value().AddDrillTools(
+                        m_tools.value().AddDrillTool(
                                 pad->GetAttribute() == PAD_ATTRIB::PTH ? wxT( "PLATED" )
                                                                         : wxT( "NON_PLATED" ),
-                                ODB::SymDouble2String( pad->GetDrillSizeX() ) );
+                                pad->GetDrillSizeX() );
 
                         m_layerItems[pad->GetNetCode()].push_back( item );
                     }
@@ -1169,8 +1163,7 @@ void ODB_LAYER_ENTITY::GenAttrList( ODB_TREE_WRITER& writer )
 
         if( thickness > 0 )
         {
-            double thicknessOut = PCB_IO_ODBPP::m_scale * thickness;
-            ost << ".layer_dielectric=" << ODB::Double2String( thicknessOut ) << std::endl;
+            ost << ".layer_dielectric=" << ODB::Data2String( thickness ) << std::endl;
         }
 
         if( stackupItem->GetType() == BS_ITEM_TYPE_COPPER )

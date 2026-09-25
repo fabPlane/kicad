@@ -50,6 +50,13 @@ static bool fetchCategoryParts( HTTP_LIB_CONNECTION& aConn, const HTTP_LIB_CATEG
 
         if( HTTP_LIB_PART fullPart; aConn.SelectOne( part.id, fullPart ) )
         {
+            // The detail record may omit description/keywords info that the category record had
+            if( fullPart.desc.empty() )
+                fullPart.desc = part.desc;
+
+            if( fullPart.keywords.empty() )
+                fullPart.keywords = part.keywords;
+
             fullPart.id = part.id;
             fullPart.name = part.name;
             part = std::move( fullPart );
@@ -811,8 +818,12 @@ LIB_SYMBOL* SCH_IO_HTTP_LIB::loadSymbolFromPart( const wxString& aLibraryPath,
         }
     }
 
-    symbol->SetDescription( aPart.desc );
-    symbol->SetKeyWords( aPart.keywords );
+    // The detail record may omit description/keywords info that the category record had
+    if( !aPart.desc.empty() )
+        symbol->SetDescription( aPart.desc );
+
+    if( !aPart.keywords.empty() )
+        symbol->SetKeyWords( aPart.keywords );
 
     for( const std::string& filter : aPart.fp_filters )
         fp_filters.push_back( filter );
@@ -846,7 +857,7 @@ LIB_SYMBOL* SCH_IO_HTTP_LIB::loadSymbolFromPart( const wxString& aLibraryPath,
     return symbol;
 }
 
-void SCH_IO_HTTP_LIB::SaveSymbol( const wxString& aLibraryPath, const LIB_SYMBOL* aSymbol,
+void SCH_IO_HTTP_LIB::SaveSymbol( const wxString& aLibraryPath, std::unique_ptr<LIB_SYMBOL> aSymbol,
                                   const std::map<std::string, UTF8>* aProperties )
 {
     // TODO: Implement this sometime;

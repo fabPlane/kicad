@@ -230,7 +230,8 @@ bool DIALOG_SIM_MODEL<T>::TransferDataToWindow()
             m_libraryPathText->ChangeValue( libraryFilename );
             m_curModelType = SIM_MODEL::ReadTypeFromFields( m_fields, true, 0, reporter );
 
-            m_libraryModelsMgr.CreateModel( nullptr, m_sortedPartPins, m_fields, true, 0, reporter );
+            m_libraryModelsMgr.CreateModel( nullptr, SIM_MODEL::PinNumbers( m_sortedPartPins ), m_fields, true, 0,
+                                            reporter );
 
             m_modelListBox->Clear();
             m_modelListBox->Append( _( "<unknown>" ) );
@@ -243,8 +244,7 @@ bool DIALOG_SIM_MODEL<T>::TransferDataToWindow()
 
             if( modelIdx == wxNOT_FOUND )
             {
-                m_infoBar->ShowMessage( wxString::Format( _( "No model named '%s' in library." ),
-                                                          modelName ) );
+                m_infoBar->ShowMessage( wxString::Format( _( "No model named '%s' in library." ), modelName ) );
 
                 // Default to first item in library if any exist
                 if( m_modelListBox->GetCount() > 0 )
@@ -338,7 +338,7 @@ bool DIALOG_SIM_MODEL<T>::TransferDataToWindow()
         if( m_rbBuiltinModel->GetValue() && type == m_curModelType )
         {
             reporter.Clear();
-            m_builtinModelsMgr.CreateModel( m_fields, true, 0, m_sortedPartPins, reporter );
+            m_builtinModelsMgr.CreateModel( m_fields, true, 0, SIM_MODEL::PinNumbers( m_sortedPartPins ), reporter );
 
             if( reporter.HasMessage() )
             {
@@ -348,7 +348,7 @@ bool DIALOG_SIM_MODEL<T>::TransferDataToWindow()
         }
         else
         {
-            m_builtinModelsMgr.CreateModel( type, m_sortedPartPins, reporter );
+            m_builtinModelsMgr.CreateModel( type, SIM_MODEL::PinNumbers( m_sortedPartPins ), reporter );
         }
 
         SIM_MODEL::DEVICE_T deviceTypeT = SIM_MODEL::TypeInfo( type ).deviceType;
@@ -971,12 +971,14 @@ bool DIALOG_SIM_MODEL<T>::loadLibrary( const wxString& aLibraryPath, REPORTER& a
 
     std::string modelName = GetFieldValue( &m_fields, SIM_LIBRARY::NAME_FIELD, true, 0 );
 
+    const auto partPinNumbers = SIM_MODEL::PinNumbers( m_sortedPartPins );
+
     for( const auto& [baseModelName, baseModel] : library()->GetModels() )
     {
         if( baseModelName == modelName )
-            m_libraryModelsMgr.CreateModel( &baseModel, m_sortedPartPins, m_fields, true, 0, aReporter );
+            m_libraryModelsMgr.CreateModel( &baseModel, partPinNumbers, m_fields, true, 0, aReporter );
         else
-            m_libraryModelsMgr.CreateModel( &baseModel, m_sortedPartPins, aReporter );
+            m_libraryModelsMgr.CreateModel( &baseModel, partPinNumbers, aReporter );
     }
 
     m_rbLibraryModel->SetValue( true );
@@ -989,7 +991,7 @@ bool DIALOG_SIM_MODEL<T>::loadLibrary( const wxString& aLibraryPath, REPORTER& a
         modelNames.Add( name );
         m_modelListBoxEntryToLibraryIdx[name] = m_modelListBoxEntryToLibraryIdx.size();
 
-        if( name == modelName )
+        if( wxString( name ).IsSameAs( modelName, false ) )
             modelNameExists = true;
     }
 
@@ -1018,7 +1020,11 @@ bool DIALOG_SIM_MODEL<T>::loadLibrary( const wxString& aLibraryPath, REPORTER& a
     m_modelListBox->SetStringSelection( modelName );
 
     if( m_modelListBox->GetSelection() < 0 && m_modelListBox->GetCount() > 0 )
-        m_modelListBox->SetSelection( 0 );
+    {
+        m_modelListBox->SetSelection( 0 );  // WARNING: SetSelection() does NOT fire events
+        wxCommandEvent dummy;
+        onModelNameChoice( dummy );
+    }
 
     m_curModelType = curModel().GetType();
 
@@ -1149,7 +1155,7 @@ wxPGProperty* DIALOG_SIM_MODEL<T>::newParamProperty( SIM_MODEL* aModel, int aPar
 
             if( SCH_EDIT_FRAME* schEditFrame = dynamic_cast<SCH_EDIT_FRAME*>( m_frame ) )
             {
-                SPICE_CIRCUIT_MODEL circuit( &schEditFrame->Schematic() );
+                SPICE_CIRCUIT_MODEL circuit( &schEditFrame->Schematic(), &schEditFrame->Kiway() );
                 NULL_REPORTER       devNul;
 
                 circuit.ReadSchematicAndLibraries( NETLIST_EXPORTER_SPICE::OPTION_DEFAULT_FLAGS, devNul );
@@ -1464,7 +1470,9 @@ void DIALOG_SIM_MODEL<T>::onFilterCharHook( wxKeyEvent& aKeyStroke )
         return;
     }
 
-    m_modelListBox->SetSelection( sel );
+    m_modelListBox->SetSelection( sel );  // WARNING: SetSelection() does NOT fire events
+    wxCommandEvent dummy;
+    onModelNameChoice( dummy );
 }
 
 
@@ -1494,7 +1502,11 @@ void DIALOG_SIM_MODEL<T>::onModelFilter( wxCommandEvent& aEvent )
     if( m_modelListBox->GetCount() > 0 )
     {
         if( !m_modelListBox->SetStringSelection( current ) )
-            m_modelListBox->SetSelection( 0 );
+        {
+            m_modelListBox->SetSelection( 0 );  // WARNING: SetSelection() does NOT fire events
+            wxCommandEvent dummy;
+            onModelNameChoice( dummy );
+        }
     }
 }
 
@@ -1679,7 +1691,8 @@ void DIALOG_SIM_MODEL<T>::onWaveformChoice( wxCommandEvent& aEvent )
 
             try
             {
-                m_libraryModelsMgr.GetModels()[idx].get().ReadDataFields( &m_fields, true, 0, m_sortedPartPins );
+                m_libraryModelsMgr.GetModels()[idx].get().ReadDataFields(
+                        &m_fields, true, 0, SIM_MODEL::PinNumbers( m_sortedPartPins ) );
             }
             catch( IO_ERROR& err )
             {

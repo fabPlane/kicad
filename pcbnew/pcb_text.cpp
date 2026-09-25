@@ -127,12 +127,20 @@ void PCB_TEXT::Serialize( kiapi::board::types::BoardText& boardText ) const
 
     PackVector2( *text->mutable_position(), GetPosition() );
 
-    // The angle is kept relative to the parent footprint; GetTextAngle() resolves it.  That
-    // sum is not normalized, so normalize it here: SetTextAngle() on the far side stores the
-    // value verbatim in the EDA_TEXT attributes, and an out-of-range copy of an in-range
-    // angle is not the same object.
+    // The angle is kept relative to the parent footprint; GetTextAngle() resolves it.
+    // SetTextAngle() on the far side stores the value verbatim in the EDA_TEXT attributes, so
+    // send the stored attribute angle when it is the resolved angle (the loader may keep it out
+    // of range, e.g. -90), and otherwise the resolved sum, normalized: an out-of-range copy of an
+    // in-range angle is not the same object.
     EDA_ANGLE angle = GetTextAngle();
     angle.Normalize();
+    EDA_ANGLE stored = GetAttributes().m_Angle;
+    EDA_ANGLE storedNormalized = stored;
+    storedNormalized.Normalize();
+
+    if( storedNormalized == angle )
+        angle = stored;
+
     text->mutable_attributes()->mutable_angle()->set_value_degrees( angle.AsDegrees() );
 
     if( FOOTPRINT* parent = GetParentFootprint() )
@@ -197,7 +205,7 @@ bool PCB_TEXT::Deserialize( const google::protobuf::Any& aContainer )
 }
 
 
-wxString PCB_TEXT::GetShownText( bool aAllowExtraText, int aDepth ) const
+wxString PCB_TEXT::GetShownText( RESOLUTION_CONTEXT aContext, int aDepth ) const
 {
     const FOOTPRINT* parentFootprint = GetParentFootprint();
     const BOARD*     board = GetBoard();
@@ -221,12 +229,12 @@ wxString PCB_TEXT::GetShownText( bool aAllowExtraText, int aDepth ) const
                 return false;
             };
 
-    wxString text = EDA_TEXT::GetShownText( aAllowExtraText, aDepth );
+    wxString text = EDA_TEXT::GetShownText( aContext, aDepth );
 
-    if( HasTextVars() )
+    if( HasTextVars() && aContext != RAW_VALUE )
     {
         text = ResolveTextVars( text, &resolver, aDepth );
-        FinalizeTextVarExpansion( text, aAllowExtraText );
+        FinalizeTextVarExpansion( text, aContext );
     }
 
     return text;
@@ -695,7 +703,7 @@ wxString PCB_TEXT::GetTextTypeDescription() const
 
 wxString PCB_TEXT::GetItemDescription( UNITS_PROVIDER* aUnitsProvider, bool aFull ) const
 {
-    wxString content = aFull ? GetShownText( false ) : KIUI::EllipsizeMenuText( GetText() );
+    wxString content = aFull ? GetShownText( FOR_GUI ) : KIUI::EllipsizeMenuText( GetText() );
 
     if( FOOTPRINT* parentFP = GetParentFootprint() )
     {
@@ -812,7 +820,7 @@ void PCB_TEXT::TransformTextToPolySet( SHAPE_POLY_SET& aBuffer, int aClearance, 
     KIFONT::FONT*              font = GetDrawFont( nullptr );
     int                        penWidth = GetEffectiveTextPenWidth();
     TEXT_ATTRIBUTES            attrs = GetAttributes();
-    wxString                   shownText = GetShownText( true );
+    wxString                   shownText = GetShownText( FOR_CANVAS );
 
     attrs.m_Angle = GetDrawRotation();
     attrs.m_Size = GetTextSize();

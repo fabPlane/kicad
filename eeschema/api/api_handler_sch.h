@@ -26,6 +26,7 @@
 #include <api/common/commands/cross_probe_commands.pb.h>
 #include <api/common/commands/editor_commands.pb.h>
 #include <api/common/commands/project_commands.pb.h>
+#include <api/common/commands/library_commands.pb.h>
 #include <google/protobuf/empty.pb.h>
 #include <api/common/commands/variant_commands.pb.h>
 #include <api/schematic/schematic_commands.pb.h>
@@ -104,6 +105,8 @@ protected:
 
     void onModified() override;
 
+    void onNetSettingsChanged() override;
+
     SCH_CONTEXT* context() const { return m_context.get(); }
 
     TOOL_MANAGER* toolManager() const { return context()->GetToolManager(); }
@@ -126,6 +129,9 @@ private:
 
     HANDLER_RESULT<google::protobuf::Empty>
     handleRevertDocument( const HANDLER_CONTEXT<commands::RevertDocument>& aCtx );
+
+    HANDLER_RESULT<commands::SavedSelectionResponse>
+    handleSaveSelectionToString( const HANDLER_CONTEXT<commands::SaveSelectionToString>& aCtx );
 
     HANDLER_RESULT<commands::GetOpenDocumentsResponse>
     handleGetOpenDocuments( const HANDLER_CONTEXT<commands::GetOpenDocuments>& aCtx );
@@ -160,6 +166,7 @@ private:
     /// See API_HANDLER_PCB::runBoardJob.  Since 11.0.
     HANDLER_RESULT<types::RunJobResponse> runSchematicJob( const types::RunJobSettings& aSettings,
                                                            std::unique_ptr<JOB> aJob );
+    HANDLER_RESULT<Empty> handleFocusOnItems( const HANDLER_CONTEXT<commands::FocusOnItems>& aCtx );
 
     HANDLER_RESULT<types::RunJobResponse>
     handleRunSchematicJobExportSvg( const HANDLER_CONTEXT<kiapi::schematic::jobs::RunSchematicJobExportSvg>& aCtx );
@@ -172,6 +179,9 @@ private:
 
     HANDLER_RESULT<types::RunJobResponse>
     handleRunSchematicJobExportPs( const HANDLER_CONTEXT<kiapi::schematic::jobs::RunSchematicJobExportPs>& aCtx );
+
+    HANDLER_RESULT<types::RunJobResponse>
+    handleRunSchematicJobExportPng( const HANDLER_CONTEXT<kiapi::schematic::jobs::RunSchematicJobExportPng>& aCtx );
 
     HANDLER_RESULT<types::RunJobResponse> handleRunSchematicJobExportNetlist(
             const HANDLER_CONTEXT<kiapi::schematic::jobs::RunSchematicJobExportNetlist>& aCtx );
@@ -276,6 +286,8 @@ private:
      * create the file on disk.  @return an error message, or empty on success
      */
     wxString attachSheetFile( SCH_SHEET* aSheet, const SCH_SHEET_PATH& aParentPath );
+    HANDLER_RESULT<kiapi::common::commands::PlaceFromLibraryResponse> handlePlaceSymbolFromLibrary(
+            const HANDLER_CONTEXT<kiapi::schematic::commands::PlaceSymbolFromLibrary>& aCtx );
 
     SCHEMATIC* schematic() const;
 
@@ -283,8 +295,8 @@ private:
 
     void filterValidSchTypes( std::set<KICAD_T>& aTypeList );
 
-    /// Returns the sheet path's screen when one is given and it is found.
-    /// Returns the editor's current sheet if not.  May return null in either case.
+    /// Returns the sheet path's screen when one is given and it is found, or null.
+    /// Otherwise, returns the editor's current sheet (or root sheet in headless mode).
     SCH_SCREEN* resolveScreenFromDocument( const DocumentSpecifier& aDocument ) const;
 
 protected:

@@ -28,11 +28,14 @@
 #include <api/board/board.pb.h>
 #include <api/board/board_rules.pb.h>
 #include <api/common/types/enums.pb.h>
+#include <api/common/types/library_types.pb.h>
 #include <eda_shape.h>
 #include <core/mirror.h>
 #include <core/typeinfo.h>
 #include <font/text_attributes.h>
 #include <layer_ids.h>
+#include <libraries/library_manager.h>
+#include <libraries/library_table.h>
 #include <pin_type.h>
 #include <stroke_params.h>
 #include <widgets/report_severity.h>
@@ -578,6 +581,21 @@ BOOST_AUTO_TEST_CASE( SchematicJobPageSize )
 BOOST_AUTO_TEST_CASE( SchematicNetlistFormat )
 {
     testEnums<JOB_EXPORT_SCH_NETLIST::FORMAT, kiapi::schematic::jobs::SchematicNetlistFormat>();
+}
+
+BOOST_AUTO_TEST_CASE( LibraryType )
+{
+    testEnums<LIBRARY_TABLE_TYPE, types::LibraryType>( false, LIBRARY_TABLE_TYPE::UNINITIALIZED );
+}
+
+BOOST_AUTO_TEST_CASE( LibraryTableScope )
+{
+    testEnums<LIBRARY_TABLE_SCOPE, types::LibraryTableScope>( false, LIBRARY_TABLE_SCOPE::UNINITIALIZED );
+}
+
+BOOST_AUTO_TEST_CASE( LibraryLoadStatus )
+{
+    testEnums<LOAD_STATUS, types::LibraryLoadStatus>();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

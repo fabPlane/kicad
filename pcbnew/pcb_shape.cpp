@@ -42,6 +42,7 @@
 #include <geometry/point_types.h>
 #include <geometry/shape_utils.h>
 #include <pcb_painter.h>
+#include <convert_basic_shapes_to_polygon.h>
 #include <api/board/board_types.pb.h>
 #include <api/api_enums.h>
 #include <api/api_utils.h>
@@ -231,6 +232,18 @@ void PCB_SHAPE::Serialize( google::protobuf::Any &aContainer ) const
 
     EDA_SHAPE::Serialize( *msg.mutable_shape(), pcbIUScale );
 
+    if( IsProxyItem() )
+    {
+        PadCustomShapeOptions* options = msg.mutable_pad_custom_shape_options();
+
+        switch( GetShape() )
+        {
+        case SHAPE_T::RECTANGLE: options->set_is_number_box( true );                 break;
+        case SHAPE_T::SEGMENT:   options->set_is_thermal_spoke_template( true );     break;
+        default:                 wxFAIL_MSG( wxT( "Unexpected proxy shape type" ) ); break;
+        }
+    }
+
     if( FOOTPRINT* parent = GetParentFootprint() )
         msg.mutable_parent()->set_value( parent->m_Uuid.AsStdString() );
     else if( const BOARD* board = GetBoard() )
@@ -283,6 +296,26 @@ bool PCB_SHAPE::Deserialize( const google::protobuf::Any &aContainer )
     // EDA_SHAPE sets the board-frame geometry; the file format and footprint transforms work
     // from the library-frame copy (arcs in particular bypass the syncing setters)
     syncLibCoords();
+    if( msg.has_pad_custom_shape_options() )
+    {
+        switch( msg.pad_custom_shape_options().role_case() )
+        {
+        case PadCustomShapeOptions::kIsNumberBox:
+            if( GetShape() == SHAPE_T::RECTANGLE )
+                m_proxyItem = true;
+
+            break;
+
+        case PadCustomShapeOptions::kIsThermalSpokeTemplate:
+            if( GetShape() == SHAPE_T::SEGMENT )
+                m_proxyItem = true;
+
+            break;
+
+        case PadCustomShapeOptions::ROLE_NOT_SET:
+            break;
+        }
+    }
 
     if( msg.has_solder_mask() )
     {
@@ -1183,11 +1216,29 @@ void PCB_SHAPE::rebakeFromTransform( const TRANSFORM_TRS& xform )
             m_shape = SHAPE_T::POLY;
             SHAPE_POLY_SET& poly = GetPolyShape();
             poly.RemoveAllContours();
-            poly.NewOutline();
-            poly.Append( c1 );
-            poly.Append( c2 );
-            poly.Append( c3 );
-            poly.Append( c4 );
+
+            if( m_cornerRadius > 0 )
+            {
+                SHAPE_POLY_SET rounded;
+                VECTOR2I       libCenter = ( m_libStart + m_libEnd ) / 2;
+                VECTOR2I       libSize( std::abs( m_libEnd.x - m_libStart.x ), std::abs( m_libEnd.y - m_libStart.y ) );
+
+                TransformRoundChamferedRectToPolygon( rounded, libCenter, libSize, ANGLE_0, m_cornerRadius, 0.0, 0, 0,
+                                                      getMaxError(), ERROR_INSIDE );
+
+                poly.NewOutline();
+
+                for( int ii = 0; ii < rounded.Outline( 0 ).PointCount(); ++ii )
+                    poly.Append( xform.Apply( rounded.Outline( 0 ).CPoint( ii ) ) );
+            }
+            else
+            {
+                poly.NewOutline();
+                poly.Append( c1 );
+                poly.Append( c2 );
+                poly.Append( c3 );
+                poly.Append( c4 );
+            }
 
             EDA_SHAPE::SetStart( c1 );
             EDA_SHAPE::SetEnd( c3 );

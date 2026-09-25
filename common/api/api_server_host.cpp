@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <vector>
 
+#include <api/api_handler_libraries.h>
 #include <api/api_handler_library.h>
 #include <api/api_server.h>
 #include <api/api_server_host.h>
@@ -76,6 +77,12 @@ void API_SERVER_HOST::Install()
                 return openDocument( aRequest );
             } );
 
+    m_commonHandler.SetCreateDocumentHandler(
+            [this]( const commands::CreateDocument& aRequest )
+            {
+                return createDocument( aRequest );
+            } );
+
     m_commonHandler.SetCloseDocumentHandler(
             [this]( const commands::CloseDocument& aRequest )
             {
@@ -113,6 +120,16 @@ void API_SERVER_HOST::Install()
             } );
 
     m_server.RegisterHandler( &m_commonHandler );
+
+    m_designBlockLibrariesHandler = std::make_unique<API_HANDLER_LIBRARIES>( LIBRARY_TABLE_TYPE::DESIGN_BLOCK );
+    m_designBlockLibrariesHandler->SetKiway( &m_kiway );
+    m_designBlockLibrariesHandler->SetLibraryHandlerRegistrar(
+            [this]( KIFACE* aKiface )
+            {
+                aKiface->RegisterLibraryHandlers( &m_server );
+            } );
+    m_server.RegisterHandler( m_designBlockLibrariesHandler.get() );
+
     m_installed = true;
 }
 
@@ -124,6 +141,13 @@ void API_SERVER_HOST::Shutdown()
 
     closeAllDocuments( commands::CloseAllDocuments() );
     m_server.DeregisterHandler( &m_commonHandler );
+
+    if( m_designBlockLibrariesHandler )
+    {
+        m_server.DeregisterHandler( m_designBlockLibrariesHandler.get() );
+        m_designBlockLibrariesHandler.reset();
+    }
+
     m_installed = false;
 }
 
@@ -488,6 +512,181 @@ HANDLER_RESULT<commands::OpenDocumentResponse> API_SERVER_HOST::openDocument(
     docSpec->mutable_project()->set_path( project.GetProjectPath().ToUTF8() );
 
     return response;
+}
+
+
+HANDLER_RESULT<commands::OpenDocumentResponse>
+API_SERVER_HOST::createDocument( const commands::CreateDocument& aRequest )
+{
+    types::DocumentType requestType = aRequest.type();
+
+    if( requestType != types::DOCTYPE_PCB && requestType != types::DOCTYPE_SCHEMATIC )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_UNIMPLEMENTED );
+        e.set_error_message( "Only PCB and schematic documents can be created" );
+        return tl::unexpected( e );
+    }
+
+    wxString inputPath = wxString::FromUTF8( aRequest.path() );
+
+    if( inputPath.IsEmpty() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "CreateDocument requires a non-empty path" );
+        return tl::unexpected( e );
+    }
+
+    wxFileName docPath( inputPath );
+    docPath.MakeAbsolute();
+    docPath.SetExt( requestType == types::DOCTYPE_PCB ? FILEEXT::KiCadPcbFileExtension
+                                                      : FILEEXT::KiCadSchematicFileExtension );
+
+    wxFileName projectPath( docPath );
+    projectPath.SetExt( FILEEXT::ProjectFileExtension );
+
+    const bool projectChanges = m_openProjectPath && projectPath.GetFullPath() != m_openProjectPath->GetFullPath();
+
+    // A document of the requested type is replaced (the kiface refuses when it has unsaved
+    // changes).  When the new document lives in another project, that project becomes the open
+    // one, so the previous project's other board or schematic is closed too, unless it has
+    // unsaved changes.  Library item documents are not tied to a project and stay open.
+    std::vector<OPEN_DOCUMENT> staleDocuments;
+
+    if( projectChanges )
+    {
+        PROJECT* previous = Pgm().GetSettingsManager().GetProject( m_openProjectPath->GetFullPath() );
+
+        for( const OPEN_DOCUMENT& d : m_openDocuments )
+        {
+            if( d.type == requestType || ( d.type != types::DOCTYPE_PCB && d.type != types::DOCTYPE_SCHEMATIC ) )
+                continue;
+
+            if( !previous || documentModified( d, *previous ) )
+            {
+                ApiResponseStatus e;
+                e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+                e.set_error_message( wxString::Format( "'%s' in project '%s' has unsaved changes; save or revert "
+                                                       "it before creating a document in another project",
+                                                       d.fileName, m_openProjectPath->GetFullName() )
+                                             .ToStdString() );
+                return tl::unexpected( e );
+            }
+
+            staleDocuments.push_back( d );
+        }
+    }
+
+    KIFACE::DOCUMENT_SPEC spec;
+    spec.kind = KIFACE::DOCUMENT_SPEC::KIND::CREATE_KIND;
+    spec.path = docPath.GetFullPath();
+
+    KIWAY::FACE_T face = faceForDocument( requestType );
+    wxString      error;
+
+    if( !m_kiway.ProcessApiOpenDocument( face, spec, &m_server, &error ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( error.ToStdString() );
+        return tl::unexpected( e );
+    }
+
+    // The kiface closed the document of this type it had open, if any
+    std::erase_if( m_openDocuments,
+                   [&]( const OPEN_DOCUMENT& d )
+                   {
+                       return d.type == requestType;
+                   } );
+
+    if( projectChanges )
+    {
+        for( const OPEN_DOCUMENT& stale : staleDocuments )
+        {
+            wxString closeError;
+
+            if( !m_kiway.ProcessApiCloseDocument( faceForDocument( stale.type ), closeSpec( stale, true ), &m_server,
+                                                  &closeError ) )
+            {
+                wxLogTrace( traceApi, "Closing %s of the previous project failed: %s", stale.fileName, closeError );
+            }
+
+            std::erase_if( m_openDocuments,
+                           [&]( const OPEN_DOCUMENT& d )
+                           {
+                               return d.type == stale.type && d.fileName == stale.fileName;
+                           } );
+        }
+
+        if( PROJECT* previous = Pgm().GetSettingsManager().GetProject( m_openProjectPath->GetFullPath() ) )
+            publishProjectEvent( *previous, false );
+
+        notifyProjectFaces( *m_openProjectPath, false );
+
+        std::erase_if( m_openDocuments,
+                       []( const OPEN_DOCUMENT& d )
+                       {
+                           return d.type == types::DOCTYPE_PROJECT;
+                       } );
+
+        m_openProjectPath.reset();
+    }
+
+    PROJECT& project = Pgm().GetSettingsManager().Prj();
+
+    OPEN_DOCUMENT doc;
+    doc.type = requestType;
+    doc.fileName = docPath.GetFullName();
+    m_openDocuments.push_back( doc );
+
+    // Creating a board or schematic implicitly opens (or creates) its project
+    if( !m_openProjectPath )
+    {
+        wxFileName openedProject( project.GetProjectPath(), project.GetProjectName(),
+                                  FILEEXT::ProjectFileExtension );
+        publishProjectEvent( project, true );
+        notifyProjectFaces( openedProject, true );
+        m_openProjectPath = openedProject;
+    }
+
+    commands::OpenDocumentResponse response;
+    types::DocumentSpecifier*      docSpec = response.mutable_document();
+
+    docSpec->set_type( requestType );
+
+    if( requestType == types::DOCTYPE_PCB )
+        docSpec->set_board_filename( doc.fileName.ToStdString() );
+
+    PackProject( *docSpec->mutable_project(), project );
+
+    return response;
+}
+
+
+bool API_SERVER_HOST::documentModified( const OPEN_DOCUMENT& aDoc, const PROJECT& aProject )
+{
+    commands::GetDocumentModifiedState query;
+    types::DocumentSpecifier*          doc = query.mutable_document();
+    doc->set_type( aDoc.type );
+
+    if( aDoc.type == types::DOCTYPE_PCB )
+        doc->set_board_filename( aDoc.fileName.ToUTF8() );
+
+    PackProject( *doc->mutable_project(), aProject );
+
+    ApiRequest request;
+    request.mutable_header()->set_client_name( "kicad.api-server-host" );
+    request.mutable_message()->PackFrom( query );
+
+    API_RESULT result = m_server.Dispatch( request );
+    commands::GetDocumentModifiedStateResponse response;
+
+    // Anything that cannot be answered counts as modified, so nothing is discarded unasked
+    if( !result || !result->message().UnpackTo( &response ) )
+        return true;
+
+    return response.state() != commands::DocumentModifiedState::DMS_UNMODIFIED;
 }
 
 

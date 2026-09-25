@@ -21,6 +21,7 @@
 #ifndef KICAD_HEADLESS_SCH_CONTEXT_H
 #define KICAD_HEADLESS_SCH_CONTEXT_H
 
+#include <functional>
 #include <memory>
 
 #include <wx/string.h>
@@ -37,7 +38,7 @@ class TOOL_MANAGER;
 class HEADLESS_SCH_CONTEXT : public SCH_CONTEXT
 {
 public:
-    HEADLESS_SCH_CONTEXT( SCHEMATIC* aSchematic, PROJECT* aProject, KIWAY* aKiway = nullptr );
+    HEADLESS_SCH_CONTEXT( SCHEMATIC** aSchematicSlot, PROJECT* aProject, KIWAY* aKiway = nullptr );
 
     ~HEADLESS_SCH_CONTEXT() override;
 
@@ -60,10 +61,12 @@ public:
     bool SaveSchematicCopy( const wxString& aFileName, bool aCreateProject ) override;
 
     API_UNDO_STACK* GetUndoStack() const override { return m_undoStack.get(); }
+    bool RevertToSaved() override;
 
 private:
-    // All owned by caller (the kiface)
-    SCHEMATIC*                    m_schematic;
+    // Pointer-to-pointer because we don't own the schematic and the underlying pointer gets
+    // replaced if the client calls RevertToSaved.  This will always point to the IFACE's pointer.
+    SCHEMATIC**                   m_schematicSlot;
     PROJECT*                      m_project;
     KIWAY*                        m_kiway;
     std::unique_ptr<TOOL_MANAGER> m_toolManager;

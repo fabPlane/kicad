@@ -31,6 +31,7 @@
 #include <api/common/commands/settings_commands.pb.h>
 
 using namespace kiapi::common;
+using kiapi::common::types::ProjectSpecifier;
 using google::protobuf::Empty;
 
 class API_HANDLER_COMMON : public API_HANDLER
@@ -38,6 +39,8 @@ class API_HANDLER_COMMON : public API_HANDLER
 public:
     using OPEN_DOCUMENT_HANDLER = std::function<HANDLER_RESULT<commands::OpenDocumentResponse>(
             const commands::OpenDocument& )>;
+    using CREATE_DOCUMENT_HANDLER = std::function<HANDLER_RESULT<commands::OpenDocumentResponse>(
+            const commands::CreateDocument& )>;
     using CLOSE_DOCUMENT_HANDLER = std::function<HANDLER_RESULT<Empty>(
             const commands::CloseDocument& )>;
     using CLOSE_ALL_DOCUMENTS_HANDLER = std::function<HANDLER_RESULT<Empty>(
@@ -93,6 +96,11 @@ public:
     /// The settings file name of an editor ("pcbnew", "eeschema", ...), or empty.  Since 11.0
     static wxString AppSettingsFilename( commands::AppType aApp );
 
+    void SetCreateDocumentHandler( CREATE_DOCUMENT_HANDLER aHandler )
+    {
+        m_createDocumentHandler = std::move( aHandler );
+    }
+
 private:
     /// Publish a ProjectChanged event for the open project.  Since 11.0
     void publishProjectChanged( kiapi::common::events::ProjectChangeKind aKind,
@@ -112,6 +120,12 @@ private:
 
     HANDLER_RESULT<Empty> handleSetNetClasses(
         const HANDLER_CONTEXT<commands::SetNetClasses>& aCtx );
+
+    HANDLER_RESULT<commands::NetClassAssignmentsResponse> handleGetNetClassAssignments(
+        const HANDLER_CONTEXT<commands::GetNetClassAssignments>& aCtx );
+
+    HANDLER_RESULT<Empty> handleSetNetClassAssignments(
+        const HANDLER_CONTEXT<commands::SetNetClassAssignments>& aCtx );
 
     HANDLER_RESULT<Empty> handlePing( const HANDLER_CONTEXT<commands::Ping>& aCtx );
 
@@ -135,6 +149,9 @@ private:
 
     HANDLER_RESULT<commands::OpenDocumentResponse> handleOpenDocument(
         const HANDLER_CONTEXT<commands::OpenDocument>& aCtx );
+
+    HANDLER_RESULT<commands::OpenDocumentResponse> handleCreateDocument(
+        const HANDLER_CONTEXT<commands::CreateDocument>& aCtx );
 
     HANDLER_RESULT<Empty> handleCloseDocument(
         const HANDLER_CONTEXT<commands::CloseDocument>& aCtx );
@@ -165,6 +182,9 @@ private:
         const HANDLER_CONTEXT<commands::GetJobStatus>& aCtx );
 
 private:
+    static tl::expected<bool, ApiResponseStatus> validateProject( const ProjectSpecifier& aProject,
+                                                                  bool aAllowEmpty = false );
+
     OPEN_DOCUMENT_HANDLER m_openDocumentHandler;
     CLOSE_ALL_DOCUMENTS_HANDLER m_closeAllDocumentsHandler;
     CLOSE_DOCUMENT_HANDLER m_closeDocumentHandler;
@@ -172,6 +192,7 @@ private:
     NEW_DOCUMENT_HANDLER m_newDocumentHandler;
     GET_PROJECT_INFO_HANDLER m_getProjectInfoHandler;
     ENSURE_APP_SETTINGS_HANDLER m_ensureAppSettingsHandler;
+    CREATE_DOCUMENT_HANDLER m_createDocumentHandler;
 };
 
 #endif //KICAD_API_HANDLER_COMMON_H

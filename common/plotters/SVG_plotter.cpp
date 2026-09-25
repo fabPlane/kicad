@@ -85,6 +85,7 @@
 #include <core/base64.h>
 #include <eda_shape.h>
 #include <string_utils.h>
+#include <text_eval/text_eval_wrapper.h>
 #include <font/font.h>
 #include <macros.h>
 #include <trigo.h>
@@ -206,6 +207,22 @@ void SVG_PLOTTER::SetSvgCoordinatesFormat( unsigned aPrecision )
 void SVG_PLOTTER::SetPlotBBox( const BOX2I& aBBoxIU )
 {
     m_plotBBoxIU = aBBoxIU;
+}
+
+
+VECTOR2D SVG_PLOTTER::userToDeviceCoordinates( const VECTOR2I& aCoordinate )
+{
+    VECTOR2D pos = PLOTTER::userToDeviceCoordinates( aCoordinate );
+
+    if( m_plotMirror )
+    {
+        if( m_mirrorIsHorizontal )
+            pos.x -= m_paperSize.x * m_iuPerDeviceUnit;
+        else
+            pos.y -= m_paperSize.y * m_iuPerDeviceUnit;
+    }
+
+    return pos;
 }
 
 
@@ -780,24 +797,34 @@ bool SVG_PLOTTER::StartPlot( const wxString& aPageNumber )
     // transformed by the viewport, so the content keeps its origin at the SVG
     // origin even when it extends to negative coordinates. Otherwise the page
     // size is used and the origin is the viewbox (which is also the page) corner.
-    VECTOR2D origin( 0, 0 );
-    VECTOR2D size( m_paperSize.x * m_iuPerDeviceUnit, m_paperSize.y * m_iuPerDeviceUnit );
+    VECTOR2D viewBoxOrigin( 0, 0 );
+    VECTOR2D viewboxSize( m_paperSize.x * m_iuPerDeviceUnit, m_paperSize.y * m_iuPerDeviceUnit );
 
     if( m_plotBBoxIU )
     {
         double deviceScale = m_plotScale * m_iuPerDeviceUnit;
 
-        origin.x = ( m_plotBBoxIU->GetLeft() - m_plotOffset.x ) * deviceScale;
-        origin.y = ( m_plotBBoxIU->GetTop() - m_plotOffset.y ) * deviceScale;
-        size.x   = static_cast<double>( m_plotBBoxIU->GetWidth() ) * deviceScale;
-        size.y   = static_cast<double>( m_plotBBoxIU->GetHeight() ) * deviceScale;
+        viewBoxOrigin.x = ( m_plotBBoxIU->GetLeft() - m_plotOffset.x ) * deviceScale;
+        viewBoxOrigin.y = ( m_plotBBoxIU->GetTop() - m_plotOffset.y ) * deviceScale;
+        viewboxSize.x   = static_cast<double>( m_plotBBoxIU->GetWidth() ) * deviceScale;
+        viewboxSize.y   = static_cast<double>( m_plotBBoxIU->GetHeight() ) * deviceScale;
+    }
+
+    // When mirroring, the viewbox also needs to be mirrored, so that the same content is
+    // still visible in it.
+    if( m_plotMirror )
+    {
+        if( m_mirrorIsHorizontal )
+            viewBoxOrigin.x = -viewBoxOrigin.x - viewboxSize.x;
+        else
+            viewBoxOrigin.y = -viewBoxOrigin.y - viewboxSize.y;
     }
 
     fmt::print( m_outputFile,
                 "  width=\"{:.{}f}mm\" height=\"{:.{}f}mm\" viewBox=\"{:.{}f} {:.{}f} {:.{}f} {:.{}f}\">\n",
-                size.x, m_precision, size.y, m_precision,
-                origin.x, m_precision, origin.y, m_precision,
-                size.x, m_precision, size.y, m_precision );
+                viewboxSize.x, m_precision, viewboxSize.y, m_precision,
+                viewBoxOrigin.x, m_precision, viewBoxOrigin.y, m_precision,
+                viewboxSize.x, m_precision, viewboxSize.y, m_precision );
 
     // Write title
     wxString date = GetISO8601CurrentDateTime();
@@ -858,6 +885,14 @@ void SVG_PLOTTER::Text( const VECTOR2I&        aPos,
     SetColor( aColor );
     SetCurrentLineWidth( aWidth );
 
+    wxString text( aText );
+
+    if( text.Contains( wxS( "@{" ) ) )
+    {
+        EXPRESSION_EVALUATOR evaluator;
+        text = evaluator.Evaluate( text );
+    }
+
     if( m_graphics_changed )
         setSVGPlotStyle( GetCurrentLineWidth() );
 
@@ -888,7 +923,7 @@ void SVG_PLOTTER::Text( const VECTOR2I&        aPos,
 
     // aSize.x or aSize.y is < 0 for mirrored texts.
     // The actual text size value is the absolute value
-    text_size.x = std::abs( GRTextWidth( aText, aFont, aSize, GetCurrentLineWidth(), aBold, aItalic,
+    text_size.x = std::abs( GRTextWidth( text, aFont, aSize, GetCurrentLineWidth(), aBold, aItalic,
                                          aFontMetrics ) );
     text_size.y = std::abs( aSize.x * 4/3 ); // Hershey font height to em size conversion
     VECTOR2D anchor_pos_dev = userToDeviceCoordinates( aPos );
@@ -930,7 +965,7 @@ void SVG_PLOTTER::Text( const VECTOR2I&        aPos,
                     sz_dev.y,
                     m_precision,
                     hjust,
-                    TO_UTF8( XmlEsc( aText ) ) );
+                    TO_UTF8( XmlEsc( text ) ) );
 
         if( !aOrient.IsZero() )
             fmt::print( m_outputFile, "</g>\n" );
@@ -941,9 +976,9 @@ void SVG_PLOTTER::Text( const VECTOR2I&        aPos,
     {
         fmt::print( m_outputFile,
                     "<g class=\"stroked-text\"><desc>{}</desc>\n",
-                    TO_UTF8( XmlEsc( aText ) ) );
+                    TO_UTF8( XmlEsc( text ) ) );
 
-        PLOTTER::Text( aPos, aColor, aText, aOrient, aSize, aH_justify, aV_justify, GetCurrentLineWidth(),
+        PLOTTER::Text( aPos, aColor, text, aOrient, aSize, aH_justify, aV_justify, GetCurrentLineWidth(),
                        aItalic, aBold, aMultilineAllowed, aFont, aFontMetrics );
 
         fmt::print( m_outputFile, "</g>" );

@@ -150,8 +150,8 @@ void PANEL_DESIGN_BLOCK_CHOOSER::SaveSettings()
         // Save any changes to column widths, etc.
         m_adapter->SaveSettings();
 
-        cfg->m_DesignBlockChooserPanel.width = GetParent()->GetSize().x;
-        cfg->m_DesignBlockChooserPanel.height = GetParent()->GetSize().y;
+        cfg->m_DesignBlockChooserPanel.width = GetParent()->ToDIP( GetParent()->GetSize().x );
+        cfg->m_DesignBlockChooserPanel.height = GetParent()->ToDIP( GetParent()->GetSize().y );
         cfg->m_DesignBlockChooserPanel.sash_pos_v = m_vsplitter->GetSashPosition();
         cfg->m_DesignBlockChooserPanel.sort_mode = m_tree->GetSortMode();
     }
@@ -207,10 +207,17 @@ void PANEL_DESIGN_BLOCK_CHOOSER::FinishSetup()
                     return GetParent()->ConvertDialogToPixels( sz ).x;
                 };
 
+        auto vertPixelsFromDU =
+                [&]( int y ) -> int
+                {
+                    wxSize sz( 0, y );
+                    return GetParent()->ConvertDialogToPixels( sz ).y;
+                };
+
         APP_SETTINGS_BASE::PANEL_DESIGN_BLOCK_CHOOSER& panelCfg = cfg->m_DesignBlockChooserPanel;
 
         int w = panelCfg.width > 40 ? panelCfg.width : horizPixelsFromDU( 440 );
-        int h = panelCfg.height > 40 ? panelCfg.height : horizPixelsFromDU( 340 );
+        int h = panelCfg.height > 40 ? panelCfg.height : vertPixelsFromDU( 340 );
 
         GetParent()->SetSize( wxSize( w, h ) );
         GetParent()->Layout();
@@ -222,7 +229,7 @@ void PANEL_DESIGN_BLOCK_CHOOSER::FinishSetup()
             panelCfg.sash_pos_h = horizPixelsFromDU( 220 );
 
         if( panelCfg.sash_pos_v < 0 )
-            panelCfg.sash_pos_v = horizPixelsFromDU( 230 );
+            panelCfg.sash_pos_v = vertPixelsFromDU( 230 );
 
         if( m_vsplitter )
             m_vsplitter->SetSashPosition( panelCfg.sash_pos_v );
@@ -267,7 +274,11 @@ void PANEL_DESIGN_BLOCK_CHOOSER::RefreshLibs( bool aProgress )
 
 void PANEL_DESIGN_BLOCK_CHOOSER::SetPreselect( const LIB_ID& aPreselect )
 {
+    m_preselect = aPreselect;
     m_adapter->SetPreselectNode( aPreselect, 0 );
+
+    if( m_tree && aPreselect.IsValid() )
+        m_tree->SelectLibId( aPreselect );
 }
 
 
@@ -309,11 +320,14 @@ void PANEL_DESIGN_BLOCK_CHOOSER::onCloseTimer( wxTimerEvent& aEvent )
 void PANEL_DESIGN_BLOCK_CHOOSER::onOpenLibsTimer( wxTimerEvent& aEvent )
 {
     if( APP_SETTINGS_BASE* cfg = m_frame->config() )
-        m_adapter->OpenLibs( cfg->m_LibTree.open_libs );
+        m_adapter->OpenLibs( cfg->m_DesignBlockChooserPanel.tree.open_libs );
 
     // Bind this now se we don't spam the event queue with EVT_LIBITEM_SELECTED events during
     // the initial load.
     Bind( EVT_LIBITEM_SELECTED, &PANEL_DESIGN_BLOCK_CHOOSER::onDesignBlockSelected, this );
+
+    if( m_preselect.IsValid() )
+        SelectLibId( m_preselect );
 }
 
 

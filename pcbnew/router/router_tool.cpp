@@ -113,6 +113,10 @@ const VIA_STACK_PRESET* MatchPendingStackExpansion( PCB_VIA* aVia, const std::se
 
     for( const PENDING_STACK_EXPANSION& exp : aPending )
     {
+        // Net and span alone cannot tell the drop's via from any other the route left behind.
+        if( !exp.m_Pos || *exp.m_Pos != aVia->GetPosition() )
+            continue;
+
         if( aVia->GetNetCode() != exp.m_Net )
             continue;
 
@@ -1247,10 +1251,23 @@ int ROUTER_TOOL::onViaStackCommand( const TOOL_EVENT& aEvent )
 
     if( preset.m_Staggered )
     {
+        if( m_router->IsPlacingVia() )
+            m_router->ToggleViaPlacement();
+
         // The router cannot route through a staggered stack (lateral walk + connecting traces).
         // Fix the track here and REMEMBER the stack, but build it only after routing tears down.
         // Committing to the board while the PNS world is live invalidates its nodes (crash).
-        VECTOR2I head = m_endSnapPoint;
+        VECTOR2I            head = m_endSnapPoint;
+        const PNS::ITEM_SET traces = m_router->Placer()->Traces();
+
+        if( traces.Size() > 0 )
+        {
+            if( PNS::LINE* line = dynamic_cast<PNS::LINE*>( traces[0] ) )
+            {
+                if( line->PointCount() > 0 )
+                    head = line->CLine().CLastPoint();
+            }
+        }
 
         if( !m_router->FixRoute( head, m_endItem, true, false ) )
         {
@@ -1302,7 +1319,8 @@ int ROUTER_TOOL::onViaStackCommand( const TOOL_EVENT& aEvent )
         m_preRouteExpandableVias = PCB_VIA_STACK::CollectExpandableMicrovias( board() );
     }
 
-    m_pendingStackedExpansions.push_back( { currentLayer, targetLayer, net, preset } );
+    m_pendingStackedExpansions.push_back( { currentLayer, targetLayer, net, preset, std::nullopt } );
+    m_stackDropAwaitingVia = true;
 
     PNS::SIZES_SETTINGS sizes = m_router->Sizes();
     sizes.ClearLayerPairs();
@@ -1326,6 +1344,26 @@ int ROUTER_TOOL::onViaStackCommand( const TOOL_EVENT& aEvent )
 
     UpdateMessagePanel();
     return 0;
+}
+
+
+void ROUTER_TOOL::recordPendingStackViaPos()
+{
+    if( !m_stackDropAwaitingVia || !m_router->IsPlacingVia() )
+        return;
+
+    const PNS::ITEM_SET traces = m_router->Placer()->Traces();
+
+    if( traces.Size() == 0 )
+        return;
+
+    // The via lands where the placer's trace ends, which is not where the cursor is once
+    // the router has walked around or shoved.
+    if( PNS::LINE* line = dynamic_cast<PNS::LINE*>( traces[0] ) )
+    {
+        if( line->EndsWithVia() )
+            m_pendingStackedExpansions.back().m_Pos = line->Via().Pos();
+    }
 }
 
 
@@ -1760,6 +1798,8 @@ bool ROUTER_TOOL::finishInteractive()
 {
     m_router->StopRouting();
 
+    m_stackDropAwaitingVia = false;
+
     if( !m_pendingStackedExpansions.empty() )
     {
         BOARD_COMMIT commit( frame() );
@@ -1795,6 +1835,8 @@ void ROUTER_TOOL::performRouting( VECTOR2D aStartPosition )
 {
     m_router->ClearViewDecorations();
 
+    bool startWithVia = std::exchange( m_startWithVia, false );
+
     if( !prepareInteractive( aStartPosition ) )
         return;
 
@@ -1823,10 +1865,13 @@ void ROUTER_TOOL::performRouting( VECTOR2D aStartPosition )
     // Set initial cursor
     setCursor();
 
+    // A via or through pad already reaching the layer 'V' switched to must not gain a second via
+    int  viaTargetLayer = m_iface->GetPNSLayerFromBoardLayer( m_originalActiveLayer );
+    bool startReachesViaTarget = m_startItem && m_startItem->Layers().Overlaps( viaTargetLayer );
+
     // If the user pressed 'V' before starting to route, enable via placement now
-    if( m_startWithVia )
+    if( startWithVia && !startReachesViaTarget )
     {
-        m_startWithVia = false;
         handleLayerSwitch( ACT_PlaceThroughVia.MakeEvent(), true );
     }
 
@@ -1853,7 +1898,7 @@ void ROUTER_TOOL::performRouting( VECTOR2D aStartPosition )
 
         handleCommonEvents( *evt );
 
-        if( evt->IsMotion() )
+        if( evt->IsMotion() || evt->IsAction( &ACTIONS::refreshPreview ) )
         {
             updateEndItem( *evt );
             m_router->Move( m_endSnapPoint, m_endItem );
@@ -1924,6 +1969,7 @@ void ROUTER_TOOL::performRouting( VECTOR2D aStartPosition )
             }
         }
         else if( evt->IsClick( BUT_LEFT )
+                     || evt->IsAction( &ACTIONS::cursorClick )
                      || evt->IsDrag( BUT_LEFT )
                      || evt->IsAction( &PCB_ACTIONS::routeSingleTrack ) )
         {
@@ -1931,8 +1977,13 @@ void ROUTER_TOOL::performRouting( VECTOR2D aStartPosition )
             bool needLayerSwitch = m_router->IsPlacingVia();
             bool forceCommit = false;
 
+            recordPendingStackViaPos();
+
             if( m_router->FixRoute( m_endSnapPoint, m_endItem, false, forceCommit ) )
                 break;
+
+            if( !m_router->IsPlacingVia() )
+                m_stackDropAwaitingVia = false;
 
             if( needLayerSwitch )
             {
@@ -1980,7 +2031,9 @@ void ROUTER_TOOL::performRouting( VECTOR2D aStartPosition )
             setCursor();
             UpdateMessagePanel();
         }
-        else if( evt->IsAction( &ACTIONS::finishInteractive ) || evt->IsDblClick( BUT_LEFT )  )
+        else if( evt->IsAction( &ACTIONS::finishInteractive )
+                    || evt->IsDblClick( BUT_LEFT )
+                    || evt->IsAction( &ACTIONS::cursorDblClick ) )
         {
             // Stop current routing:
             bool forceFinish = true;
@@ -1998,6 +2051,8 @@ void ROUTER_TOOL::performRouting( VECTOR2D aStartPosition )
 
             if( evt->IsActivate() && !evt->IsMoveTool() )
                 m_cancelled = true;
+
+            m_router->AbortPlacement();
 
             break;
         }
@@ -2445,7 +2500,7 @@ int ROUTER_TOOL::MainLoop( const TOOL_EVENT& aEvent )
         {
             m_router->SyncWorld();
         }
-        else if( evt->IsMotion() )
+        else if( evt->IsMotion() || evt->IsAction( &ACTIONS::refreshPreview ) )
         {
             updateStartItem( *evt );
         }
@@ -2466,6 +2521,7 @@ int ROUTER_TOOL::MainLoop( const TOOL_EVENT& aEvent )
             evt->SetPassEvent( false );
         }
         else if( evt->IsClick( BUT_LEFT )
+              || evt->IsAction( &ACTIONS::cursorClick )
               || evt->IsAction( &PCB_ACTIONS::routeSingleTrack )
               || evt->IsAction( &PCB_ACTIONS::routeDiffPair ) )
         {
@@ -2560,7 +2616,7 @@ void ROUTER_TOOL::performDragging( int aMode )
 
         ctls->ForceCursorPosition( false );
 
-        if( evt->IsMotion() )
+        if( evt->IsMotion() || evt->IsAction( &ACTIONS::refreshPreview ) )
         {
             updateEndItem( *evt );
             m_router->Move( m_endSnapPoint, m_endItem );
@@ -2588,7 +2644,7 @@ void ROUTER_TOOL::performDragging( int aMode )
                 }
             }
         }
-        else if( evt->IsClick( BUT_LEFT ) )
+        else if( evt->IsClick( BUT_LEFT ) || evt->IsAction( &ACTIONS::cursorClick ) )
         {
             bool forceFinish = false;
             bool forceCommit = evt->Modifier( MD_CTRL );
@@ -3063,7 +3119,9 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
 
             break;
         }
-        else if( evt->IsMotion() || evt->IsDrag( BUT_LEFT ) )
+        else if( evt->IsMotion()
+                || evt->IsAction( &ACTIONS::refreshPreview )
+                || evt->IsDrag( BUT_LEFT ) )
         {
             hasMouseMoved = true;
             updateEndItem( *evt );
@@ -3154,7 +3212,9 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
                 }
             }
         }
-        else if( hasMouseMoved && ( evt->IsMouseUp( BUT_LEFT ) || evt->IsClick( BUT_LEFT ) ) )
+        else if( hasMouseMoved && (   evt->IsMouseUp( BUT_LEFT )
+                                   || evt->IsClick( BUT_LEFT )
+                                   || evt->IsAction( &ACTIONS::cursorClick ) ) )
         {
             bool forceFinish = false;
             bool forceCommit = evt->Modifier( MD_CTRL );

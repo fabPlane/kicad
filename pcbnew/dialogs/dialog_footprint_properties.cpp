@@ -41,6 +41,7 @@
 #include <widgets/text_ctrl_eval.h>
 #include <widgets/std_bitmap_button.h>
 #include <settings/settings_manager.h>
+#include <template_fieldnames.h>
 #include <panel_embedded_files.h>
 #include <panel_fp_properties_3d_model.h>
 #include <dialogs/panel_preview_3d_model.h>
@@ -96,6 +97,7 @@ DIALOG_FOOTPRINT_PROPERTIES::DIALOG_FOOTPRINT_PROPERTIES( PCB_EDIT_FRAME* aParen
     m_itemsGrid->SetTable( m_fields );
     m_itemsGrid->OverrideMinSize( 1.0, 1.0 );
     m_itemsGrid->PushEventHandler( new GRID_TRICKS( m_itemsGrid ) );
+    m_itemsGrid->Bind( wxEVT_GRID_CELL_CHANGING, &DIALOG_FOOTPRINT_PROPERTIES::OnGridCellChanging, this );
     m_itemsGrid->SetupColumnAutosizer( PFC_VALUE );
     m_itemsGrid->ShowHideColumns( "0 1 2 3 4 5 7" );
 
@@ -180,6 +182,8 @@ DIALOG_FOOTPRINT_PROPERTIES::DIALOG_FOOTPRINT_PROPERTIES( PCB_EDIT_FRAME* aParen
 
 DIALOG_FOOTPRINT_PROPERTIES::~DIALOG_FOOTPRINT_PROPERTIES()
 {
+    m_itemsGrid->Unbind( wxEVT_GRID_CELL_CHANGING, &DIALOG_FOOTPRINT_PROPERTIES::OnGridCellChanging, this );
+
     // Prevents crash bug in wxGrid's d'tor
     m_itemsGrid->DestroyTable( m_fields );
 
@@ -331,11 +335,11 @@ bool DIALOG_FOOTPRINT_PROPERTIES::TransferDataToWindow()
     if( m_footprint->GetDuplicatePadNumbersAreJumpers() )
         jumperGroups = _( "all pads with duplicate numbers" );
 
-    for( const std::set<wxString>& group : m_footprint->JumperPadGroups() )
+    for( const JUMPER_GROUP& group : m_footprint->JumperPadGroups().GetAll() )
     {
         wxString groupTxt;
 
-        for( const wxString& pinNumber : group )
+        for( const wxString& pinNumber : group.GetNames() )
         {
             if( !groupTxt.IsEmpty() )
                 groupTxt << ", ";
@@ -509,7 +513,13 @@ bool DIALOG_FOOTPRINT_PROPERTIES::TransferDataFromWindow()
     if( !Validate() )
         return false;
 
-    if( !m_itemsGrid->CommitPendingChanges() )
+    if( !m_itemsGrid->CommitPendingChanges()
+        || !m_embeddedFiles->CommitPendingChanges() )
+    {
+        return false;
+    }
+
+    if( !m_3dPanel->Validate() )
         return false;
 
     KIGFX::PCB_VIEW*    view = m_frame->GetCanvas()->GetView();
@@ -518,11 +528,9 @@ bool DIALOG_FOOTPRINT_PROPERTIES::TransferDataFromWindow()
     commit.Modify( m_footprint );
 
     // Make sure this happens inside a commit to capture any changed files
-    if( !m_3dPanel->TransferDataFromWindow() )
-        return false;
+    (void) m_3dPanel->TransferDataFromWindow();
 
-    if( !m_embeddedFiles->TransferDataFromWindow() )
-        return false;
+    (void) m_embeddedFiles->TransferDataFromWindow();
 
     // Clear out embedded files that are no longer in use
     std::set<wxString> files;
@@ -599,7 +607,7 @@ bool DIALOG_FOOTPRINT_PROPERTIES::TransferDataFromWindow()
         }
 
         if( !field.IsMandatory() )
-            newField.SetOrdinal( ordinal++ );
+            newField.SetOrdinal( ordinal++, FIELD_T::USER );
     }
 
     std::vector<PCB_FIELD*> addedFields;
@@ -802,14 +810,47 @@ void DIALOG_FOOTPRINT_PROPERTIES::OnDeleteField( wxCommandEvent&  )
             },
             [&]( int row )
             {
-                m_fields->erase( m_fields->begin() + row );
-
-                // notify the grid
-                wxGridTableMessage msg( m_fields, wxGRIDTABLE_NOTIFY_ROWS_DELETED, row, 1 );
-                m_itemsGrid->ProcessTableMessage( msg );
+                m_fields->DeleteRows( row );
             } );
 
     OnModify();
+}
+
+
+void DIALOG_FOOTPRINT_PROPERTIES::OnGridCellChanging( wxGridEvent& aEvent )
+{
+    wxGridCellEditor* editor = m_itemsGrid->GetCellEditor( aEvent.GetRow(), aEvent.GetCol() );
+    wxControl*        control = editor->GetControl();
+
+    if( control && control->GetValidator() && !control->GetValidator()->Validate( control ) )
+    {
+        aEvent.Veto();
+        m_delayedFocusGrid = m_itemsGrid;
+        m_delayedFocusRow = aEvent.GetRow();
+        m_delayedFocusColumn = aEvent.GetCol();
+    }
+    else if( aEvent.GetCol() == PFC_NAME )
+    {
+        wxString newName = aEvent.GetString();
+
+        for( int row = 0; row < m_itemsGrid->GetNumberRows(); ++row )
+        {
+            if( row == aEvent.GetRow() )
+                continue;
+
+            if( FieldNamesAreDuplicates( newName, m_itemsGrid->GetCellValue( row, PFC_NAME ) ) )
+            {
+                aEvent.Veto();
+                m_delayedFocusGrid = m_itemsGrid;
+                m_delayedFocusRow = aEvent.GetRow();
+                m_delayedFocusColumn = aEvent.GetCol();
+                m_delayedErrorMessage = wxString::Format( _( "Field name '%s' already in use." ), newName );
+                break;
+            }
+        }
+    }
+
+    editor->DecRef();
 }
 
 

@@ -234,8 +234,8 @@ int FOOTPRINT_EDITOR_CONTROL::NewFootprint( const TOOL_EVENT& aEvent )
         return 0;
 
     // Give the new footprint a resolvable identity so it opens in its own tab instead of
-    // overwriting the active one. The legacy single-board path leaves the nickname empty.
-    if( m_frame->GetTabsPanel() && !libraryName.IsEmpty() )
+    // overwriting the active one.
+    if( !libraryName.IsEmpty() )
         newFootprint->SetFPID( LIB_ID( libraryName, newFootprint->GetFPID().GetLibItemName() ) );
 
     canvas()->GetViewControls()->SetCrossHairCursorPosition( VECTOR2D( 0, 0 ), false );
@@ -261,22 +261,9 @@ int FOOTPRINT_EDITOR_CONTROL::NewFootprint( const TOOL_EVENT& aEvent )
 }
 
 
-int FOOTPRINT_EDITOR_CONTROL::CreateFootprint( const TOOL_EVENT& aEvent )
+int FOOTPRINT_EDITOR_CONTROL::CreateFootprintFromWizard( const TOOL_EVENT& aEvent )
 {
-    LIB_ID selected = m_frame->GetLibTree()->GetSelectedLibId();
-
-    if( m_frame->IsContentModified() )
-    {
-        if( !HandleUnsavedChanges( m_frame, _( "The current footprint has been modified.  "
-                                               "Save changes?" ),
-                                   [&]() -> bool
-                                   {
-                                       return m_frame->SaveFootprint( footprint() );
-                                   } ) )
-        {
-            return 0;
-        }
-    }
+    const LIB_ID selected = m_frame->GetTargetFPID();
 
     if( KIWAY_PLAYER* frame = m_frame->Kiway().Player( FRAME_FOOTPRINT_WIZARD, true, m_frame ) )
     {
@@ -289,7 +276,15 @@ int FOOTPRINT_EDITOR_CONTROL::CreateFootprint( const TOOL_EVENT& aEvent )
 
             if( newFootprint )    // i.e. if create footprint command is OK
             {
-                m_frame->Clear_Pcb( false );
+                if( !m_frame->BeginNewFootprint( selected.GetLibNickname() ) )
+                {
+                    delete newFootprint;
+                    wizard->Destroy();
+                    return 0;
+                }
+
+                newFootprint->SetParent( nullptr );
+                m_frame->CreateUnsavedFootprintTab();
 
                 canvas()->GetViewControls()->SetCrossHairCursorPosition( VECTOR2D( 0, 0 ), false );
                 //  Add the new object to board
@@ -580,12 +575,8 @@ int FOOTPRINT_EDITOR_CONTROL::DeleteFootprint( const TOOL_EVENT& aEvent )
 
     if( frame->DeleteFootprintFromLibrary( fpID, true ) )
     {
-        // Close only the deleted footprint's tab, leaving the others open. Without a tab strip, fall
-        // back to clearing the shared board when the deleted footprint is the one on screen.
-        if( frame->GetTabsPanel() )
-            frame->CloseFootprintTab( fpID );
-        else if( fpID == frame->GetLoadedFPID() )
-            frame->Clear_Pcb( false );
+        // Close only the deleted footprint's tab, leaving the others open.
+        frame->CloseFootprintTab( fpID );
 
         frame->SyncLibraryTree( true );
     }
@@ -597,11 +588,6 @@ int FOOTPRINT_EDITOR_CONTROL::DeleteFootprint( const TOOL_EVENT& aEvent )
 int FOOTPRINT_EDITOR_CONTROL::ImportFootprint( const TOOL_EVENT& aEvent )
 {
     bool is_last_fp_from_brd = m_frame->IsCurrentFPFromBoard();
-
-    // The import opens in its own tab, leaving the open documents alone; only the legacy single-board
-    // path has to clear first
-    if( !m_frame->GetTabsPanel() && !m_frame->Clear_Pcb( true ) )
-        return -1;                  // this command is aborted
 
     getViewControls()->SetCrossHairCursorPosition( VECTOR2D( 0, 0 ), false );
 
@@ -1217,7 +1203,8 @@ void FOOTPRINT_EDITOR_CONTROL::setTransitions()
 {
     // clang-format off
     Go( &FOOTPRINT_EDITOR_CONTROL::NewFootprint,         PCB_ACTIONS::newFootprint.MakeEvent() );
-    Go( &FOOTPRINT_EDITOR_CONTROL::CreateFootprint,      PCB_ACTIONS::createFootprint.MakeEvent() );
+    Go( &FOOTPRINT_EDITOR_CONTROL::CreateFootprintFromWizard,
+        PCB_ACTIONS::createFootprint.MakeEvent() );
     Go( &FOOTPRINT_EDITOR_CONTROL::Save,                 ACTIONS::save.MakeEvent() );
     Go( &FOOTPRINT_EDITOR_CONTROL::SaveAs,               ACTIONS::saveAs.MakeEvent() );
     Go( &FOOTPRINT_EDITOR_CONTROL::Revert,               ACTIONS::revert.MakeEvent() );

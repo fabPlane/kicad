@@ -41,17 +41,26 @@
 #include <libraries/symbol_library_adapter.h>
 #include <project_sch.h>
 #include <sch_marker.h>
+#include <base_units.h>
 #include <jobs/job_export_bom.h>
 #include <jobs/job_export_sch_netlist.h>
 #include <jobs/job_export_sch_plot.h>
 #include <kiway.h>
+#include <plotters/plotter_png.h>
 #include <sch_field.h>
 #include <sch_group.h>
 #include <common.h>
 #include <connection_graph.h>
+#include <connectivity/conn_facade.h>
+#include <advanced_config.h>
 #include <sch_commit.h>
 #include <string_utils.h>
 #include <sch_edit_frame.h>
+#include <io/kicad/kicad_io_utils.h>
+#include <ki_error.h>
+#include <richio.h>
+#include <sch_io/kicad_sexpr/sch_io_kicad_sexpr.h>
+
 #include <sch_label.h>
 #include <sch_reference_list.h>
 #include <sch_screen.h>
@@ -60,7 +69,9 @@
 #include <sch_sheet_pin.h>
 #include <sch_symbol.h>
 #include <schematic.h>
+#include <variant_proxy_undo_item.h>
 #include <tool/actions.h>
+#include <tool/common_tools.h>
 #include <tool/tool_manager.h>
 #include <tools/sch_actions.h>
 #include <tools/sch_selection.h>
@@ -79,7 +90,10 @@
 #include <wildcards_and_files_ext.h>
 #include <wx/filename.h>
 
+#include <api/common/commands/library_commands.pb.h>
 #include <api/common/types/base_types.pb.h>
+#include <libraries/symbol_library_adapter.h>
+#include <project_sch.h>
 #include <trace_helpers.h>
 
 using namespace kiapi::common::commands;
@@ -132,9 +146,10 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
             &API_HANDLER_SCH::handleSaveDocument );
     registerHandler<SaveCopyOfDocument, google::protobuf::Empty>(
             &API_HANDLER_SCH::handleSaveCopyOfDocument );
-    registerHandler<RevertDocument, google::protobuf::Empty>(
-            &API_HANDLER_SCH::handleRevertDocument, HANDLER_MODE::GUI_ONLY );
+    registerHandler<RevertDocument, google::protobuf::Empty>( &API_HANDLER_SCH::handleRevertDocument );
 
+    registerHandler<commands::SaveSelectionToString, commands::SavedSelectionResponse>(
+            &API_HANDLER_SCH::handleSaveSelectionToString, HANDLER_MODE::GUI_ONLY );
     registerHandler<GetItems, GetItemsResponse>( &API_HANDLER_SCH::handleGetItems );
     registerHandler<GetItemsById, GetItemsResponse>( &API_HANDLER_SCH::handleGetItemsById );
     registerHandler<SaveDocumentToString, SavedDocumentResponse>( &API_HANDLER_SCH::handleSaveDocumentToString );
@@ -148,6 +163,7 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
             &API_HANDLER_SCH::handleAddToSelection, HANDLER_MODE::GUI_ONLY );
     registerHandler<RemoveFromSelection, SelectionResponse>(
             &API_HANDLER_SCH::handleRemoveFromSelection, HANDLER_MODE::GUI_ONLY );
+    registerHandler<FocusOnItems, Empty>( &API_HANDLER_SCH::handleFocusOnItems, HANDLER_MODE::GUI_ONLY );
 
     registerHandler<RunSchematicJobExportSvg, types::RunJobResponse>(
             &API_HANDLER_SCH::handleRunSchematicJobExportSvg );
@@ -157,6 +173,8 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
             &API_HANDLER_SCH::handleRunSchematicJobExportPdf );
     registerHandler<RunSchematicJobExportPs, types::RunJobResponse>(
             &API_HANDLER_SCH::handleRunSchematicJobExportPs );
+    registerHandler<RunSchematicJobExportPng, types::RunJobResponse>(
+            &API_HANDLER_SCH::handleRunSchematicJobExportPng );
     registerHandler<RunSchematicJobExportNetlist, types::RunJobResponse>(
             &API_HANDLER_SCH::handleRunSchematicJobExportNetlist );
     registerHandler<RunSchematicJobExportBOM, types::RunJobResponse>(
@@ -198,6 +216,9 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
             &API_HANDLER_SCH::handleGetSymbolFieldsTable );
     registerHandler<SetSymbolFields, SetSymbolFieldsResponse>( &API_HANDLER_SCH::handleSetSymbolFields );
     registerHandler<AssignFootprints, AssignFootprintsResponse>( &API_HANDLER_SCH::handleAssignFootprints );
+
+    registerHandler<PlaceSymbolFromLibrary, PlaceFromLibraryResponse>(
+            &API_HANDLER_SCH::handlePlaceSymbolFromLibrary );
 }
 
 
@@ -306,8 +327,7 @@ API_HANDLER_SCH::validateDocumentInternal( const DocumentSpecifier& aDocument ) 
     if( aDocument.type() != DocumentType::DOCTYPE_SCHEMATIC )
     {
         ApiResponseStatus e;
-        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        e.set_error_message( "the requested document is not a schematic" );
+        e.set_status( ApiStatusCode::AS_UNHANDLED );
         return tl::unexpected( e );
     }
 
@@ -453,27 +473,16 @@ API_HANDLER_SCH::handleRevertDocument( const HANDLER_CONTEXT<RevertDocument>& aC
         return tl::unexpected( e );
     }
 
-    if( std::optional<ApiResponseStatus> headless = checkForHeadless( "RevertDocument" ) )
-        return tl::unexpected( *headless );
-
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
 
-    wxFileName fn = project().AbsolutePath( schematic()->GetFileName() );
-
-    if( frame()->GetCurrentSheet().Last() != &schematic()->Root() )
+    if( !context()->RevertToSaved() )
     {
-        SCH_SHEET_PATH rootSheetPath = schematic()->Hierarchy().at( 0 );
-        frame()->GetToolManager()->RunAction<SCH_SHEET_PATH*>( SCH_ACTIONS::changeSheet, &rootSheetPath );
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "could not revert: there is no saved file on disk to revert to" );
+        return tl::unexpected( e );
     }
-
-    SCH_SCREENS screenList( schematic()->Root() );
-
-    for( SCH_SCREEN* screen = screenList.GetFirst(); screen; screen = screenList.GetNext() )
-        screen->SetContentModified( false );
-
-    frame()->ReleaseFile();
-    frame()->OpenProjectFiles( std::vector<wxString>( 1, fn.GetFullPath() ), KICTL_REVERT );
 
     bumpRevision();
     return google::protobuf::Empty();
@@ -1078,6 +1087,43 @@ API_HANDLER_SCH::handleParseAndCreateItemsFromString( const HANDLER_CONTEXT<Pars
 }
 
 
+HANDLER_RESULT<commands::SavedSelectionResponse>
+API_HANDLER_SCH::handleSaveSelectionToString( const HANDLER_CONTEXT<commands::SaveSelectionToString>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> headless = checkForHeadless( "SaveSelectionToString" ) )
+        return tl::unexpected( *headless );
+
+    SCH_SELECTION_TOOL* selTool = toolManager()->GetTool<SCH_SELECTION_TOOL>();
+    SCH_SELECTION&      selection = selTool->GetSelection();
+
+    if( selection.Empty() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "the selection is empty" );
+        return tl::unexpected( e );
+    }
+
+    commands::SavedSelectionResponse response;
+
+    SCH_SHEET_PATH selPath = frame()->GetCurrentSheet();
+
+    for( EDA_ITEM* item : selection )
+        response.add_ids()->set_value( item->m_Uuid.AsStdString() );
+
+    STRING_FORMATTER   formatter;
+    SCH_IO_KICAD_SEXPR plugin;
+
+    plugin.Format( &selection, &selPath, *schematic(), &formatter, true );
+
+    std::string contents = formatter.GetString();
+    KICAD_FORMAT::Prettify( contents, KICAD_FORMAT::FORMAT_MODE::COMPACT_TEXT_PROPERTIES );
+    response.set_contents( contents );
+
+    return response;
+}
+
+
 HANDLER_RESULT<GetOpenDocumentsResponse> API_HANDLER_SCH::handleGetOpenDocuments(
         const HANDLER_CONTEXT<GetOpenDocuments>& aCtx )
 {
@@ -1103,7 +1149,7 @@ std::optional<DocumentSpecifier> API_HANDLER_SCH::Document() const
     doc.set_type( DocumentType::DOCTYPE_SCHEMATIC );
 
     if( std::optional<SCH_SHEET_PATH> path = m_context->GetCurrentSheet() )
-        PackSheetPath( *doc.mutable_sheet_path(), path->Path() );
+        PackSheetPath( *doc.mutable_sheet_path(), *path );
 
     PackProject( *doc.mutable_project(), m_context->Prj() );
 
@@ -1172,9 +1218,14 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_SCH::handleGetItems( const HANDLER_
         return tl::unexpected( valid.error() );
     }
 
+    std::vector<KICAD_T> requestedTypes = parseRequestedItemTypes( aCtx.Request.types() );
+
+    if( aCtx.Request.types().empty() )
+        requestedTypes.assign( s_allowedTypes.begin(), s_allowedTypes.end() );
+
     std::set<KICAD_T> typesRequested, typesInserted;
 
-    for( KICAD_T type : parseRequestedItemTypes( aCtx.Request.types() ) )
+    for( KICAD_T type : requestedTypes )
         typesRequested.insert( type );
 
     filterValidSchTypes( typesRequested );
@@ -1203,9 +1254,16 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_SCH::handleGetItems( const HANDLER_
         {
             const SCH_SCREEN* aScreen = aPath.LastScreen();
 
+            if( !aScreen )
+                return;
+
             for( SCH_ITEM* aItem : aScreen->Items() )
             {
                 itemMap[ aItem->Type() ].emplace_back( aItem, aPath );
+
+                // Group members live in the screen's rtree as well as in the group
+                if( aItem->Type() == SCH_GROUP_T )
+                    continue;
 
                 aItem->RunOnChildren(
                         [&]( SCH_ITEM* aChild )
@@ -1231,7 +1289,7 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_SCH::handleGetItems( const HANDLER_
 
     std::vector<std::pair<EDA_ITEM*, SCH_SHEET_PATH>> ordered;
 
-    for( KICAD_T type : parseRequestedItemTypes( aCtx.Request.types() ) )
+    for( KICAD_T type : requestedTypes )
     {
         if( !s_allowedTypes.contains( type ) )
             continue;
@@ -1545,6 +1603,46 @@ API_HANDLER_SCH::handleRemoveFromSelection( const HANDLER_CONTEXT<RemoveFromSele
 }
 
 
+HANDLER_RESULT<Empty> API_HANDLER_SCH::handleFocusOnItems( const HANDLER_CONTEXT<FocusOnItems>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> headless = checkForHeadless( "FocusOnItems" ) )
+        return tl::unexpected( *headless );
+
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    std::vector<KIID> ids;
+
+    for( const types::KIID& id : aCtx.Request.items() )
+        ids.emplace_back( id.value() );
+
+    std::optional<KIID_PATH> sheetPath;
+
+    if( aCtx.Request.document().has_sheet_path() )
+        sheetPath = UnpackSheetPath( aCtx.Request.document().sheet_path() );
+
+    tl::expected<SCH_FOCUS_TARGET, ApiResponseStatus> target = ResolveFocusItems( *schematic(), ids, sheetPath );
+
+    if( !target )
+        return tl::unexpected( target.error() );
+
+    if( m_context->GetCurrentSheet().value_or( SCH_SHEET_PATH() ) != target->Sheet )
+        m_context->GetToolManager()->RunAction<SCH_SHEET_PATH*>( SCH_ACTIONS::changeSheet, &target->Sheet );
+
+    BOX2I bbox = target->BBox;
+
+    if( aCtx.Request.has_margin() )
+        bbox.Inflate( UnpackDistance( aCtx.Request.margin(), schIUScale ) );
+
+    m_context->GetToolManager()->GetTool<COMMON_TOOLS>()->ZoomFitBox( bbox );
+
+    return Empty();
+}
+
+
 HANDLER_RESULT<std::unique_ptr<EDA_ITEM>> API_HANDLER_SCH::createItemForType( KICAD_T aType, EDA_ITEM* aContainer )
 {
     if( !aContainer )
@@ -1648,6 +1746,22 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
     SCH_COMMIT* commit = static_cast<SCH_COMMIT*>( getCurrentCommit( aClientName ) );
     bool connectivityChanged = false;   // an in-place symbol update invalidated the net graph
 
+    EDA_ITEM* container = targetScreen;
+
+    if( containerResult->has_value() )
+    {
+        SCH_ITEM* containerItem = hierarchy.ResolveItem( **containerResult, nullptr, true );
+
+        if( !containerItem )
+        {
+            e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( "the requested container does not exist in this document" );
+            return tl::unexpected( e );
+        }
+
+        container = containerItem;
+    }
+
     for( const google::protobuf::Any& anyItem : aItems )
     {
         ItemStatus status;
@@ -1661,8 +1775,6 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
             aItemHandler( status, anyItem );
             continue;
         }
-
-        EDA_ITEM* container = targetScreen;
 
         HANDLER_RESULT<std::unique_ptr<EDA_ITEM>> creationResult = createItemForType( *type, container );
 
@@ -1727,15 +1839,16 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
         if( std::vector<wxString> removed = item->RemoveConflictingCustomProperties(); !removed.empty() )
         {
             auto as_str =
-                []( const wxString& aIn )
-                {
-                    return std::string( aIn.ToUTF8() );
-                };
+                    []( const wxString& aIn )
+                    {
+                        return std::string( aIn.ToUTF8() );
+                    };
 
             status.set_code( ItemStatusCode::ISC_INVALID_DATA );
-            status.set_error_message( fmt::format(
-                    "Invalid custom properties for item {}: property name(s) '{}' already in use",
-                    item->m_Uuid.AsStdString(), fmt::join( std::views::transform( removed, as_str ), ", " ) ) );
+            status.set_error_message( fmt::format( "Invalid custom properties for item {}: property name(s) '{}' "
+                                                   "already in use",
+                                                   item->m_Uuid.AsStdString(),
+                                                   fmt::join( std::views::transform( removed, as_str ), ", " ) ) );
 
             aItemHandler( status, anyItem );
             continue;
@@ -1766,6 +1879,15 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
             continue;
         }
 
+        if( !aCreate && existingItem->Type() != *type )
+        {
+            status.set_code( ItemStatusCode::ISC_INVALID_DATA );
+            status.set_error_message( fmt::format( "item {} is not of the requested type",
+                                                   item->m_Uuid.AsStdString() ) );
+            aItemHandler( status, anyItem );
+            continue;
+        }
+
         if( !aCreate )
         {
             SCH_SCREEN* itemScreen = existingPath.LastScreen();
@@ -1777,6 +1899,48 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
                                                        item->m_Uuid.AsStdString() ) );
                 aItemHandler( status, anyItem );
                 continue;
+            }
+        }
+
+        if( *type == SCH_SYMBOL_T )
+        {
+            if( symbolProto.has_definition() )
+            {
+                if( symbolProto.definition().id().entry_name().empty() )
+                {
+                    status.set_code( ItemStatusCode::ISC_INVALID_DATA );
+                    status.set_error_message( "symbol definition is missing an entry name" );
+                    aItemHandler( status, anyItem );
+                    continue;
+                }
+            }
+            else if( aCreate )
+            {
+                status.set_code( ItemStatusCode::ISC_INVALID_DATA );
+                status.set_error_message( "a symbol definition is required" );
+                aItemHandler( status, anyItem );
+                continue;
+            }
+            else
+            {
+                // Definition-less update: re-point the temporary at the existing symbol's
+                // library identity so the swap below keeps the library link
+                SCH_SYMBOL* existingSymbol = static_cast<SCH_SYMBOL*>( existingItem );
+                SCH_SYMBOL* tempSymbol = static_cast<SCH_SYMBOL*>( item.get() );
+
+                tempSymbol->SetLibId( existingSymbol->GetLibId() );
+                tempSymbol->SetSchSymbolLibraryName( existingSymbol->UseLibIdLookup()
+                                                             ? wxString( wxEmptyString )
+                                                             : existingSymbol->GetSchSymbolLibraryName() );
+
+                for( const std::unique_ptr<SCH_PIN>& pin : existingSymbol->GetRawPins() )
+                {
+                    tempSymbol->GetRawPins().emplace_back( std::make_unique<SCH_PIN>( *pin ) );
+                    tempSymbol->GetRawPins().back()->SetParent( tempSymbol );
+                }
+
+                if( existingSymbol->GetLibSymbolRef() )
+                    tempSymbol->SetLibSymbol( new LIB_SYMBOL( *existingSymbol->GetLibSymbolRef() ) );
             }
         }
 
@@ -1824,17 +1988,34 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
         status.set_code( ItemStatusCode::ISC_OK );
         google::protobuf::Any newItem;
 
+        if( aCreate && !item.get() )
+        {
+            e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( "could not add the requested item to its parent container" );
+            return tl::unexpected( e );
+        }
+
+        if( item->Type() == SCH_GROUP_T )
+            static_cast<SCH_GROUP*>( item.get() )->FinalizeGroupDeserialization();
+
+        if( aCreate )
+        {
+            if( item->Type() == SCH_SYMBOL_T )
+            {
+                for( const std::unique_ptr<SCH_PIN>& pin : static_cast<SCH_SYMBOL*>( item.get() )->GetRawPins() )
+                    const_cast<KIID&>( pin->m_Uuid ) = KIID();
+            }
+            else if( item->Type() == SCH_SHEET_T )
+            {
+                for( SCH_SHEET_PIN* pin : static_cast<SCH_SHEET*>( item.get() )->GetPins() )
+                    const_cast<KIID&>( pin->m_Uuid ) = KIID();
+            }
+        }
+
         if( aCreate )
         {
             SCH_ITEM* createdItem = static_cast<SCH_ITEM*>( item.release() );
             commit->Add( createdItem, targetScreen );
-
-            if( !createdItem )
-            {
-                e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-                e.set_error_message( "could not add the requested item to its parent container" );
-                return tl::unexpected( e );
-            }
 
             if( createdItem->Type() == SCH_SYMBOL_T )
             {
@@ -2039,6 +2220,7 @@ bool API_HANDLER_SCH::setPageSettings( const DocumentSpecifier& aDocument, const
     if( SCH_SCREEN* screen = resolveScreenFromDocument( aDocument ) )
     {
         screen->SetPageSettings( aPageInfo );
+        screen->SetContentModified();
         return true;
     }
 
@@ -2071,6 +2253,55 @@ void API_HANDLER_SCH::onModified()
         frame()->Refresh();
         frame()->OnModify();
     }
+    else if( schematic()->GetCurrentScreen() )
+    {
+        schematic()->GetCurrentScreen()->SetContentModified();
+    }
+}
+
+
+void API_HANDLER_SCH::onNetSettingsChanged()
+{
+    if( m_frame )
+        frame()->Refresh();
+}
+
+
+static std::optional<ApiResponseStatus>
+applySchematicPlotSettings( const schematic::jobs::SchematicPlotSettings& aSettings,
+                            const types::DocumentSpecifier& aDocument, JOB_EXPORT_SCH_PLOT& aJob )
+{
+    aJob.m_drawingSheet = wxString::FromUTF8( aSettings.drawing_sheet() );
+    aJob.m_defaultFont = wxString::FromUTF8( aSettings.default_font() );
+    aJob.m_variant = wxString::FromUTF8( aSettings.variant() );
+    aJob.m_plotAll = aSettings.plot_all();
+    aJob.m_plotDrawingSheet = aSettings.plot_drawing_sheet();
+    aJob.m_show_hop_over = aSettings.show_hop_over();
+    aJob.m_blackAndWhite = aSettings.black_and_white();
+    aJob.m_useBackgroundColor = aSettings.use_background_color();
+    aJob.m_minPenWidth = aSettings.min_pen_width();
+    aJob.m_theme = wxString::FromUTF8( aSettings.theme() );
+
+    aJob.m_plotPages.clear();
+
+    for( const std::string& page : aSettings.plot_pages() )
+        aJob.m_plotPages.push_back( wxString::FromUTF8( page ) );
+
+    if( aSettings.page_size() != schematic::jobs::SchematicJobPageSize::SJPS_UNKNOWN )
+        aJob.m_pageSizeSelect = FromProtoEnum<JOB_PAGE_SIZE>( aSettings.page_size() );
+
+    switch( aSettings.sheet_mode() )
+    {
+    case schematic::jobs::SJSM_ALL_SHEETS:   aJob.m_plotAll = true;  break;
+    case schematic::jobs::SJSM_SINGLE_SHEET: aJob.m_plotAll = false; break;
+    case schematic::jobs::SJSM_UNKNOWN:
+    default:                                 aJob.m_plotAll = false; break;
+    }
+
+    if( aDocument.has_sheet_path() )
+        aJob.m_sheetPath = UnpackSheetPath( aDocument.sheet_path() ).AsString();
+
+    return std::nullopt;
 }
 
 
@@ -2085,33 +2316,17 @@ HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExpo
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
 
-    auto plotJob = std::make_unique<JOB_EXPORT_SCH_PLOT_SVG>();
+    auto plotJob = std::make_unique<JOB_EXPORT_SCH_PLOT_SVG>( aCtx.Request.plot_settings().sheet_mode()
+                                                              != schematic::jobs::SJSM_SINGLE_SHEET );
     plotJob->m_filename = m_context->GetCurrentFileName();
 
     if( !aCtx.Request.job_settings().output_path().empty() )
         plotJob->SetConfiguredOutputPath( wxString::FromUTF8( aCtx.Request.job_settings().output_path() ) );
 
-    const kiapi::schematic::jobs::SchematicPlotSettings& settings = aCtx.Request.plot_settings();
-
-    plotJob->m_drawingSheet = wxString::FromUTF8( settings.drawing_sheet() );
-    plotJob->m_defaultFont = wxString::FromUTF8( settings.default_font() );
-    plotJob->m_variant = wxString::FromUTF8( settings.variant() );
-    plotJob->m_plotAll = settings.plot_all();
-    plotJob->m_plotDrawingSheet = settings.plot_drawing_sheet();
-    plotJob->m_show_hop_over = settings.show_hop_over();
-    plotJob->m_blackAndWhite = settings.black_and_white();
-    plotJob->m_useBackgroundColor = settings.use_background_color();
-    plotJob->m_minPenWidth = settings.min_pen_width();
-    plotJob->m_theme = wxString::FromUTF8( settings.theme() );
-
-    plotJob->m_plotPages.clear();
-
-    for( const std::string& page : settings.plot_pages() )
-        plotJob->m_plotPages.push_back( wxString::FromUTF8( page ) );
-
-    if( aCtx.Request.plot_settings().page_size() != kiapi::schematic::jobs::SchematicJobPageSize::SJPS_UNKNOWN )
+    if( std::optional<ApiResponseStatus> err = applySchematicPlotSettings(
+                aCtx.Request.plot_settings(), aCtx.Request.job_settings().document(), *plotJob ) )
     {
-        plotJob->m_pageSizeSelect = FromProtoEnum<JOB_PAGE_SIZE>( aCtx.Request.plot_settings().page_size() );
+        return tl::unexpected( *err );
     }
 
     return runSchematicJob( aCtx.Request.job_settings(), std::move( plotJob ) );
@@ -2129,33 +2344,18 @@ HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExpo
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
 
-    auto plotJob = std::make_unique<JOB_EXPORT_SCH_PLOT_DXF>();
+    auto plotJob = std::make_unique<JOB_EXPORT_SCH_PLOT_DXF>( aCtx.Request.plot_settings().sheet_mode()
+                                                              != schematic::jobs::SJSM_SINGLE_SHEET );
+
     plotJob->m_filename = m_context->GetCurrentFileName();
 
     if( !aCtx.Request.job_settings().output_path().empty() )
         plotJob->SetConfiguredOutputPath( wxString::FromUTF8( aCtx.Request.job_settings().output_path() ) );
 
-    const kiapi::schematic::jobs::SchematicPlotSettings& settings = aCtx.Request.plot_settings();
-
-    plotJob->m_drawingSheet = wxString::FromUTF8( settings.drawing_sheet() );
-    plotJob->m_defaultFont = wxString::FromUTF8( settings.default_font() );
-    plotJob->m_variant = wxString::FromUTF8( settings.variant() );
-    plotJob->m_plotAll = settings.plot_all();
-    plotJob->m_plotDrawingSheet = settings.plot_drawing_sheet();
-    plotJob->m_show_hop_over = settings.show_hop_over();
-    plotJob->m_blackAndWhite = settings.black_and_white();
-    plotJob->m_useBackgroundColor = settings.use_background_color();
-    plotJob->m_minPenWidth = settings.min_pen_width();
-    plotJob->m_theme = wxString::FromUTF8( settings.theme() );
-
-    plotJob->m_plotPages.clear();
-
-    for( const std::string& page : settings.plot_pages() )
-        plotJob->m_plotPages.push_back( wxString::FromUTF8( page ) );
-
-    if( aCtx.Request.plot_settings().page_size() != kiapi::schematic::jobs::SchematicJobPageSize::SJPS_UNKNOWN )
+    if( std::optional<ApiResponseStatus> err = applySchematicPlotSettings(
+                aCtx.Request.plot_settings(), aCtx.Request.job_settings().document(), *plotJob ) )
     {
-        plotJob->m_pageSizeSelect = FromProtoEnum<JOB_PAGE_SIZE>( aCtx.Request.plot_settings().page_size() );
+        return tl::unexpected( *err );
     }
 
     return runSchematicJob( aCtx.Request.job_settings(), std::move( plotJob ) );
@@ -2179,27 +2379,10 @@ HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExpo
     if( !aCtx.Request.job_settings().output_path().empty() )
         plotJob->SetConfiguredOutputPath( wxString::FromUTF8( aCtx.Request.job_settings().output_path() ) );
 
-    const kiapi::schematic::jobs::SchematicPlotSettings& settings = aCtx.Request.plot_settings();
-
-    plotJob->m_drawingSheet = wxString::FromUTF8( settings.drawing_sheet() );
-    plotJob->m_defaultFont = wxString::FromUTF8( settings.default_font() );
-    plotJob->m_variant = wxString::FromUTF8( settings.variant() );
-    plotJob->m_plotAll = settings.plot_all();
-    plotJob->m_plotDrawingSheet = settings.plot_drawing_sheet();
-    plotJob->m_show_hop_over = settings.show_hop_over();
-    plotJob->m_blackAndWhite = settings.black_and_white();
-    plotJob->m_useBackgroundColor = settings.use_background_color();
-    plotJob->m_minPenWidth = settings.min_pen_width();
-    plotJob->m_theme = wxString::FromUTF8( settings.theme() );
-
-    plotJob->m_plotPages.clear();
-
-    for( const std::string& page : settings.plot_pages() )
-        plotJob->m_plotPages.push_back( wxString::FromUTF8( page ) );
-
-    if( aCtx.Request.plot_settings().page_size() != kiapi::schematic::jobs::SchematicJobPageSize::SJPS_UNKNOWN )
+    if( std::optional<ApiResponseStatus> err = applySchematicPlotSettings(
+                aCtx.Request.plot_settings(), aCtx.Request.job_settings().document(), *plotJob ) )
     {
-        plotJob->m_pageSizeSelect = FromProtoEnum<JOB_PAGE_SIZE>( aCtx.Request.plot_settings().page_size() );
+        return tl::unexpected( *err );
     }
 
     plotJob->m_PDFPropertyPopups = aCtx.Request.property_popups();
@@ -2221,34 +2404,64 @@ HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExpo
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
 
-    auto plotJob = std::make_unique<JOB_EXPORT_SCH_PLOT_PS>();
+    auto plotJob = std::make_unique<JOB_EXPORT_SCH_PLOT_PS>( aCtx.Request.plot_settings().sheet_mode()
+                                                             != schematic::jobs::SJSM_SINGLE_SHEET );
     plotJob->m_filename = m_context->GetCurrentFileName();
 
     if( !aCtx.Request.job_settings().output_path().empty() )
         plotJob->SetConfiguredOutputPath( wxString::FromUTF8( aCtx.Request.job_settings().output_path() ) );
 
-    const kiapi::schematic::jobs::SchematicPlotSettings& settings = aCtx.Request.plot_settings();
-
-    plotJob->m_drawingSheet = wxString::FromUTF8( settings.drawing_sheet() );
-    plotJob->m_defaultFont = wxString::FromUTF8( settings.default_font() );
-    plotJob->m_variant = wxString::FromUTF8( settings.variant() );
-    plotJob->m_plotAll = settings.plot_all();
-    plotJob->m_plotDrawingSheet = settings.plot_drawing_sheet();
-    plotJob->m_show_hop_over = settings.show_hop_over();
-    plotJob->m_blackAndWhite = settings.black_and_white();
-    plotJob->m_useBackgroundColor = settings.use_background_color();
-    plotJob->m_minPenWidth = settings.min_pen_width();
-    plotJob->m_theme = wxString::FromUTF8( settings.theme() );
-
-    plotJob->m_plotPages.clear();
-
-    for( const std::string& page : settings.plot_pages() )
-        plotJob->m_plotPages.push_back( wxString::FromUTF8( page ) );
-
-    if( aCtx.Request.plot_settings().page_size() != kiapi::schematic::jobs::SchematicJobPageSize::SJPS_UNKNOWN )
+    if( std::optional<ApiResponseStatus> err = applySchematicPlotSettings(
+                aCtx.Request.plot_settings(), aCtx.Request.job_settings().document(), *plotJob ) )
     {
-        plotJob->m_pageSizeSelect = FromProtoEnum<JOB_PAGE_SIZE>( aCtx.Request.plot_settings().page_size() );
+        return tl::unexpected( *err );
     }
+
+    return runSchematicJob( aCtx.Request.job_settings(), std::move( plotJob ) );
+}
+
+
+HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExportPng(
+        const HANDLER_CONTEXT<schematic::jobs::RunSchematicJobExportPng>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( HANDLER_RESULT<bool> validation = validateDocument( aCtx.Request.job_settings().document() ); !validation )
+        return tl::unexpected( validation.error() );
+
+    const schematic::jobs::SchematicJobSheetMode sheetMode = aCtx.Request.plot_settings().sheet_mode();
+
+    auto plotJob = std::make_unique<JOB_EXPORT_SCH_PLOT_PNG>( sheetMode != schematic::jobs::SJSM_SINGLE_SHEET );
+    plotJob->m_filename = m_context->GetCurrentFileName();
+
+    if( !aCtx.Request.job_settings().output_path().empty() )
+        plotJob->SetConfiguredOutputPath( wxString::FromUTF8( aCtx.Request.job_settings().output_path() ) );
+
+    if( std::optional<ApiResponseStatus> err = applySchematicPlotSettings(
+                aCtx.Request.plot_settings(), aCtx.Request.job_settings().document(), *plotJob ) )
+    {
+        return tl::unexpected( *err );
+    }
+
+    if( aCtx.Request.has_dpi() )
+    {
+        int dpi = aCtx.Request.dpi();
+
+        if( dpi < MIN_PNG_DPI || dpi > MAX_PNG_DPI )
+        {
+            ApiResponseStatus status;
+            status.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            status.set_error_message( fmt::format( "dpi must be between {} and {}", MIN_PNG_DPI, MAX_PNG_DPI ) );
+            return tl::unexpected( status );
+        }
+
+        plotJob->m_dpi = dpi;
+    }
+
+    // Unknown -> default AA on
+    plotJob->m_antialias = aCtx.Request.antialiasing() != types::AntialiasingMode::AAM_NONE;
+    plotJob->m_useBackgroundColor = aCtx.Request.plot_background_color();
 
     return runSchematicJob( aCtx.Request.job_settings(), std::move( plotJob ) );
 }
@@ -2386,13 +2599,13 @@ HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExpo
 
 
 void API_HANDLER_SCH::packSheetInstance( kiapi::schematic::types::SheetInstance* aInstance, SCH_SHEET_PATH& aPath,
-                                          SCH_SHEET* aSheet )
+                                         SCH_SHEET* aSheet )
 {
     aPath.push_back( aSheet );
 
-    PackSheetPath( *aInstance->mutable_path(), aPath.Path() );
+    PackSheetPath( *aInstance->mutable_path(), aPath );
 
-    wxString sheetName = aSheet->GetShownName( false );
+    wxString sheetName = aSheet->GetShownName( INTERNAL );
 
     if( sheetName.IsEmpty() && aSheet->GetScreen() )
     {
@@ -2478,6 +2691,17 @@ API_HANDLER_SCH::handleGetSchematicNetlist( const HANDLER_CONTEXT<kiapi::schemat
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
 
+    const bool engine = ADVANCED_CFG::GetCfg().m_ConnectivityEngine;
+
+    // The engine rebuilds before answering, which an interactive tool must not observe
+    if( engine && m_frame && !m_frame->ToolStackIsEmpty() )
+    {
+        ApiResponseStatus status;
+        status.set_status( ApiStatusCode::AS_BUSY );
+        status.set_error_message( "Cannot rebuild connectivity during an interactive operation" );
+        return tl::unexpected( status );
+    }
+
     HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() );
 
     if( !documentValidation )
@@ -2486,15 +2710,31 @@ API_HANDLER_SCH::handleGetSchematicNetlist( const HANDLER_CONTEXT<kiapi::schemat
     std::vector<KICAD_T> types = parseRequestedItemTypes( aCtx.Request.types() );
     const bool filterByType = aCtx.Request.types_size() > 0;
 
-    if( filterByType && types.empty() )
+    static const std::set<KICAD_T> s_netlistTypes = {
+        SCH_PIN_T,
+        SCH_SHEET_PIN_T,
+        SCH_LINE_T,
+        SCH_BUS_WIRE_ENTRY_T,
+        SCH_BUS_BUS_ENTRY_T,
+        SCH_JUNCTION_T,
+        SCH_NO_CONNECT_T,
+        SCH_LABEL_T,
+        SCH_GLOBAL_LABEL_T,
+        SCH_HIER_LABEL_T,
+        SCH_DIRECTIVE_LABEL_T,
+        SCH_SYMBOL_T,
+    };
+
+    std::set<KICAD_T> typeFilter( types.begin(), types.end() );
+    std::erase_if( typeFilter, []( KICAD_T aType ) { return !s_netlistTypes.contains( aType ); } );
+
+    if( filterByType && typeFilter.empty() )
     {
         ApiResponseStatus e;
         e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        e.set_error_message( "none of the requested types are valid for a Schematic object" );
+        e.set_error_message( "none of the requested types are valid for a netlist object" );
         return tl::unexpected( e );
     }
-
-    std::set<KICAD_T> typeFilter( types.begin(), types.end() );
 
     CONNECTION_GRAPH* connectionGraph = schematic()->ConnectionGraph();
 
@@ -2506,8 +2746,71 @@ API_HANDLER_SCH::handleGetSchematicNetlist( const HANDLER_CONTEXT<kiapi::schemat
         return tl::unexpected( e );
     }
 
+    if( engine )
+    {
+        try
+        {
+            schematic()->RebuildConnectivity();
+        }
+        catch( const std::exception& error )
+        {
+            if( m_frame )
+            {
+                m_frame->ShowInfoBarError( _( "Unable to rebuild schematic connectivity." ), true );
+                frame()->RefreshConnectivity( true );
+            }
+
+            wxLogTrace( traceApi, wxS( "GetSchematicNetlist rebuild failed: %s" ),
+                        wxString::FromUTF8( error.what() ) );
+
+            ApiResponseStatus status;
+            status.set_status( ApiStatusCode::AS_UNKNOWN );
+            status.set_error_message( error.what() );
+            return tl::unexpected( status );
+        }
+    }
+
     kiapi::schematic::commands::SchematicNetlistResponse response;
     response.mutable_document()->CopyFrom( aCtx.Request.document() );
+
+    if( engine )
+    {
+        for( const auto& group : schematic()->Connectivity().GetNetMap() )
+        {
+            if( group.instances.empty() || !group.instances.front().IsNet()
+                || !group.instances.front().Driver() )
+            {
+                continue;
+            }
+
+            kiapi::schematic::types::SchematicNet* net = nullptr;
+
+            for( const auto& view : group.instances )
+            {
+                const auto physicalItems = view.Items();
+
+                if( physicalItems.empty() )
+                    continue;
+
+                if( !net )
+                {
+                    net = response.add_nets();
+                    net->set_name( group.name.ToUTF8() );
+                }
+
+                auto* sheet = net->add_sheets();
+                PackSheetPath( *sheet->mutable_path(), view.Instance() );
+
+                for( SCH_ITEM* item : physicalItems )
+                {
+                    if( !filterByType || typeFilter.contains( item->Type() ) )
+                        sheet->add_items()->set_value( item->m_Uuid.AsStdString() );
+                }
+            }
+        }
+
+        return response;
+    }
 
     for( const auto& [key, subgraphList] : connectionGraph->GetNetMap() )
     {
@@ -2528,7 +2831,7 @@ API_HANDLER_SCH::handleGetSchematicNetlist( const HANDLER_CONTEXT<kiapi::schemat
         for( CONNECTION_SUBGRAPH* subGraph : subgraphList )
         {
             kiapi::schematic::types::SchematicNetSheetContents* sheetContents = net->add_sheets();
-            PackSheetPath( *sheetContents->mutable_path(), subGraph->GetSheet().Path() );
+            PackSheetPath( *sheetContents->mutable_path(), subGraph->GetSheet() );
 
             for( SCH_ITEM* item : subGraph->GetItems() )
             {
@@ -2621,7 +2924,7 @@ bool findSymbolsAndPins( const SCH_SHEET_LIST& aSchematicSheetList, const SCH_SH
 
             for( SCH_PIN* pin : pinsOnSheet )
             {
-                int pinUnit = pin->GetLibPin()->GetUnit();
+                int pinUnit = pin->GetLibPin() ? pin->GetLibPin()->GetUnit() : 0;
 
                 if( pinUnit > 0 && pinUnit != schRef.GetUnit() )
                     continue;
@@ -3072,7 +3375,7 @@ API_HANDLER_SCH::handleExpandTextVariables( const HANDLER_CONTEXT<ExpandTextVari
 
     for( const std::string& textMsg : aCtx.Request.text() )
     {
-        wxString text = ExpandTextVars( wxString::FromUTF8( textMsg ), &textResolver );
+        wxString text = ExpandTextVars( wxString::FromUTF8( textMsg ), &textResolver, INTERNAL );
 
         if( aCtx.Request.expand_env_vars() )
             text = ExpandEnvVarSubstitutions( text, &project );
@@ -3081,6 +3384,19 @@ API_HANDLER_SCH::handleExpandTextVariables( const HANDLER_CONTEXT<ExpandTextVari
     }
 
     return reply;
+}
+
+
+// Variant names are stored and compared exactly, but SCHEMATIC::HasVariant matches case-insensitively
+static std::optional<wxString> findVariantNoCase( const SCHEMATIC* aSchematic, const wxString& aName )
+{
+    for( const wxString& variantName : aSchematic->GetVariantNames() )
+    {
+        if( variantName.CmpNoCase( aName ) == 0 )
+            return variantName;
+    }
+
+    return std::nullopt;
 }
 
 
@@ -3132,13 +3448,28 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleAddVariant( const HANDLER_CONTEXT<A
         return tl::unexpected( e );
     }
 
+    VARIANT_PROXY_UNDO_ITEM* undoItem = m_frame ? new VARIANT_PROXY_UNDO_ITEM( schematic ) : nullptr;
+
+    if( std::optional<wxString> canonical = findVariantNoCase( schematic, name ) )
+        name = *canonical;
+
     schematic->AddVariant( name );
 
     if( aCtx.Request.has_description() )
         schematic->SetVariantDescription( name, wxString::FromUTF8( aCtx.Request.description() ) );
 
+    onModified();
+
     if( m_frame )
+    {
+        PICKED_ITEMS_LIST* undoCmd = new PICKED_ITEMS_LIST();
+
+        undoCmd->PushItem( ITEM_PICKER( frame()->GetScreen(), undoItem, UNDO_REDO::VARIANTS ) );
+        undoCmd->SetDescription( _( "Add Variant" ) );
+        frame()->PushCommandToUndoList( undoCmd );
+
         frame()->UpdateVariantSelectionCtrl( frame()->Schematic().GetVariantNamesForUI() );
+    }
 
     bumpRevision();
     publishProjectChanged( kiapi::common::events::PCK_VARIANTS, aCtx.ClientName );
@@ -3157,8 +3488,6 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleDeleteVariant( const HANDLER_CONTEX
 
     if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
         return tl::unexpected( documentValidation.error() );
-
-    SCH_COMMIT commit( m_frame ? frame()->GetToolManager() : toolManager() );
 
     SCHEMATIC* schematic = this->schematic();
     wxString   name = wxString::FromUTF8( aCtx.Request.name() );
@@ -3179,10 +3508,32 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleDeleteVariant( const HANDLER_CONTEX
         return tl::unexpected( e );
     }
 
+    VARIANT_PROXY_UNDO_ITEM* undoItem = m_frame ? new VARIANT_PROXY_UNDO_ITEM( schematic ) : nullptr;
+    SCH_COMMIT               commit( m_frame ? frame()->GetToolManager() : toolManager() );
+    bool                     pushedCommit = false;
+
+    if( std::optional<wxString> canonical = findVariantNoCase( schematic, name ) )
+        name = *canonical;
+
     schematic->DeleteVariant( name, &commit );
+
+    if( !commit.Empty() )
+    {
+        commit.Push();
+        pushedCommit = true;
+    }
+
+    onModified();
 
     if( m_frame )
     {
+        PICKED_ITEMS_LIST* undoCmd = pushedCommit ? frame()->PopCommandFromUndoList()
+                                                  : new PICKED_ITEMS_LIST();
+
+        undoCmd->PushItem( ITEM_PICKER( frame()->GetScreen(), undoItem, UNDO_REDO::VARIANTS ) );
+        undoCmd->SetDescription( _( "Delete Variant" ) );
+        frame()->PushCommandToUndoList( undoCmd );
+
         if( frame()->Schematic().GetCurrentVariant().CmpNoCase( name ) == 0 )
             frame()->SetCurrentVariant( wxEmptyString );
 
@@ -3208,8 +3559,6 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleRenameVariant( const HANDLER_CONTEX
     if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
         return tl::unexpected( documentValidation.error() );
 
-    SCH_COMMIT commit( m_frame ? frame()->GetToolManager() : toolManager() );
-
     SCHEMATIC* schematic = this->schematic();
     wxString   oldName = wxString::FromUTF8( aCtx.Request.old_name() );
     wxString   newName = wxString::FromUTF8( aCtx.Request.new_name() );
@@ -3246,10 +3595,34 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleRenameVariant( const HANDLER_CONTEX
         return tl::unexpected( e );
     }
 
+    VARIANT_PROXY_UNDO_ITEM* undoItem = m_frame ? new VARIANT_PROXY_UNDO_ITEM( schematic ) : nullptr;
+    SCH_COMMIT               commit( m_frame ? frame()->GetToolManager() : toolManager() );
+    bool                     pushedCommit = false;
+
+    if( std::optional<wxString> canonicalOld = findVariantNoCase( schematic, oldName ) )
+        oldName = *canonicalOld;
+
     schematic->RenameVariant( oldName, newName, &commit );
 
+    if( !commit.Empty() )
+    {
+        commit.Push();
+        pushedCommit = true;
+    }
+
+    onModified();
+
     if( m_frame )
+    {
+        PICKED_ITEMS_LIST* undoCmd = pushedCommit ? frame()->PopCommandFromUndoList()
+                                                  : new PICKED_ITEMS_LIST();
+
+        undoCmd->PushItem( ITEM_PICKER( frame()->GetScreen(), undoItem, UNDO_REDO::VARIANTS ) );
+        undoCmd->SetDescription( _( "Rename Variant" ) );
+        frame()->PushCommandToUndoList( undoCmd );
+
         frame()->UpdateVariantSelectionCtrl( frame()->Schematic().GetVariantNamesForUI() );
+    }
 
     bumpRevision();
     publishProjectChanged( kiapi::common::events::PCK_VARIANTS, aCtx.ClientName );
@@ -3269,8 +3642,6 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleCopyVariant( const HANDLER_CONTEXT<
     if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
         return tl::unexpected( documentValidation.error() );
 
-    SCH_COMMIT commit( m_frame ? frame()->GetToolManager() : toolManager() );
-
     SCHEMATIC* schematic = this->schematic();
     wxString   oldName = wxString::FromUTF8( aCtx.Request.old_name() );
     wxString   newName = wxString::FromUTF8( aCtx.Request.new_name() );
@@ -3307,10 +3678,37 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleCopyVariant( const HANDLER_CONTEXT<
         return tl::unexpected( e );
     }
 
+    VARIANT_PROXY_UNDO_ITEM* undoItem = m_frame ? new VARIANT_PROXY_UNDO_ITEM( schematic ) : nullptr;
+    SCH_COMMIT               commit( m_frame ? frame()->GetToolManager() : toolManager() );
+    bool                     pushedCommit = false;
+
+    if( std::optional<wxString> canonicalOld = findVariantNoCase( schematic, oldName ) )
+        oldName = *canonicalOld;
+
     schematic->CopyVariant( oldName, newName, &commit );
 
+    if( aCtx.Request.has_new_description() )
+        schematic->SetVariantDescription( newName, wxString::FromUTF8( aCtx.Request.new_description() ) );
+
+    if( !commit.Empty() )
+    {
+        commit.Push();
+        pushedCommit = true;
+    }
+
+    onModified();
+
     if( m_frame )
+    {
+        PICKED_ITEMS_LIST* undoCmd = pushedCommit ? frame()->PopCommandFromUndoList()
+                                                  : new PICKED_ITEMS_LIST();
+
+        undoCmd->PushItem( ITEM_PICKER( frame()->GetScreen(), undoItem, UNDO_REDO::VARIANTS ) );
+        undoCmd->SetDescription( _( "Copy Variant" ) );
+        frame()->PushCommandToUndoList( undoCmd );
+
         frame()->UpdateVariantSelectionCtrl( frame()->Schematic().GetVariantNamesForUI() );
+    }
 
     bumpRevision();
     publishProjectChanged( kiapi::common::events::PCK_VARIANTS, aCtx.ClientName );
@@ -3341,7 +3739,21 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleSetVariantDescription( const HANDLE
         return tl::unexpected( e );
     }
 
+    VARIANT_PROXY_UNDO_ITEM* undoItem = m_frame ? new VARIANT_PROXY_UNDO_ITEM( schematic ) : nullptr;
+
+    if( std::optional<wxString> canonical = findVariantNoCase( schematic, name ) )
+        name = *canonical;
+
     schematic->SetVariantDescription( name, wxString::FromUTF8( aCtx.Request.description() ) );
+
+    if( m_frame )
+    {
+        PICKED_ITEMS_LIST* undoCmd = new PICKED_ITEMS_LIST();
+
+        undoCmd->PushItem( ITEM_PICKER( frame()->GetScreen(), undoItem, UNDO_REDO::VARIANTS ) );
+        undoCmd->SetDescription( _( "Edit Variant Description" ) );
+        frame()->PushCommandToUndoList( undoCmd );
+    }
 
     bumpRevision();
     publishProjectChanged( kiapi::common::events::PCK_VARIANTS, aCtx.ClientName );
@@ -3375,6 +3787,9 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleSetCurrentVariant( const HANDLER_CO
     }
 
     wxString name = aCtx.Request.has_name() ? wxString::FromUTF8( aCtx.Request.name() ) : wxString();
+
+    if( std::optional<wxString> canonical = findVariantNoCase( schematic, name ) )
+        name = *canonical;
 
     if( m_frame )
         frame()->SetCurrentVariant( name );
@@ -3713,12 +4128,12 @@ HANDLER_RESULT<AnnotateResponse> API_HANDLER_SCH::handleAnnotate( const HANDLER_
 
         if( prevRef.Length() )
         {
-            msg.Printf( _( "Updated %s from %s to %s." ), symbol->GetValue( true, sheetPath, false ), prevRef,
+            msg.Printf( _( "Updated %s from %s to %s." ), symbol->GetValue( sheetPath, FOR_GUI ), prevRef,
                         newRef );
         }
         else
         {
-            msg.Printf( _( "Annotated %s as %s." ), symbol->GetValue( true, sheetPath, false ), newRef );
+            msg.Printf( _( "Annotated %s as %s." ), symbol->GetValue( sheetPath, FOR_GUI ), newRef );
         }
 
         response.add_messages( msg.ToUTF8() );
@@ -3789,7 +4204,7 @@ API_HANDLER_SCH::handleClearAnnotation( const HANDLER_CONTEXT<ClearAnnotation>& 
                 commit->Modify( aSymbol, aScreen );
 
                 wxString msg;
-                msg.Printf( _( "Cleared annotation for %s." ), aSymbol->GetValue( true, aSheet, false ) );
+                msg.Printf( _( "Cleared annotation for %s." ), aSymbol->GetValue( aSheet, FOR_GUI ) );
 
                 aSymbol->ClearAnnotation( aSheet, false );
                 response.set_annotated_count( response.annotated_count() + 1 );
@@ -3916,10 +4331,9 @@ API_HANDLER_SCH::handleSyncSchematicToBoard( const HANDLER_CONTEXT<SyncSchematic
         sch->RecalculateConnections( &dummyCommit, NO_CLEANUP, toolManager() );
     }
 
-    NETLIST_EXPORTER_KICAD exporter( sch );
+    NETLIST_EXPORTER_KICAD exporter( sch, m_context->GetKiway() );
     STRING_FORMATTER       formatter;
 
-    exporter.SetKiway( m_context->GetKiway() );
     exporter.Format( &formatter, GNL_ALL | GNL_OPT_KICAD );
 
     wxString netlistPath = wxFileName::CreateTempFileName( wxS( "kicad-api-netlist-" ) );
@@ -4290,8 +4704,8 @@ API_HANDLER_SCH::handleGetSymbolFieldsTable( const HANDLER_CONTEXT<GetSymbolFiel
             switch( field.GetId() )
             {
             case FIELD_T::REFERENCE: value = symbol->GetRef( &path, false );                       break;
-            case FIELD_T::VALUE:     value = symbol->GetValue( false, &path, false, variant );         break;
-            case FIELD_T::FOOTPRINT: value = symbol->GetFootprintFieldText( false, &path, false, variant ); break;
+            case FIELD_T::VALUE:     value = symbol->GetValue( &path, RAW_VALUE, variant );         break;
+            case FIELD_T::FOOTPRINT: value = symbol->GetFootprintFieldText( &path, RAW_VALUE, variant ); break;
             default:                 value = field.GetText();                                         break;
             }
 
@@ -4524,7 +4938,7 @@ wxString API_HANDLER_SCH::attachSheetFile( SCH_SHEET* aSheet, const SCH_SHEET_PA
     wxString    baseDir = parentFile.GetPath().IsEmpty() ? project().GetProjectPath() : parentFile.GetPath();
 
     // Sheet file names are relative to the parent sheet's file, as in the sheet dialog
-    wxFileName fn( ExpandTextVars( fileName, &project() ) );
+    wxFileName fn( ExpandTextVars( fileName, &project(), INTERNAL ) );
 
     if( !fn.Normalize( FN_NORMALIZE_FLAGS | wxPATH_NORM_ENV_VARS, baseDir ) )
         return wxString::Format( wxS( "cannot resolve sheet file '%s' against '%s'" ), fileName, baseDir );
@@ -4602,4 +5016,134 @@ wxString API_HANDLER_SCH::attachSheetFile( SCH_SHEET* aSheet, const SCH_SHEET_PA
         return wxString::Format( wxS( "could not create sheet file '%s'" ), absolute );
 
     return wxEmptyString;
+}
+
+
+HANDLER_RESULT<PlaceFromLibraryResponse> API_HANDLER_SCH::handlePlaceSymbolFromLibrary(
+        const HANDLER_CONTEXT<schematic::commands::PlaceSymbolFromLibrary>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( !validateItemHeaderDocument( aCtx.Request.header() ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_UNHANDLED );
+        return tl::unexpected( e );
+    }
+
+    LIB_ID libId = UnpackLibId( aCtx.Request.lib_id() );
+
+    if( !libId.IsValid() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "lib_id must specify both a library nickname and an entry name" );
+        return tl::unexpected( e );
+    }
+
+    SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &project() );
+    LIB_SYMBOL* libSymbol = adapter->LoadSymbol( libId );
+
+    if( !libSymbol )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "symbol '{}' not found", libId.Format().wx_str() ) );
+        return tl::unexpected( e );
+    }
+
+    SCH_SHEET_LIST hierarchy = schematic()->Hierarchy();
+    SCH_SHEET_PATH targetPath = m_context->GetCurrentSheet().value_or( *hierarchy.begin() );
+
+    if( aCtx.Request.header().document().has_sheet_path() )
+    {
+        KIID_PATH kp = UnpackSheetPath( aCtx.Request.header().document().sheet_path() );
+
+        if( std::optional<SCH_SHEET_PATH> path = hierarchy.GetSheetPathByKIIDPath( kp ) )
+        {
+            targetPath = *path;
+        }
+        else
+        {
+            ApiResponseStatus e;
+            e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( fmt::format( "the requested sheet path {} is not valid for this schematic",
+                                              kp.AsString().ToStdString() ) );
+            return tl::unexpected( e );
+        }
+    }
+
+    SCH_SCREEN* targetScreen = targetPath.LastScreen();
+
+    int unit = aCtx.Request.has_unit() ? aCtx.Request.unit().unit() : 1;
+
+    if( unit < 1 || ( libSymbol->GetUnitCount() > 0 && unit > libSymbol->GetUnitCount() ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "unit {} is out of range for symbol '{}' ({} units)", unit,
+                                          libId.Format().wx_str(), libSymbol->GetUnitCount() ) );
+        return tl::unexpected( e );
+    }
+
+    VECTOR2I position = UnpackVector2( aCtx.Request.position(), schIUScale );
+
+    std::unique_ptr<SCH_SYMBOL> symbol(
+            std::make_unique<SCH_SYMBOL>( *libSymbol, libId, &targetPath, unit, 0, position ) );
+
+    if( aCtx.Request.has_orientation() )
+        symbol->SetOrientationProp(  FromProtoEnum<SYMBOL_ORIENTATION_PROP>( aCtx.Request.orientation() ) );
+
+    if( !aCtx.Request.reference().empty() )
+    {
+        symbol->SetRef( &targetPath, wxString::FromUTF8( aCtx.Request.reference() ) );
+    }
+    else
+    {
+        SCH_REFERENCE      newReference( symbol.get(), targetPath );
+        SCH_REFERENCE_LIST existingRefs;
+        hierarchy.GetSymbols( existingRefs, SYMBOL_FILTER_ALL );
+
+        bool annotate = newReference.AlwaysAnnotate();
+
+        if( SCH_EDIT_FRAME* frame = this->frame() )
+            annotate |= frame->eeconfig()->m_AnnotatePanel.automatic;
+
+        if( annotate )
+        {
+            existingRefs.SortByReferenceOnly();
+
+            SCH_REFERENCE_LIST refs;
+            refs.AddItem( newReference );
+            refs.SetRefDesTracker( schematic()->Settings().m_refDesTracker );
+            refs.ReannotateByOptions( static_cast<ANNOTATE_ORDER_T>( schematic()->Settings().m_AnnotateSortOrder ),
+                                      static_cast<ANNOTATE_ALGO_T>( schematic()->Settings().m_AnnotateMethod ),
+                                      schematic()->Settings().m_AnnotateStartNum, existingRefs, false, &hierarchy );
+            refs.UpdateAnnotation();
+        }
+    }
+
+    if( SCH_EDIT_FRAME* frame = this->frame() )
+    {
+        if( frame->eeconfig()->m_AutoplaceFields.enable )
+            symbol->AutoplaceFields( nullptr, AUTOPLACE_AUTO );
+    }
+
+    SCH_COMMIT* commit = static_cast<SCH_COMMIT*>( getCurrentCommit( aCtx.ClientName ) );
+    SCH_SYMBOL* placed = symbol.release();
+    commit->Add( placed, targetScreen );
+
+    if( !m_activeClients.contains( aCtx.ClientName ) )
+        pushCurrentCommit( aCtx.ClientName, _( "Placed symbol via API" ) );
+
+    PlaceFromLibraryResponse response;
+    response.mutable_header()->CopyFrom( aCtx.Request.header() );
+
+    kiapi::schematic::types::SchematicSymbolInstance packed;
+
+    if( PackSymbol( &packed, placed, targetPath ) )
+        response.mutable_item()->PackFrom( packed );
+
+    return response;
 }

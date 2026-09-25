@@ -27,6 +27,8 @@
 #include <nng/protocol/pubsub0/sub.h>
 
 #include <qa_utils/wx_utils/unit_test_utils.h>
+#include <qa_utils/file_utils.h>
+
 #include <kinng.h>
 
 #include <import_export.h>
@@ -83,7 +85,9 @@ BOOST_AUTO_TEST_SUITE( KiNNG )
 
 BOOST_AUTO_TEST_CASE( CreateIPCResponder )
 {
-    KINNG_REQUEST_SERVER server( wxFileName::CreateTempFileName( "test-kinng" ).ToStdString() );
+    KI_TEST::SCOPED_TEMP_DIR tempDir( "kicad_qa_kinng" );
+
+    KINNG_REQUEST_SERVER server( tempDir.Path().string() );
 }
 
 

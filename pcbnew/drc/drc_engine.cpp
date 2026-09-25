@@ -340,7 +340,7 @@ void DRC_ENGINE::loadImplicitRules()
                     netclassRule->AddConstraint( constraint );
 
                     // A narrower diffpair gap overrides the netclass min clearance
-                    if( nc->GetDiffPairGap() < nc->GetClearance() )
+                    if( nc->HasClearance() && nc->GetDiffPairGap() < nc->GetClearance() )
                     {
                         netclassRule = std::make_shared<DRC_RULE>();
                         netclassRule->m_Name = wxString::Format( _( "netclass '%s' diff pair" ),
@@ -525,7 +525,7 @@ void DRC_ENGINE::loadImplicitRules()
                 addRule( tuningRule2 );
 
                 // A narrower diffpair gap overrides the netclass min clearance
-                if( aLayerEntry.GetDiffPairGap() < aNetclass->GetClearance() )
+                if( aNetclass->HasClearance() && aLayerEntry.GetDiffPairGap() < aNetclass->GetClearance() )
                 {
                     std::shared_ptr<DRC_RULE> diffPairClearanceRule = std::make_shared<DRC_RULE>();
                     diffPairClearanceRule->m_Severity = bds.m_DRCSeverities[DRCE_TUNING_PROFILE_IMPLICIT_RULES];
@@ -685,7 +685,7 @@ void DRC_ENGINE::loadRules( const wxFileName& aPath )
             {
                 wxString str( line );
                 str = m_board->ConvertCrossReferencesToKIIDs( str );
-                str = ExpandTextVars( str, &resolver );
+                str = ExpandTextVars( str, &resolver, INTERNAL );
 
                 rulesText << str << '\n';
             }
@@ -1710,7 +1710,8 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
                         case PCB_FIELD_T:     mask = DRC_DISALLOW_TEXTS;      break;
                         case PCB_TEXT_T:      mask = DRC_DISALLOW_TEXTS;      break;
                         case PCB_TEXTBOX_T:   mask = DRC_DISALLOW_TEXTS;      break;
-                        case PCB_TABLE_T:     mask = DRC_DISALLOW_TEXTS;      break;
+                        case PCB_TABLE_T:
+                        case PCB_DRILL_CHART_T: mask = DRC_DISALLOW_TEXTS;    break;
 
                         case PCB_ZONE_T:
                             // Treat teardrop areas as tracks for DRC purposes
@@ -1947,8 +1948,8 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
                 processConstraint( rule );
         }
 
-        // DIFF_PAIR_GAP_CONSTRAINT must also respect CLEARANCE_CONSTRAINTs.
-        if( aConstraintType == DIFF_PAIR_GAP_CONSTRAINT )
+        // DIFF_PAIR_GAP_CONSTRAINT must also respect CLEARANCE_CONSTRAINTs when called with two items
+        if( aConstraintType == DIFF_PAIR_GAP_CONSTRAINT && b != nullptr )
         {
             DRC_CONSTRAINT clearanceConstraint = EvalRules( CLEARANCE_CONSTRAINT, a, b, aLayer, nullptr );
 
@@ -3170,15 +3171,7 @@ void DRC_ENGINE::InvalidateClearanceCache( const KIID& aUuid )
     }
     else
     {
-        auto it = m_ownClearanceCache.begin();
-
-        while( it != m_ownClearanceCache.end() )
-        {
-            if( it->first.m_uuid == aUuid )
-                it = m_ownClearanceCache.erase( it );
-            else
-                ++it;
-        }
+        std::erase_if( m_ownClearanceCache, [&aUuid]( const auto& entry ) { return entry.first.m_uuid == aUuid; } );
     }
 }
 

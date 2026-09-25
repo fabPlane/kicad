@@ -160,7 +160,14 @@ public:
     /// Validates that a library is loadable.  May not necessarily load the library!
     virtual std::optional<LIB_STATUS> CheckLibrary( LIB_DATA* aLib ) { return LoadOne( aLib ); }
 
-    /// Returns async load progress between 0.0 and 1.0, or nullopt if load is not in progress
+    /// Returns the fraction of the libraries queued by AsyncLoad() that have been
+    /// processed, or nullopt when there is nothing to report (no load has been requested
+    /// since the last reset, or every library was already loaded).
+    ///
+    /// This is the non-blocking view of the load: anything other than 1.0 means a load
+    /// may still be running.  It reaches 1.0 once the last library has been counted,
+    /// which can be a moment before the workers retire, so a path that must not stall
+    /// still waits with BlockUntilLoaded().
     std::optional<float> AsyncLoadProgress() const;
 
     void BlockUntilLoaded();
@@ -180,6 +187,7 @@ public:
     /// Returns all library load errors as newline-separated strings for display
     std::vector<KI_ERROR> GetLibraryLoadErrors() const;
 
+    /// Synchronously recreates the plugin for and reloads the given library
     void ReloadLibraryEntry( const wxString& aNickname,
                              LIBRARY_TABLE_SCOPE aScope = LIBRARY_TABLE_SCOPE::BOTH );
 
@@ -210,7 +218,7 @@ protected:
     ///             since URI expansion accesses PROJECT data that is not thread-safe).
     virtual void enumerateLibrary( LIB_DATA* aLib, const wxString& aUri ) = 0;
 
-    static wxString getUri( const LIBRARY_TABLE_ROW* aRow );
+    wxString getUri( const LIBRARY_TABLE_ROW* aRow ) const;
 
     std::optional<const LIB_DATA*> fetchIfLoaded( const wxString& aNickname ) const;
 
@@ -276,7 +284,11 @@ protected:
 class KICOMMON_API LIBRARY_MANAGER
 {
 public:
-    LIBRARY_MANAGER();
+    /// An explicit project is borrowed until this manager and its adapters are destroyed.
+    explicit LIBRARY_MANAGER( const PROJECT* aProject = nullptr );
+
+    const PROJECT& Project() const;
+    bool IsProjectScoped() const { return m_project != nullptr; }
 
     ~LIBRARY_MANAGER();
 
@@ -376,6 +388,7 @@ public:
     std::optional<LIBRARY_TABLE_ROW*> FindRowByURI( LIBRARY_TABLE_TYPE aType, const wxString &aUri,
                                                     LIBRARY_TABLE_SCOPE aScope = LIBRARY_TABLE_SCOPE::BOTH ) const;
 
+    /// Synchronously recreates the plugin for and reloads the given library
     void ReloadLibraryEntry( LIBRARY_TABLE_TYPE aType, const wxString& aNickname,
                              LIBRARY_TABLE_SCOPE aScope = LIBRARY_TABLE_SCOPE::BOTH );
 
@@ -399,7 +412,8 @@ public:
     std::optional<wxString> GetFullURI( LIBRARY_TABLE_TYPE aType, const wxString& aNickname,
                                         bool aSubstituted = false );
 
-    static wxString GetFullURI( const LIBRARY_TABLE_ROW* aRow, bool aSubstituted = false );
+    static wxString GetFullURI( const LIBRARY_TABLE_ROW* aRow, bool aSubstituted = false,
+                               const PROJECT* aProject = nullptr );
 
     static wxString ExpandURI( const wxString& aShortURI, const PROJECT& aProject );
 
@@ -450,6 +464,7 @@ private:
 
     void createEmptyTable( LIBRARY_TABLE_TYPE aType, LIBRARY_TABLE_SCOPE aScope );
 
+    const PROJECT* const m_project;
     std::map<LIBRARY_TABLE_TYPE, std::unique_ptr<LIBRARY_TABLE>> m_tables;
 
     /// Map of full URI to table object for tables that are referenced by global or project tables

@@ -532,7 +532,8 @@ bool ZONE_FILLER::mayHoldOutOfBoardCopper( const ZONE* aZone ) const
 
 BOX2I ZONE_FILLER::zoneKnockoutQueryBox( const ZONE* aZone ) const
 {
-    // The candidate corner radius is unknown here, so use the board maximum.
+    // Dependency discovery requires this box to cover every indexed zone that can pass
+    // zoneKnockoutMayInteract().  Bound the unknown candidate radius by the board maximum.
     int reach = m_worstClearance + m_zoneKnockoutSlack + aZone->GetMinThickness();
 
     if( m_board->GetDesignSettings().m_ZoneKeepExternalFillets )
@@ -1036,30 +1037,83 @@ bool ZONE_FILLER::Fill( const std::vector<ZONE*>& aZones, bool aCheck, wxWindow*
                 for( size_t i = 0; i < count; ++i )
                     inDegree[i].store( 0, std::memory_order_relaxed );
 
-                // Skip the O(N²) dependency scan when the caller guarantees no deps.
+                // Skip dependency discovery when the caller guarantees no deps.
                 if( aAnyDependencies )
                 {
-                    // Two items can only depend on each other on a shared layer.
-                    std::map<PCB_LAYER_ID, std::vector<size_t>> byLayer;
+                    struct LAYER_FILL_ITEMS
+                    {
+                        std::unordered_map<ZONE*, std::vector<size_t>> indices;
+                        std::unordered_set<ZONE*> indexed;
+                        std::vector<size_t> unindexed;
+                    };
+
+                    std::unordered_map<PCB_LAYER_ID, LAYER_FILL_ITEMS> fillItemsByLayer;
+
+                    // Fill() also accepts zones outside the index, including omitted layers.
+                    for( const auto& [layer, index] : m_zoneIndex )
+                    {
+                        auto& indexed = fillItemsByLayer[layer].indexed;
+
+                        for( const INDEXED_ITEM& item : index )
+                            indexed.insert( static_cast<ZONE*>( item.m_item ) );
+                    }
 
                     for( size_t i = 0; i < count; ++i )
-                        byLayer[aFillItems[i].second].push_back( i );
-
-                    for( const auto& [layer, items] : byLayer )
                     {
-                        for( size_t i : items )
-                        {
-                            for( size_t j : items )
-                            {
-                                if( i == j )
-                                    continue;
+                        const auto& [zone, layer] = aFillItems[i];
+                        LAYER_FILL_ITEMS& items = fillItemsByLayer[layer];
+                        items.indices[zone].push_back( i );
 
-                                if( aHasDependency( aFillItems[j], aFillItems[i] ) )
+                        if( !items.indexed.contains( zone ) )
+                            items.unindexed.push_back( i );
+                    }
+
+                    std::vector<size_t> lastSeen( count, count );
+
+                    // Only waiter order determines successor order; spatial hit order is irrelevant.
+                    for( size_t j = 0; j < count; ++j )
+                    {
+                        const auto& [zone, layer] = aFillItems[j];
+                        const LAYER_FILL_ITEMS& layerItems = fillItemsByLayer.at( layer );
+                        auto addDependency =
+                                [&]( size_t i )
                                 {
-                                    successors[i].push_back( j );
-                                    inDegree[j].fetch_add( 1, std::memory_order_relaxed );
-                                }
-                            }
+                                    // Keep distinct fill entries even if a zone gains multiple index entries.
+                                    if( i == j || lastSeen[i] == j )
+                                        return;
+
+                                    lastSeen[i] = j;
+
+                                    if( aHasDependency( aFillItems[j], aFillItems[i] ) )
+                                    {
+                                        successors[i].push_back( j );
+                                        inDegree[j].fetch_add( 1, std::memory_order_relaxed );
+                                    }
+                                };
+
+                        for( size_t i : layerItems.unindexed )
+                            addDependency( i );
+
+                        if( auto index = m_zoneIndex.find( layer ); index != m_zoneIndex.end() )
+                        {
+                            const BOX2I box = zoneKnockoutQueryBox( zone );
+                            const int min[2] = { box.GetLeft(), box.GetTop() };
+                            const int max[2] = { box.GetRight(), box.GetBottom() };
+                            auto visitor =
+                                    [&]( const INDEXED_ITEM& hit )
+                                    {
+                                        auto items = layerItems.indices.find( static_cast<ZONE*>( hit.m_item ) );
+
+                                        if( items != layerItems.indices.end() )
+                                        {
+                                            for( size_t i : items->second )
+                                                addDependency( i );
+                                        }
+
+                                        return true;
+                                    };
+
+                            index->second.Search( min, max, visitor );
                         }
                     }
                 }
@@ -2005,6 +2059,7 @@ void ZONE_FILLER::addKnockout( BOARD_ITEM* aItem, PCB_LAYER_ID aLayer, int aGap,
 
     case PCB_TEXTBOX_T:
     case PCB_TABLE_T:
+    case PCB_DRILL_CHART_T:
     case PCB_TARGET_T:
         aItem->TransformShapeToPolygon( aHoles, aLayer, aGap, m_maxError, ERROR_OUTSIDE, aIgnoreLineWidth );
         break;
@@ -3008,7 +3063,12 @@ void ZONE_FILLER::postKnockoutMinWidthPrune( const ZONE* aZone, SHAPE_POLY_SET& 
     SHAPE_POLY_SET preDeflate = aFillPolys.CloneDropTriangulation();
 
     if( aSameNetApron.OutlineCount() > 0 )
-        aFillPolys.BooleanAdd( aSameNetApron );
+    {
+        // Overlap rather than abut the fill, or a rounding slit along the shared edge opens into a notch
+        SHAPE_POLY_SET apron = aSameNetApron.CloneDropTriangulation();
+        apron.Inflate( epsilon, CORNER_STRATEGY::ROUND_ALL_CORNERS, m_maxError );
+        aFillPolys.BooleanAdd( apron );
+    }
 
     aFillPolys.Deflate( half_min_width - epsilon, CORNER_STRATEGY::CHAMFER_ALL_CORNERS,
                         m_maxError );

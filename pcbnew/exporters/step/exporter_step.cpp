@@ -693,11 +693,11 @@ bool EXPORTER_STEP::buildFootprint3DShapes( FOOTPRINT* aFootprint, const VECTOR2
             }
 
             // Add metallic pin extrusions for through-hole pads
-            if( standoff > 0.0 )
+            if( body->m_standoff > 0 )
             {
                 try
                 {
-                    m_pcbModel->AddExtrudedPins( aFootprint, bottomSide, standoff, aOrigin );
+                    m_pcbModel->AddExtrudedPins( aFootprint, body, bottomSide, standoff, aOrigin );
                 }
                 catch( const Standard_Failure& e )
                 {
@@ -1185,6 +1185,7 @@ bool EXPORTER_STEP::buildGraphic3DShape( BOARD_ITEM* aItem, const VECTOR2D& aOri
     }
 
     case PCB_TABLE_T:
+    case PCB_DRILL_CHART_T:
     {
         PCB_TABLE* table = static_cast<PCB_TABLE*>( aItem );
 

@@ -26,6 +26,7 @@
 #include <footprint.h>
 #include <pad.h>
 #include <project.h>
+#include <pcb_drill_chart.h>
 #include <reporter.h>
 #include <pcbplot.h>
 #include <wx/filename.h>
@@ -80,9 +81,18 @@ bool PCB_PLOTTER::Plot( const wxString& aOutputPath, const LSEQ& aLayersToPlot,
     // sanity, ensure one layer to print
     if( aLayersToPlot.size() < 1 )
     {
-        m_reporter->Report( _( "No layers selected for plotting." ), RPT_SEVERITY_ERROR );
+        if( m_reporter )
+            m_reporter->Report( _( "No layers selected for plotting." ), RPT_SEVERITY_ERROR );
+
         return false;
     }
+
+    // The one path GUI plotting, PNG, PS and every CLI plot job share. Common layers are
+    // included or a chart plotted as one slips past the policy
+    LSET plotted( { aLayersToPlot } );
+    plotted |= LSET( { aCommonLayers } );
+
+    RefreshDrillCharts( *m_board );
 
     PAGE_INFO existingPageInfo = m_board->GetPageSettings();
     VECTOR2I  existingAuxOrigin = m_board->GetDesignSettings().GetAuxOrigin();
@@ -226,7 +236,7 @@ bool PCB_PLOTTER::Plot( const wxString& aOutputPath, const LSEQ& aLayersToPlot,
         if( plotter )
         {
             plotter->SetLayer( layer );
-            plotter->SetTitle( ExpandTextVars( m_board->GetTitleBlock().GetTitle(), &textResolver ) );
+            plotter->SetTitle( ExpandTextVars( m_board->GetTitleBlock().GetTitle(), &textResolver, FOR_GUI ) );
 
             if( m_plotOpts.m_PDFMetadata )
             {
@@ -297,8 +307,11 @@ bool PCB_PLOTTER::Plot( const wxString& aOutputPath, const LSEQ& aLayersToPlot,
                 delete plotter;
                 plotter = nullptr;
 
-                msg.Printf( _( "Plotted to '%s'." ), fn.GetFullPath() );
-                m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                if( m_reporter )
+                {
+                    m_reporter->Report( wxString::Format( _( "Plotted to '%s'." ), fn.GetFullPath() ),
+                                        RPT_SEVERITY_ACTION );
+                }
 
                 if( aOutputFiles )
                     aOutputFiles->push_back( fn.GetFullPath() );
@@ -306,8 +319,11 @@ bool PCB_PLOTTER::Plot( const wxString& aOutputPath, const LSEQ& aLayersToPlot,
         }
         else
         {
-            msg.Printf( _( "Failed to create file '%s'." ), fn.GetFullPath() );
-            m_reporter->Report( msg, RPT_SEVERITY_ERROR );
+            if( m_reporter )
+            {
+                m_reporter->Report( wxString::Format( _( "Failed to create file '%s'." ), fn.GetFullPath() ),
+                                    RPT_SEVERITY_ERROR );
+            }
 
             success = false;
         }
@@ -332,7 +348,8 @@ bool PCB_PLOTTER::Plot( const wxString& aOutputPath, const LSEQ& aLayersToPlot,
             aOutputFiles->push_back( fn.GetFullPath() );
     }
 
-    m_reporter->ReportTail( _( "Done." ), RPT_SEVERITY_INFO );
+    if( m_reporter )
+        m_reporter->ReportTail( _( "Done." ), RPT_SEVERITY_INFO );
 
     if( m_plotOpts.GetFormat() == PLOT_FORMAT::SVG && m_plotOpts.GetSvgFitPagetoBoard() )
     {
@@ -460,7 +477,7 @@ void PCB_PLOTTER::PlotJobToPlotOpts( PCB_PLOT_PARAMS& aOpts, JOB_EXPORT_PCB_PLOT
         aOpts.m_PDFBackFPPropertyPopups = pdfJob->m_pdfBackFPPropertyPopups;
         aOpts.m_PDFMetadata = pdfJob->m_pdfMetadata;
         aOpts.m_PDFSingle = pdfJob->m_pdfSingle;
-        aOpts.m_PDFBackgroundColor = COLOR4D( pdfJob->m_pdfBackgroundColor );
+        aOpts.m_backgroundColor = COLOR4D( pdfJob->m_pdfBackgroundColor );
     }
 
     if( aJob->m_plotFormat == JOB_EXPORT_PCB_PLOT::PLOT_FORMAT::POST )
@@ -472,11 +489,32 @@ void PCB_PLOTTER::PlotJobToPlotOpts( PCB_PLOT_PARAMS& aOpts, JOB_EXPORT_PCB_PLOT
         aOpts.SetA4Output( psJob->m_forceA4 );
     }
 
+    wxString theme = aJob->m_colorTheme;
+
+    // Theme may be empty when running from a job in GUI context, so use the GUI settings.
+    if( theme.IsEmpty() )
+    {
+        if( PCBNEW_SETTINGS* pcbSettings = GetAppSettings<PCBNEW_SETTINGS>( "pcbnew" ) )
+            theme = pcbSettings->m_ColorTheme;
+    }
+
+    COLOR_SETTINGS* colors = ::GetColorSettings( theme );
+
+    if( colors->GetFilename() != theme && !aOpts.GetBlackAndWhite() )
+    {
+        aReporter.Report( wxString::Format( _( "Color theme '%s' not found, will use theme from PCB Editor.\n" ),
+                                            theme ),
+                          RPT_SEVERITY_WARNING );
+    }
+
     if( aJob->m_plotFormat == JOB_EXPORT_PCB_PLOT::PLOT_FORMAT::PNG )
     {
         JOB_EXPORT_PCB_PNG* pngJob = static_cast<JOB_EXPORT_PCB_PNG*>( aJob );
         aOpts.SetPngDPI( pngJob->m_dpi );
         aOpts.SetPngAntialias( pngJob->m_antialias );
+
+        if( pngJob->m_useBackgroundColor )
+            aOpts.SetBackgroundColor( colors->GetColor( LAYER_PCB_BACKGROUND ) );
     }
 
     aOpts.SetUseAuxOrigin( aJob->m_useDrillOrigin );
@@ -507,24 +545,6 @@ void PCB_PLOTTER::PlotJobToPlotOpts( PCB_PLOT_PARAMS& aOpts, JOB_EXPORT_PCB_PLOT
     case JOB_EXPORT_PCB_PLOT::PLOT_FORMAT::HPGL:   /* no longer supported */               break;
     case JOB_EXPORT_PCB_PLOT::PLOT_FORMAT::PDF:    aOpts.SetFormat( PLOT_FORMAT::PDF );    break;
     case JOB_EXPORT_PCB_PLOT::PLOT_FORMAT::PNG:    aOpts.SetFormat( PLOT_FORMAT::PNG );    break;
-    }
-
-    wxString theme = aJob->m_colorTheme;
-
-    // Theme may be empty when running from a job in GUI context, so use the GUI settings.
-    if( theme.IsEmpty() )
-    {
-        if( PCBNEW_SETTINGS* pcbSettings = GetAppSettings<PCBNEW_SETTINGS>( "pcbnew" ) )
-            theme = pcbSettings->m_ColorTheme;
-    }
-
-    COLOR_SETTINGS* colors = ::GetColorSettings( theme );
-
-    if( colors->GetFilename() != theme && !aOpts.GetBlackAndWhite() )
-    {
-        aReporter.Report( wxString::Format( _( "Color theme '%s' not found, will use theme from PCB Editor.\n" ),
-                                            theme ),
-                          RPT_SEVERITY_WARNING );
     }
 
     aOpts.SetColorSettings( colors );

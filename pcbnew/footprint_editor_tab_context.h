@@ -108,7 +108,7 @@ public:
         }
     }
 
-    wxString GetDisplayName() const override;
+    wxString GetDisplayName( bool aShortForm = false ) const override;
 
     /**
      * Give an imported footprint the library identity a save-as just assigned it.
@@ -119,7 +119,7 @@ public:
     void PromoteToLibrary( const wxString& aLib, const wxString& aName );
 
     /**
-     * True for a tab that is session-only and never persisted.
+     * True for a tab that is session-only and not yet saved.
      */
     bool IsTransient() const { return m_kind != KIND::LIBRARY; }
 

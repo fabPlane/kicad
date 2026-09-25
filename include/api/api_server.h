@@ -209,6 +209,13 @@ public:
      */
     static wxFileName EventsSocketPathFor( const wxFileName& aSocketPath );
 
+    /**
+     * Calls onNetSettingsChanged() on every registered handler, so that editors can update
+     * state derived from project net settings after they are changed via the API.
+     * Must be called from the main thread.
+     */
+    void NotifyNetSettingsChanged();
+
 private:
 
     /**

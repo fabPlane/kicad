@@ -180,7 +180,7 @@ std::vector<FOOTPRINT*> CADSTAR_PCB_ARCHIVE_LOADER::GetLoadedLibraryFootpints() 
 }
 
 
-std::vector<std::unique_ptr<FOOTPRINT>> CADSTAR_PCB_ARCHIVE_LOADER::LoadLibrary()
+std::vector<std::unique_ptr<FOOTPRINT>> CADSTAR_PCB_ARCHIVE_LOADER::LoadFpLibrary()
 {
     // loading the library after parsing takes almost no time in comparison
     if( m_progressReporter )
@@ -543,7 +543,7 @@ void CADSTAR_PCB_ARCHIVE_LOADER::loadBoardStackup()
         enum class LOG_LEVEL
         {
             NONE,
-            MSG,
+            MSG_LOG,
             WARN
         };
 
@@ -560,7 +560,7 @@ void CADSTAR_PCB_ARCHIVE_LOADER::loadBoardStackup()
                 case LOG_LEVEL::NONE:
                     break;
 
-                case LOG_LEVEL::MSG:
+                case LOG_LEVEL::MSG_LOG:
                     logBoardStackupMessage( curLayer.Name, kicadLayerID );
                     break;
 
@@ -615,23 +615,23 @@ void CADSTAR_PCB_ARCHIVE_LOADER::loadBoardStackup()
                 // Attempt to detect technical layers by string matching.
                 if( layerName.Contains( wxT( "glue" ) ) || layerName.Contains( wxT( "adhesive" ) ) )
                 {
-                    selectLayerID( PCB_LAYER_ID::F_Adhes, PCB_LAYER_ID::B_Adhes, LOG_LEVEL::MSG );
+                    selectLayerID( PCB_LAYER_ID::F_Adhes, PCB_LAYER_ID::B_Adhes, LOG_LEVEL::MSG_LOG );
                 }
                 else if( layerName.Contains( wxT( "silk" ) ) || layerName.Contains( wxT( "legend" ) ) )
                 {
-                    selectLayerID( PCB_LAYER_ID::F_SilkS, PCB_LAYER_ID::B_SilkS, LOG_LEVEL::MSG );
+                    selectLayerID( PCB_LAYER_ID::F_SilkS, PCB_LAYER_ID::B_SilkS, LOG_LEVEL::MSG_LOG );
                 }
                 else if( layerName.Contains( wxT( "assembly" ) ) || layerName.Contains( wxT( "fabrication" ) ) )
                 {
-                    selectLayerID( PCB_LAYER_ID::F_Fab, PCB_LAYER_ID::B_Fab, LOG_LEVEL::MSG );
+                    selectLayerID( PCB_LAYER_ID::F_Fab, PCB_LAYER_ID::B_Fab, LOG_LEVEL::MSG_LOG );
                 }
                 else if( layerName.Contains( wxT( "resist" ) ) || layerName.Contains( wxT( "mask" ) ) )
                 {
-                    selectLayerID( PCB_LAYER_ID::F_Mask, PCB_LAYER_ID::B_Mask, LOG_LEVEL::MSG );
+                    selectLayerID( PCB_LAYER_ID::F_Mask, PCB_LAYER_ID::B_Mask, LOG_LEVEL::MSG_LOG );
                 }
                 else if( layerName.Contains( wxT( "paste" ) ) )
                 {
-                    selectLayerID( PCB_LAYER_ID::F_Paste, PCB_LAYER_ID::B_Paste, LOG_LEVEL::MSG );
+                    selectLayerID( PCB_LAYER_ID::F_Paste, PCB_LAYER_ID::B_Paste, LOG_LEVEL::MSG_LOG );
                 }
                 else
                 {
@@ -641,15 +641,15 @@ void CADSTAR_PCB_ARCHIVE_LOADER::loadBoardStackup()
                 break;
 
             case LAYER_SUBTYPE::LAYERSUBTYPE_PASTE:
-                selectLayerID( PCB_LAYER_ID::F_Paste, PCB_LAYER_ID::B_Paste, LOG_LEVEL::MSG );
+                selectLayerID( PCB_LAYER_ID::F_Paste, PCB_LAYER_ID::B_Paste, LOG_LEVEL::MSG_LOG );
                 break;
 
             case LAYER_SUBTYPE::LAYERSUBTYPE_SILKSCREEN:
-                selectLayerID( PCB_LAYER_ID::F_SilkS, PCB_LAYER_ID::B_SilkS, LOG_LEVEL::MSG );
+                selectLayerID( PCB_LAYER_ID::F_SilkS, PCB_LAYER_ID::B_SilkS, LOG_LEVEL::MSG_LOG );
                 break;
 
             case LAYER_SUBTYPE::LAYERSUBTYPE_SOLDERRESIST:
-                selectLayerID( PCB_LAYER_ID::F_Mask, PCB_LAYER_ID::B_Mask, LOG_LEVEL::MSG );
+                selectLayerID( PCB_LAYER_ID::F_Mask, PCB_LAYER_ID::B_Mask, LOG_LEVEL::MSG_LOG );
                 break;
 
             case LAYER_SUBTYPE::LAYERSUBTYPE_ROUT:
@@ -825,7 +825,7 @@ void CADSTAR_PCB_ARCHIVE_LOADER::loadLibraryFigures( const SYMDEF_PCB& aComponen
 
         for( const PCB_LAYER_ID& layer : getKiCadLayerSet( fig.LayerID ).Seq() )
         {
-            drawCadstarShape( fig.Shape, layer, getLineThickness( fig.LineCodeID ),
+            drawCadstarShape( fig.Shape, layer, getLineThickness( fig.LineCodeID ), getLineStyle( fig.LineCodeID ),
                               wxString::Format( wxT( "Component %s:%s -> Figure %s" ),
                                                 aComponent.ReferenceName,
                                                 aComponent.Alternate,
@@ -836,8 +836,7 @@ void CADSTAR_PCB_ARCHIVE_LOADER::loadLibraryFigures( const SYMDEF_PCB& aComponen
 }
 
 
-void CADSTAR_PCB_ARCHIVE_LOADER::loadLibraryCoppers( const SYMDEF_PCB& aComponent,
-                                                     FOOTPRINT* aFootprint )
+void CADSTAR_PCB_ARCHIVE_LOADER::loadLibraryCoppers( const SYMDEF_PCB& aComponent, FOOTPRINT* aFootprint )
 {
     for( COMPONENT_COPPER compCopper : aComponent.ComponentCoppers )
     {
@@ -920,7 +919,7 @@ void CADSTAR_PCB_ARCHIVE_LOADER::loadLibraryCoppers( const SYMDEF_PCB& aComponen
         {
             for( const PCB_LAYER_ID& layer : remainingLayers.Seq() )
             {
-                drawCadstarShape( compCopper.Shape, layer, lineThickness,
+                drawCadstarShape( compCopper.Shape, layer, lineThickness, LINE_STYLE::SOLID,
                                   wxString::Format( wxT( "Component %s:%s -> Copper element" ),
                                                     aComponent.ReferenceName, aComponent.Alternate ),
                                   aFootprint );
@@ -930,8 +929,7 @@ void CADSTAR_PCB_ARCHIVE_LOADER::loadLibraryCoppers( const SYMDEF_PCB& aComponen
 }
 
 
-void CADSTAR_PCB_ARCHIVE_LOADER::loadLibraryAreas( const SYMDEF_PCB& aComponent,
-                                                   FOOTPRINT* aFootprint )
+void CADSTAR_PCB_ARCHIVE_LOADER::loadLibraryAreas( const SYMDEF_PCB& aComponent, FOOTPRINT* aFootprint )
 {
     for( std::pair<COMP_AREA_ID, COMPONENT_AREA> areaPair : aComponent.ComponentAreas )
     {
@@ -1413,7 +1411,8 @@ void CADSTAR_PCB_ARCHIVE_LOADER::loadBoards()
         GROUP_ID         boardGroup = createUniqueGroupID( wxT( "Board" ) );
 
         drawCadstarShape( board.Shape, PCB_LAYER_ID::Edge_Cuts, getLineThickness( board.LineCodeID ),
-                          wxString::Format( wxT( "BOARD %s" ), board.ID ), m_board, boardGroup );
+                          getLineStyle( board.LineCodeID ), wxString::Format( wxT( "BOARD %s" ), board.ID ),
+                          m_board, boardGroup );
 
         if( !board.GroupID.IsEmpty() )
             addToGroup( board.GroupID, getKiCadGroup( boardGroup ) );
@@ -1431,7 +1430,7 @@ void CADSTAR_PCB_ARCHIVE_LOADER::loadFigures()
 
         for( const PCB_LAYER_ID& layer : getKiCadLayerSet( fig.LayerID ).Seq() )
         {
-            drawCadstarShape( fig.Shape, layer, getLineThickness( fig.LineCodeID ),
+            drawCadstarShape( fig.Shape, layer, getLineThickness( fig.LineCodeID ), getLineStyle( fig.LineCodeID ),
                               wxString::Format( wxT( "FIGURE %s" ), fig.ID ), m_board, fig.GroupID );
         }
 
@@ -1889,7 +1888,7 @@ void CADSTAR_PCB_ARCHIVE_LOADER::loadDocumentationSymbols()
             for( std::pair<FIGURE_ID, FIGURE> figPair : docSymDefinition.Figures )
             {
                 FIGURE fig = figPair.second;
-                drawCadstarShape( fig.Shape, layer, getLineThickness( fig.LineCodeID ),
+                drawCadstarShape( fig.Shape, layer, getLineThickness( fig.LineCodeID ), getLineStyle( fig.LineCodeID ),
                                   wxString::Format( wxT( "DOCUMENTATION SYMBOL %s, FIGURE %s" ),
                                                     docSymDefinition.ReferenceName,
                                                     fig.ID ),
@@ -2768,23 +2767,19 @@ void CADSTAR_PCB_ARCHIVE_LOADER::drawCadstarText( const TEXT& aCadstarText,
 }
 
 
-void CADSTAR_PCB_ARCHIVE_LOADER::drawCadstarShape( const SHAPE& aCadstarShape,
-                                                   const PCB_LAYER_ID& aKiCadLayer,
-                                                   int aLineThickness,
-                                                   const wxString& aShapeName,
-                                                   BOARD_ITEM_CONTAINER* aContainer,
-                                                   const GROUP_ID& aCadstarGroupID,
-                                                   const VECTOR2I& aMoveVector,
+void CADSTAR_PCB_ARCHIVE_LOADER::drawCadstarShape( const SHAPE& aCadstarShape, const PCB_LAYER_ID& aKiCadLayer,
+                                                   int aLineThickness, LINE_STYLE aLineStyle,
+                                                   const wxString& aShapeName, BOARD_ITEM_CONTAINER* aContainer,
+                                                   const GROUP_ID& aCadstarGroupID, const VECTOR2I& aMoveVector,
                                                    double aRotationAngle, double aScalingFactor,
-                                                   const VECTOR2I& aTransformCentre,
-                                                   bool aMirrorInvert )
+                                                   const VECTOR2I& aTransformCentre, bool aMirrorInvert )
 {
     auto drawAsOutline =
             [&]()
             {
-                drawCadstarVerticesAsShapes( aCadstarShape.Vertices, aKiCadLayer, aLineThickness, aContainer,
-                                             aCadstarGroupID, aMoveVector, aRotationAngle, aScalingFactor,
-                                             aTransformCentre, aMirrorInvert );
+                drawCadstarVerticesAsShapes( aCadstarShape.Vertices, aKiCadLayer, aLineThickness, aLineStyle,
+                                             aContainer, aCadstarGroupID, aMoveVector, aRotationAngle,
+                                             aScalingFactor, aTransformCentre, aMirrorInvert );
                 drawCadstarCutoutsAsShapes( aCadstarShape.Cutouts, aKiCadLayer, aLineThickness, aContainer,
                                             aCadstarGroupID, aMoveVector, aRotationAngle, aScalingFactor,
                                             aTransformCentre, aMirrorInvert );
@@ -2819,7 +2814,7 @@ void CADSTAR_PCB_ARCHIVE_LOADER::drawCadstarShape( const SHAPE& aCadstarShape,
     shapePolys.Fracture();
 
     shape->SetPolyShape( shapePolys );
-    shape->SetStroke( STROKE_PARAMS( aLineThickness, LINE_STYLE::SOLID ) );
+    shape->SetStroke( STROKE_PARAMS( aLineThickness, aLineStyle ) );
     shape->SetLayer( aKiCadLayer );
     aContainer->Add( shape, ADD_MODE::APPEND );
 
@@ -2841,21 +2836,20 @@ void CADSTAR_PCB_ARCHIVE_LOADER::drawCadstarCutoutsAsShapes( const std::vector<C
 {
     for( const CUTOUT& cutout : aCutouts )
     {
-        drawCadstarVerticesAsShapes( cutout.Vertices, aKiCadLayer, aLineThickness, aContainer, aCadstarGroupID,
-                                     aMoveVector, aRotationAngle, aScalingFactor, aTransformCentre, aMirrorInvert );
+        drawCadstarVerticesAsShapes( cutout.Vertices, aKiCadLayer, aLineThickness, LINE_STYLE::SOLID, aContainer,
+                                     aCadstarGroupID, aMoveVector, aRotationAngle, aScalingFactor, aTransformCentre,
+                                     aMirrorInvert );
     }
 }
 
 
 void CADSTAR_PCB_ARCHIVE_LOADER::drawCadstarVerticesAsShapes( const std::vector<VERTEX>& aCadstarVertices,
                                                               const PCB_LAYER_ID& aKiCadLayer,
-                                                              int aLineThickness,
+                                                              int aLineThickness, LINE_STYLE aLineStyle,
                                                               BOARD_ITEM_CONTAINER* aContainer,
                                                               const GROUP_ID& aCadstarGroupID,
-                                                              const VECTOR2I& aMoveVector,
-                                                              double aRotationAngle,
-                                                              double aScalingFactor,
-                                                              const VECTOR2I& aTransformCentre,
+                                                              const VECTOR2I& aMoveVector, double aRotationAngle,
+                                                              double aScalingFactor, const VECTOR2I& aTransformCentre,
                                                               bool aMirrorInvert )
 {
     std::vector<PCB_SHAPE*> shapes = getShapesFromVertices( aCadstarVertices, aContainer, aCadstarGroupID,
@@ -2864,7 +2858,7 @@ void CADSTAR_PCB_ARCHIVE_LOADER::drawCadstarVerticesAsShapes( const std::vector<
 
     for( PCB_SHAPE* shape : shapes )
     {
-        shape->SetStroke( STROKE_PARAMS( aLineThickness, LINE_STYLE::SOLID ) );
+        shape->SetStroke( STROKE_PARAMS( aLineThickness, aLineStyle ) );
         shape->SetLayer( aKiCadLayer );
         shape->SetParent( aContainer );
         aContainer->Add( shape, ADD_MODE::APPEND );
@@ -3438,6 +3432,23 @@ int CADSTAR_PCB_ARCHIVE_LOADER::getLineThickness( const LINECODE_ID& aCadstarLin
              m_board->GetDesignSettings().GetLineThickness( PCB_LAYER_ID::Edge_Cuts ) );
 
     return getKiCadLength( Assignments.Codedefs.LineCodes.at( aCadstarLineCodeID ).Width );
+}
+
+
+LINE_STYLE CADSTAR_PCB_ARCHIVE_LOADER::getLineStyle( const LINECODE_ID& aCadstarLineCodeID )
+{
+    wxCHECK( Assignments.Codedefs.LineCodes.find( aCadstarLineCodeID ) != Assignments.Codedefs.LineCodes.end(),
+             LINE_STYLE::SOLID );
+
+    switch( Assignments.Codedefs.LineCodes.at( aCadstarLineCodeID ).Style )
+    {
+    case LINESTYLE::DASH:       return LINE_STYLE::DASH;
+    case LINESTYLE::DASHDOT:    return LINE_STYLE::DASHDOT;
+    case LINESTYLE::DASHDOTDOT: return LINE_STYLE::DASHDOTDOT;
+    case LINESTYLE::DOT:        return LINE_STYLE::DOT;
+    case LINESTYLE::SOLID:      return LINE_STYLE::SOLID;
+    default:                    return LINE_STYLE::DEFAULT;
+    }
 }
 
 

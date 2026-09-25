@@ -28,8 +28,7 @@ include_directories(
     # symbol_edit_frame.h (white-box tested by the tab regression tests) includes
     # <symbol_tree_pane.h>, which lives under eeschema/widgets.
     ${CMAKE_SOURCE_DIR}/eeschema/widgets
-    # sch_tool_base.h (pulled in by tools/sch_editor_control.h) includes the bare
-    # <symbol_edit_frame.h>, which lives under eeschema/symbol_editor.
+    # Symbol editor white-box tests include <symbol_edit_frame.h>.
     ${CMAKE_SOURCE_DIR}/eeschema/symbol_editor
     # dialog_sim_model.h (white-box tested for issue 23687) includes <dialog_sim_model_base.h>.
     ${CMAKE_SOURCE_DIR}/eeschema/dialogs
@@ -48,6 +47,9 @@ set( QA_EESCHEMA_SRCS
     test_module.cpp
 
     # Base internal units (1=100nm) testing.
+    test_connectivity_export.cpp
+    test_connectivity_engine.cpp
+    test_connectivity_publish.cpp
     test_sch_biu.cpp
     test_diff_canvas_context.cpp
     test_mathplot_layers.cpp
@@ -80,16 +82,29 @@ set( QA_EESCHEMA_SRCS
     erc/test_erc_label_names.cpp
 	erc/test_erc_global_labels.cpp
 	erc/test_erc_no_connect.cpp
+    erc/test_erc_unconnected_pins.cpp
+    erc/test_erc_label_connectivity.cpp
+    erc/test_erc_connectivity_refresh.cpp
+    erc/test_erc_hierarchy_connectivity.cpp
     erc/test_erc_hierarchical_schematics.cpp
     erc/test_erc_label_multiple_wires.cpp
     erc/test_erc_marker_counts.cpp
     erc/test_erc_shared_pin_multiunit.cpp
     erc/test_erc_unconnected_wire_endpoints.cpp
+    erc/test_erc_bus_conflicts.cpp
     erc/test_erc_wire_bus_entry.cpp
     erc/test_erc_ground_pins.cpp
+    erc/test_erc_netclasses.cpp
+    erc/test_erc_field_names.cpp
+    erc/test_erc_footprint_paths.cpp
+    erc/test_erc_pin_map_capture.cpp
+    erc/test_erc_off_grid.cpp
+    erc/test_erc_pin_syntax.cpp
+    erc/test_erc_implicit_power.cpp
     erc/test_erc_bus_member_label_local_pins.cpp
     erc/test_erc_marker_deduplication.cpp
     erc/test_erc_net_chain_pin_to_pin.cpp
+    erc/test_erc_pin_context.cpp
     erc/test_erc_power_pin_marker_location.cpp
     erc/test_erc_lib_symbol_mismatch.cpp
     erc/test_erc_lib_symbol_field_position.cpp
@@ -102,8 +117,20 @@ set( QA_EESCHEMA_SRCS
     test_issue24314_power_flag_designators.cpp
     test_annotation_units_integration.cpp
     test_connectivity_algo.cpp
+    test_connectivity_bus.cpp
+    test_connectivity_facade.cpp
+    test_connectivity_navigation.cpp
+    test_connectivity_pin_name.cpp
+    test_connectivity_claims.cpp
+    test_connectivity_dump.cpp
+    test_connectivity_facts.cpp
+    test_connectivity_text.cpp
+    test_connectivity_reference.cpp
+    test_connectivity_loader.cpp
+    test_connectivity_revision.cpp
     test_bus_migration_gate.cpp
     test_bus_migration_precondition.cpp
+    test_issue15792_bus_breakout_hierarchy.cpp
     test_issue18119_bus_hierarchy.cpp
     test_issue18299_bus_member_rename.cpp
     test_issue23840_bus_group_to_vector.cpp
@@ -145,6 +172,8 @@ set( QA_EESCHEMA_SRCS
     test_issue25209_derived_body_styles.cpp
     test_issue25280_pin_sync_units.cpp
     test_issue25223_rule_area_netclass_stale.cpp
+    test_issue25508_intersheet_refs_recursion.cpp
+    test_issue25469_empty_sheet_pin_name.cpp
     test_issue24360_root_sheetname.cpp
     test_unique_sheet_name.cpp
     test_unique_group_name.cpp
@@ -168,6 +197,7 @@ set( QA_EESCHEMA_SRCS
     test_symbol_import_reconciler.cpp
     test_easyedapro_v3_import.cpp
     test_easyedapro_v3_plugin.cpp
+    test_jumper_groups.cpp
     test_junction_helpers.cpp
     test_junction_place.cpp
     test_issue18346_junction_fixup.cpp
@@ -214,10 +244,12 @@ set( QA_EESCHEMA_SRCS
     test_sch_sheet.cpp
     test_issue24972_sheet_pin_constrain.cpp
     test_sch_sheet_path.cpp
+    test_schematic_root_input.cpp
     test_sch_sheet_list.cpp
     test_sch_symbol.cpp
     test_sch_table.cpp
     test_sch_textbox.cpp
+    test_import_net_map.cpp
     test_schematic.cpp
     test_flat_hierarchy.cpp
     test_multi_top_level_sheets.cpp
@@ -272,7 +304,6 @@ set( QA_EESCHEMA_SRCS
     net_chains/test_net_chain_recalc_refresh.cpp
     net_chains/test_net_chain_synthetic_filter.cpp
     net_chains/test_net_chain_rollback.cpp
-    net_chains/test_net_chain_ordered_nets.cpp
 )
 
 # DipTrace schematic import tests that exercise proprietary reference designs kept outside the

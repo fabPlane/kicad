@@ -206,18 +206,21 @@ bool MULTICHANNEL_TOOL::findComponentsInRuleArea( RULE_AREA*            aRuleAre
 
     wxLogTrace( traceMultichannelTool, wxT( "rule area '%s'" ), aRuleArea->m_zone->GetZoneName() );
 
+    wxString sourceName = aRuleArea->m_zone->GetPlacementAreaSource();
+    sourceName.Replace( wxT( "'" ), wxT( "\\'" ) );
+
     wxString ruleText;
 
     switch( aRuleArea->m_zone->GetPlacementAreaSourceType() )
     {
     case PLACEMENT_SOURCE_T::SHEETNAME:
-        ruleText = wxT( "A.memberOfSheetOrChildren('" ) + aRuleArea->m_zone->GetPlacementAreaSource() + wxT( "')" );
+        ruleText = wxT( "A.memberOfSheetOrChildren('" ) + sourceName + wxT( "')" );
         break;
     case PLACEMENT_SOURCE_T::COMPONENT_CLASS:
-        ruleText = wxT( "A.hasComponentClass('" ) + aRuleArea->m_zone->GetPlacementAreaSource() + wxT( "')" );
+        ruleText = wxT( "A.hasComponentClass('" ) + sourceName + wxT( "')" );
         break;
     case PLACEMENT_SOURCE_T::GROUP_PLACEMENT:
-        ruleText = wxT( "A.memberOfGroup('" ) + aRuleArea->m_zone->GetPlacementAreaSource() + wxT( "')" );
+        ruleText = wxT( "A.memberOfGroup('" ) + sourceName + wxT( "')" );
         break;
     case PLACEMENT_SOURCE_T::DESIGN_BLOCK:
         // For design blocks, handled above outside the rules system
@@ -446,7 +449,7 @@ std::set<FOOTPRINT*> MULTICHANNEL_TOOL::queryComponentsInGroup( const wxString& 
 
     for( PCB_GROUP* group : board()->Groups() )
     {
-        if( group->GetName() == aGroupName )
+        if( group->GetName().Matches( aGroupName ) )
             collectGroupFootprints( group, rv );
     }
 
@@ -460,7 +463,7 @@ std::set<BOARD_ITEM*> MULTICHANNEL_TOOL::queryBoardItemsInGroup( const wxString&
 
     for( PCB_GROUP* group : board()->Groups() )
     {
-        if( group->GetName() != aGroupName )
+        if( !group->GetName().Matches( aGroupName ) )
             continue;
 
         for( EDA_ITEM* item : group->GetItems() )
@@ -985,7 +988,7 @@ int MULTICHANNEL_TOOL::RepeatLayout( const TOOL_EVENT& aEvent, RULE_AREA& aRefAr
     }
 
     if( !aExternalCommit )
-        commit.Push( _( "Repeat layout" ) );
+        commit.Push( _( "Repeat Layout" ) );
 
     return 0;
 }
@@ -1047,7 +1050,7 @@ int MULTICHANNEL_TOOL::RepeatLayout( const TOOL_EVENT& aEvent, ZONE* aRefZone )
         }
     }
 
-    commit.Push( _( "Repeat layout" ) );
+    commit.Push( _( "Repeat Layout" ) );
 
     if( Pgm().IsGUI() )
         frame()->ShowInfoBarMsg( wxString::Format( _( "Copied to %d Rule Areas." ), totalCopied ), true );
@@ -1522,6 +1525,9 @@ bool MULTICHANNEL_TOOL::copyRuleAreaContents( RULE_AREA* aRefArea, RULE_AREA* aT
         // Remove the target's existing generators so the copy replaces them.
         for( PCB_GENERATOR* gen : targetGenerators )
         {
+            if( gen->IsLocked() && !aOpts.m_includeLockedItems )
+                continue;
+
             gen->RunOnChildren(
                     [&]( BOARD_ITEM* child )
                     {
@@ -1533,7 +1539,18 @@ bool MULTICHANNEL_TOOL::copyRuleAreaContents( RULE_AREA* aRefArea, RULE_AREA* aT
 
         for( PCB_GENERATOR* gen : refGenerators )
         {
+            if( gen->IsLocked() && !aOpts.m_includeLockedItems )
+                continue;
+
             PCB_GENERATOR* clone = gen->DeepClone();
+
+            clone->ResetUuid();
+            clone->RunOnChildren(
+                    []( BOARD_ITEM* child )
+                    {
+                        child->ResetUuidDirect();
+                    },
+                    RECURSE_MODE::RECURSE );
 
             clone->ClearFlags();
             clone->Rotate( VECTOR2( 0, 0 ), rot );
@@ -2504,7 +2521,7 @@ int MULTICHANNEL_TOOL::AutogenerateRuleAreas( const TOOL_EVENT& aEvent )
         }
     }
 
-    commit.Push( _( "Auto-generate placement rule areas" ) );
+    commit.Push( _( "Auto-generate Placement Rule Areas" ) );
 
     return true;
 }

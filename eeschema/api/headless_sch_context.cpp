@@ -21,27 +21,29 @@
 #include <api/headless_sch_context.h>
 #include <api/api_undo_sch.h>
 #include <api/sch_api_save.h>
+#include <eeschema_helpers.h>
 #include <project.h>
 #include <schematic.h>
 #include <tool/tool_manager.h>
 #include <kiface_base.h>
 #include <wx/debug.h>
+#include <wx/filename.h>
 
 
-HEADLESS_SCH_CONTEXT::HEADLESS_SCH_CONTEXT( SCHEMATIC* aSchematic, PROJECT* aProject,
+HEADLESS_SCH_CONTEXT::HEADLESS_SCH_CONTEXT( SCHEMATIC** aSchematicSlot, PROJECT* aProject,
                                             KIWAY* aKiway ) :
-        m_schematic( aSchematic ),
+        m_schematicSlot( aSchematicSlot ),
         m_project( aProject ),
         m_kiway( aKiway ),
         m_toolManager( std::make_unique<TOOL_MANAGER>() )
 {
-    wxCHECK( m_schematic, /* void */ );
+    wxCHECK( m_schematicSlot && *m_schematicSlot, /* void */ );
     wxCHECK( m_project, /* void */ );
 
-    m_toolManager->SetEnvironment( m_schematic, nullptr, nullptr,
+    m_toolManager->SetEnvironment( *m_schematicSlot, nullptr, nullptr,
                                    Kiface().KifaceSettings(), nullptr );
 
-    m_undoStack = MakeSchematicUndoStack( m_schematic, m_toolManager.get() );
+    m_undoStack = MakeSchematicUndoStack( *m_schematicSlot, m_toolManager.get() );
     m_toolManager->SetUndoRedoSink( m_undoStack.get() );
 }
 
@@ -56,7 +58,7 @@ HEADLESS_SCH_CONTEXT::~HEADLESS_SCH_CONTEXT()
 
 SCHEMATIC* HEADLESS_SCH_CONTEXT::GetSchematic() const
 {
-    return m_schematic;
+    return *m_schematicSlot;
 }
 
 
@@ -75,22 +77,55 @@ TOOL_MANAGER* HEADLESS_SCH_CONTEXT::GetToolManager() const
 
 wxString HEADLESS_SCH_CONTEXT::GetCurrentFileName() const
 {
-    if( !m_schematic )
+    SCHEMATIC* schematic = *m_schematicSlot;
+
+    if( !schematic )
         return wxEmptyString;
 
-    return m_schematic->GetFileName();
+    return schematic->GetFileName();
 }
 
 
 bool HEADLESS_SCH_CONTEXT::SaveSchematic()
 {
-    wxCHECK( m_schematic && m_project, false );
-    return SCH_API_SAVE::SaveSchematic( *m_schematic, *m_project );
+    wxCHECK( *m_schematicSlot && m_project, false );
+    return SCH_API_SAVE::SaveSchematic( **m_schematicSlot, *m_project );
 }
 
 
 bool HEADLESS_SCH_CONTEXT::SaveSchematicCopy( const wxString& aFileName, bool aCreateProject )
 {
-    wxCHECK( m_schematic && m_project, false );
-    return SCH_API_SAVE::SaveSchematicCopy( *m_schematic, *m_project, aFileName, aCreateProject );
+    wxCHECK( *m_schematicSlot && m_project, false );
+    return SCH_API_SAVE::SaveSchematicCopy( **m_schematicSlot, *m_project, aFileName, aCreateProject );
+}
+
+
+bool HEADLESS_SCH_CONTEXT::RevertToSaved()
+{
+    SCHEMATIC* schematic = *m_schematicSlot;
+    wxCHECK( schematic && m_project, false );
+
+    wxString fileName = schematic->GetFileName();
+
+    if( fileName.IsEmpty() || !wxFileExists( fileName ) )
+        return false;
+
+    SCHEMATIC* reloaded = EESCHEMA_HELPERS::LoadSchematic( fileName, false, false, m_project );
+
+    if( !reloaded )
+        return false;
+
+    // The undo history holds copies of the old schematic's items and points at it: drop it
+    // before the schematic goes, and start a fresh one for the reloaded file
+    m_toolManager->SetUndoRedoSink( nullptr );
+    m_undoStack.reset();
+
+    delete schematic;
+    *m_schematicSlot = reloaded;
+    m_toolManager->SetEnvironment( reloaded, nullptr, nullptr, Kiface().KifaceSettings(), nullptr );
+
+    m_undoStack = MakeSchematicUndoStack( reloaded, m_toolManager.get() );
+    m_toolManager->SetUndoRedoSink( m_undoStack.get() );
+
+    return true;
 }

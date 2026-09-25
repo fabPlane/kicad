@@ -35,6 +35,7 @@
 #include <api/common/types/base_types.pb.h>
 
 class API_HANDLER_LIBRARY;
+class API_HANDLER_LIBRARIES;
 class KICAD_API_SERVER;
 class PROJECT;
 
@@ -44,8 +45,8 @@ class PROJECT;
  *
  * A KICAD_API_SERVER only routes requests to handlers; something has to own the notion of "the
  * open project and its documents" and answer the API_HANDLER_COMMON lifecycle commands
- * (OpenDocument, CloseDocument, CloseAllDocuments, NewProject, NewDocument, GetProjectInfo,
- * and the GetAppSettings kiface check).  In the GUI that is the project manager frame; headless
+ * (OpenDocument, CreateDocument, CloseDocument, CloseAllDocuments, NewProject, NewDocument,
+ * GetProjectInfo, and the GetAppSettings kiface check).  In the GUI that is the project manager frame; headless
  * it is this class, which drives the pcbnew and eeschema kifaces through
  * KIWAY::ProcessApiOpenDocument / ProcessApiCloseDocument.
  *
@@ -114,6 +115,11 @@ private:
 
     HANDLER_RESULT<commands::OpenDocumentResponse> openDocument( const commands::OpenDocument& aRequest );
 
+    HANDLER_RESULT<commands::OpenDocumentResponse> createDocument( const commands::CreateDocument& aRequest );
+
+    /// Whether an open board or schematic has unsaved changes (asked through the server)
+    bool documentModified( const OPEN_DOCUMENT& aDoc, const PROJECT& aProject );
+
     HANDLER_RESULT<Empty> closeDocument( const commands::CloseDocument& aRequest );
 
     HANDLER_RESULT<Empty> closeAllDocuments( const commands::CloseAllDocuments& aRequest );
@@ -135,6 +141,10 @@ private:
     /// The library commands are served by the pcbnew and eeschema kifaces for the open project;
     /// the design block tables have no kiface of their own and are served (tables only) here.
     std::unique_ptr<API_HANDLER_LIBRARY> m_designBlockLibraries;
+
+    /// Upstream's library status/query commands for design blocks.  It also serves
+    /// LoadAllLibraries, which loads the pcbnew and eeschema kifaces on demand.
+    std::unique_ptr<API_HANDLER_LIBRARIES> m_designBlockLibrariesHandler;
 
     std::optional<wxFileName> m_openProjectPath;
 

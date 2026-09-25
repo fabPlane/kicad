@@ -215,20 +215,9 @@ public:
      *
      * @param aFields are the fields to set in this symbol.
      */
-    void SetFields( const std::vector<SCH_FIELD>& aFields )
-    {
-        m_fields = aFields;     // vector copying, length is changed possibly
-    }
-
-    void AddFields( const std::vector<SCH_FIELD>& aFields )
-    {
-        m_fields.insert( m_fields.end(), aFields.begin(), aFields.end() );
-    }
-
-    void AddField( const SCH_FIELD& aField )
-    {
-        m_fields.push_back( aField );
-    }
+    void SetFields( const std::vector<SCH_FIELD>& aFields );
+    void AddFields( const std::vector<SCH_FIELD>& aFields );
+    void AddField( const SCH_FIELD& aField );
 
     /**
      * Increment the label text if it ends with a number.
@@ -270,15 +259,12 @@ public:
      */
     virtual bool ResolveTextVar( const SCH_SHEET_PATH* aPath, wxString* token, int aDepth ) const;
 
-    wxString GetShownText( const SCH_SHEET_PATH* aPath, bool aAllowExtraText,
-                           int aDepth = 0 ) const override;
+    wxString GetShownText( const SCH_SHEET_PATH* aPath, RESOLUTION_CONTEXT aContext, int aDepth = 0 ) const override;
 
-    wxString GetShownText( bool aAllowExtraText, int aDepth = 0 ) const override
+    wxString GetShownText( RESOLUTION_CONTEXT aContext, int aDepth = 0 ) const override
     {
-        SCHEMATIC* schematic = Schematic();
-
-        if( schematic )
-            return GetShownText( &schematic->CurrentSheet(), aAllowExtraText, aDepth );
+        if( SCHEMATIC* schematic = Schematic() )
+            return GetShownText( &schematic->CurrentSheet(), aContext, aDepth );
         else
             return GetText();
     }

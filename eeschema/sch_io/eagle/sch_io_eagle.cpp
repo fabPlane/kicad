@@ -365,7 +365,7 @@ SCH_SHEET* SCH_IO_EAGLE::LoadSchematicFile( const wxString& aFileName, SCHEMATIC
         m_progressReporter->Report( wxString::Format( _( "Loading %s..." ), aFileName ) );
 
         if( !m_progressReporter->KeepRefreshing() )
-            THROW_IO_ERROR( _( "Open canceled by user." ) );
+            THROW_IO_CANCELLED();
     }
 
     // Load the document
@@ -569,7 +569,7 @@ void SCH_IO_EAGLE::ensureLoadedLibrary( const wxString& aLibraryPath )
         m_progressReporter->Report( wxString::Format( _( "Loading %s..." ), aLibraryPath ) );
 
         if( !m_progressReporter->KeepRefreshing() )
-            THROW_IO_ERROR( ( "Open canceled by user." ) );
+            THROW_IO_CANCELLED();
     }
 
     // Load the document
@@ -2416,22 +2416,39 @@ EAGLE_LIBRARY* SCH_IO_EAGLE::loadLibrary( const ELIBRARY* aLibrary, EAGLE_LIBRAR
                     std::map<std::string, UTF8> properties;
                     properties.emplace( SCH_IO_KICAD_SEXPR::PropBuffering, wxEmptyString );
 
-                    LIB_SYMBOL* parentSymbol = new LIB_SYMBOL( *libSymbol );
-                    m_pi->SaveSymbol( getLibFileName().GetFullPath(), parentSymbol, &properties );
 
-                    for( std::unique_ptr<LIB_SYMBOL>& symbol : derivedSymbols )
+                    std::unique_ptr<LIB_SYMBOL> parentSymbol = std::make_unique<LIB_SYMBOL>( *libSymbol );
+
+                    m_pi->SaveSymbol( getLibFileName().GetFullPath(), std::move( parentSymbol ),
+                                      &properties );
+
+                    // The plugin cache owns the parent symbol after the save, we cannot use it
+                    // safely after handing it to the plugin.
+                    // Borrow the parent symbol from the plugin cache.
+                    LIB_SYMBOL* parent = m_pi->LoadSymbol( getLibFileName().GetFullPath(), libSymbol->GetName() );
+
+                    if( !parent )
                     {
-                        if( m_pi->LoadSymbol( getLibFileName().GetFullPath(), symbol->GetName() ) )
+                        Report( wxString::Format( _( "Could not reload saved symbol '%s'" ),
+                                                  UnescapeString( libSymbol->GetName() ) ),
+                                RPT_SEVERITY_ERROR );
+                    }
+                    else
+                    {
+                        for( std::unique_ptr<LIB_SYMBOL>& symbol : derivedSymbols )
                         {
-                            wxString tmp = aEagleLibrary->name + wxT( "_" ) + symbol->GetName();
-                            tmp = EscapeString( tmp, CTX_LIBID );
-                            symbol->SetName( tmp );
+                            if( m_pi->LoadSymbol( getLibFileName().GetFullPath(), symbol->GetName() ) )
+                            {
+                                wxString tmp = aEagleLibrary->name + wxT( "_" ) + symbol->GetName();
+                                tmp = EscapeString( tmp, CTX_LIBID );
+                                symbol->SetName( tmp );
+                            }
+
+                            std::unique_ptr<LIB_SYMBOL> derivedSymbol = std::make_unique<LIB_SYMBOL>( *symbol );
+
+                            derivedSymbol->SetParent( parent );
+                            m_pi->SaveSymbol( getLibFileName().GetFullPath(), std::move( derivedSymbol ), &properties );
                         }
-
-                        LIB_SYMBOL* derivedSymbol = new LIB_SYMBOL( *symbol );
-
-                        derivedSymbol->SetParent( parentSymbol );
-                        m_pi->SaveSymbol( getLibFileName().GetFullPath(), derivedSymbol, &properties );
                     }
                 }
                 catch(...)

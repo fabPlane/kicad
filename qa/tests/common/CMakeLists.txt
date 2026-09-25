@@ -98,6 +98,7 @@ set( QA_COMMON_SRCS
     test_reset_print_to_file.cpp
     test_wx_data_view_hyperlink_renderer.cpp
     test_grid_helper.cpp
+    test_priority_thread_pool_task.cpp
     test_snapping_options.cpp
     test_string_utils.cpp
     test_richio.cpp
@@ -116,6 +117,7 @@ set( QA_COMMON_SRCS
     text_eval/test_text_eval_render.cpp
     test_title_block.cpp
     test_track_width_calculations.cpp
+    test_pth_hole_size.cpp
     test_types.cpp
     test_utf8.cpp
     test_wildcards_and_files_ext.cpp
@@ -174,6 +176,7 @@ set( QA_COMMON_SRCS
     test_project_template.cpp
 
     # Project file tests
+    test_import_proj_properties.cpp
     test_project_file.cpp
     test_settings_manager.cpp
     test_nested_settings.cpp
@@ -256,7 +259,7 @@ include_directories(
 )
 
 set_source_files_properties( test_remote_provider_metadata.cpp test_remote_provider_client.cpp
-        test_translation_format_strings.cpp test_json_schema_validator.cpp PROPERTIES
+        test_translation_format_strings.cpp test_json_schema_validator.cpp test_svg_import.cpp PROPERTIES
         COMPILE_DEFINITIONS "QA_SRC_ROOT=(\"${CMAKE_SOURCE_DIR}\")"
         )
 

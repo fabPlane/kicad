@@ -49,12 +49,14 @@ enum MAIL_T
     MAIL_SCH_REFRESH,       // Tell the schematic editor to refresh the display.
     MAIL_ADD_LOCAL_LIB,     // Add a local library to the project library table
     MAIL_LIB_EDIT,
-    MAIL_FP_EDIT,
+    MAIL_FP_EDIT,               // SCH->FP_EDITOR open the footprint with the given file path
+    MAIL_FP_EDIT_LIBID,         // SCH->FP_EDITOR open the footprint with this LIB_ID
     MAIL_RELOAD_LIB,            // Reload Library List if one was added
     MAIL_RELOAD_PLUGINS,        // Reload python plugins
     MAIL_REFRESH_SYMBOL,        // Refresh symbol in symbol viewer
     MAIL_SCH_NAVIGATE_TO_SHEET, // Navigate to sheet by filename if in hierarchy
-    MAIL_SCH_SHEET_CHANGED      // Schematic editor current sheet changed
+    MAIL_SCH_SHEET_CHANGED,     // Schematic editor current sheet changed
+    MAIL_CALC_SHOW,             // Show the PCB calculator window
 };
 
 /**

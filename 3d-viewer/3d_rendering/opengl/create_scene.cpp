@@ -742,38 +742,45 @@ void RENDER_3D_OPENGL::renderExtrudedBodies()
         appendRenderTriangleList( layerTri );
         assignRenderMap( m_extrudedBodyLists, fp, renderList );
 
-        // Create metallic pin extrusions for THT pads
-        // Start from opposite board side to standoff height
+        // Create pin extrusions for pad holes
+        // The pins move with the body, so the Z offset shifts them whole
         if( standoff3d > 0.0f )
         {
             SHAPE_POLY_SET pinPoly;
+            SHAPE_POLY_SET pegPoly;
 
-            if( GetExtrusionPinOutline( fp, pinPoly ) )
+            if( GetExtrusionPinOutlines( fp, pinPoly, pegPoly ) )
             {
-                ApplyExtrusionTransform( pinPoly, body, fpPos );
-
                 float oppositeSurfaceZ = m_boardAdapter.GetFootprintZPos( !isBack );
                 float protrusion = 1.0f * pcbIUScale.IU_PER_MM * biuTo3d;
                 float pinZBot, pinZTop;
 
                 if( !isBack )
                 {
-                    pinZBot = oppositeSurfaceZ - protrusion;
-                    pinZTop = boardSurfaceZ + standoff3d;
+                    pinZBot = oppositeSurfaceZ - protrusion + zOffset3d;
+                    pinZTop = boardSurfaceZ + standoff3d + zOffset3d;
                 }
                 else
                 {
-                    pinZTop = oppositeSurfaceZ + protrusion;
-                    pinZBot = boardSurfaceZ - standoff3d;
+                    pinZTop = oppositeSurfaceZ + protrusion - zOffset3d;
+                    pinZBot = boardSurfaceZ - standoff3d - zOffset3d;
                 }
 
-                CONTAINER_2D pinTriContainer;
-                ConvertPolygonToTriangles( pinPoly, pinTriContainer, biuTo3d, *fp );
-
-                const LIST_OBJECT2D& pinTriList = pinTriContainer.GetList();
-
-                if( !pinTriList.empty() )
+                auto buildPinList = [&]( SHAPE_POLY_SET& aPoly, auto& aDstMap )
                 {
+                    if( aPoly.OutlineCount() == 0 )
+                        return;
+
+                    ApplyExtrusionTransform( aPoly, body, fpPos );
+
+                    CONTAINER_2D pinTriContainer;
+                    ConvertPolygonToTriangles( aPoly, pinTriContainer, biuTo3d, *fp );
+
+                    const LIST_OBJECT2D& pinTriList = pinTriContainer.GetList();
+
+                    if( pinTriList.empty() )
+                        return;
+
                     auto pinLayerTri = std::make_shared<TRIANGLE_DISPLAY_LIST>( pinTriList.size() );
 
                     for( const OBJECT_2D* obj : pinTriList )
@@ -783,15 +790,18 @@ void RENDER_3D_OPENGL::renderExtrudedBodies()
                                                   pinZBot );
                     }
 
-                    pinLayerTri->AddToMiddleContours( pinPoly, pinZBot, pinZTop, biuTo3d, false );
+                    pinLayerTri->AddToMiddleContours( aPoly, pinZBot, pinZTop, biuTo3d, false );
 
                     std::shared_ptr<OPENGL_RENDER_LIST_DEFERRED> pinRenderList =
                             std::make_shared<OPENGL_RENDER_LIST_DEFERRED>( pinLayerTri, m_circleTexture, pinZTop,
                                                                            pinZBot );
 
                     appendRenderTriangleList( pinLayerTri );
-                    assignRenderMap( m_extrudedPadLists, fp, pinRenderList );
-                }
+                    assignRenderMap( aDstMap, fp, pinRenderList );
+                };
+
+                buildPinList( pinPoly, m_extrudedPadLists );
+                buildPinList( pegPoly, m_extrudedPegLists );
             }
         }
     }
@@ -1132,7 +1142,10 @@ void RENDER_3D_OPENGL::bgWorker( std::stop_token aStop )
     // (m_accelerator), which is not updated by the OpenGL scene build above.
     // Rebuild it here on the same worker thread once board layers are ready.
     if( !aStop.stop_requested() && m_canvas )
-        m_canvas->ReloadRaytracingForHitTesting( aStop );
+    {
+        m_hitTestDirty = true;
+        runHitTestRebuild( aStop );
+    }
 
     if( aStop.stop_requested() )
         return;
@@ -1151,6 +1164,9 @@ void RENDER_3D_OPENGL::startBgWorker()
 {
     wxLogTrace( m_logTrace, wxT( "RENDER_3D_OPENGL::startBgWorker" ) );
 
+    // Claim the flag before the thread runs so a rebuild cannot displace the load.
+    m_bgWorkerBusy = true;
+
     m_bgWorkerThread = std::jthread(
             [this]( std::stop_token aStopToken )
             {
@@ -1158,7 +1174,50 @@ void RENDER_3D_OPENGL::startBgWorker()
                 BS::this_thread::set_os_thread_priority( BS::os_thread_priority::below_normal );
 
                 bgWorker( aStopToken );
+
+                m_bgWorkerBusy = false;
             } );
+}
+
+
+void RENDER_3D_OPENGL::RebuildHitTestAsync()
+{
+    m_hitTestDirty = true;
+
+    // A running worker picks the request up before it releases the flag.
+    if( m_bgWorkerBusy.exchange( true ) )
+        return;
+
+    m_bgWorkerThread = std::jthread(
+            [this]( std::stop_token aStop )
+            {
+                BS::this_thread::set_os_thread_priority( BS::os_thread_priority::below_normal );
+
+                runHitTestRebuild( aStop );
+
+                m_bgWorkerBusy = false;
+            } );
+}
+
+
+void RENDER_3D_OPENGL::runHitTestRebuild( std::stop_token aStop )
+{
+    for( ;; )
+    {
+        while( m_hitTestDirty.exchange( false ) )
+        {
+            if( aStop.stop_requested() || !m_canvas )
+                return;
+
+            m_canvas->ReloadRaytracingForHitTesting( aStop );
+        }
+
+        m_bgWorkerBusy = false;
+
+        // Pick up a request that raced the release above.
+        if( !m_hitTestDirty || m_bgWorkerBusy.exchange( true ) )
+            return;
+    }
 }
 
 
@@ -1174,6 +1233,8 @@ void RENDER_3D_OPENGL::StopBgWorker()
         m_bgWorkerThread.request_stop();
         m_bgWorkerThread.join();
     }
+
+    m_bgWorkerBusy = false;
 }
 
 

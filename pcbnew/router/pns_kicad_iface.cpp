@@ -65,6 +65,7 @@
 #include <wx/log.h>
 
 #include <memory>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <advanced_config.h>
@@ -82,6 +83,8 @@
 #include "pns_node.h"
 #include "pns_router.h"
 #include "pns_debug_decorator.h"
+#include "pns_diff_pair.h"
+#include "pns_topology.h"
 #include "router_preview_item.h"
 
 typedef VECTOR2I::extended_type ecoord;
@@ -796,21 +799,17 @@ void PNS_PCBNEW_RULE_RESOLVER::ClearCacheForItems( std::vector<const PNS::ITEM*>
 
     std::unordered_set<const PNS::ITEM*> dirtyItems( aItems.begin(), aItems.end() );
 
-    for( auto it = m_clearanceCache.begin(); it != m_clearanceCache.end(); )
-    {
-        if( dirtyItems.contains( it->first.A ) || dirtyItems.contains( it->first.B ) )
-            it = m_clearanceCache.erase( it );
-        else
-            ++it;
-    }
+    std::erase_if( m_clearanceCache,
+                   [&dirtyItems]( const auto& entry )
+                   {
+                       return dirtyItems.contains( entry.first.A ) || dirtyItems.contains( entry.first.B );
+                   } );
 
-    for( auto it = m_hullCache.begin(); it != m_hullCache.end(); )
-    {
-        if( dirtyItems.contains( it->first.item ) )
-            it = m_hullCache.erase( it );
-        else
-            ++it;
-    }
+    std::erase_if( m_hullCache,
+                   [&dirtyItems]( const auto& entry )
+                   {
+                       return dirtyItems.contains( entry.first.item );
+                   } );
 }
 
 
@@ -983,12 +982,27 @@ int PNS_PCBNEW_RULE_RESOLVER::Clearance( const PNS::ITEM* aA, const PNS::ITEM* a
 }
 
 
-bool PNS_KICAD_IFACE_BASE::inheritTrackWidth( PNS::ITEM* aItem, int* aInheritedWidth,
-                                              const VECTOR2I& aStartPosition )
+bool PNS_KICAD_IFACE_BASE::inheritTrackWidthAndDpGap( PNS::ITEM* aItem, const VECTOR2I& aStartPosition, int* aInheritedWidth, int *aInheritedGap )
 {
     VECTOR2I p;
 
     assert( aItem->Owner() != nullptr );
+
+    PNS::NET_HANDLE coupledNet = GetRuleResolver()->DpCoupledNet( aItem->Net() );
+
+    if( coupledNet && aInheritedGap )
+    {
+        PNS::TOPOLOGY  topo( m_world );
+        PNS::DIFF_PAIR dp;
+        if( topo.AssembleDiffPair( static_cast<PNS::SEGMENT*>( aItem ), dp ) )
+        {
+            *aInheritedGap = dp.GuessMostLikelyGap();
+        }
+        else
+        {
+            return false;
+        }
+    }
 
     auto tryGetTrackWidth =
             []( PNS::ITEM* aPnsItem ) -> int
@@ -1149,7 +1163,7 @@ bool PNS_KICAD_IFACE_BASE::ImportSizes( PNS::SIZES_SETTINGS& aSizes, PNS::ITEM* 
 
     if( bds.m_UseConnectedTrackWidth && !bds.m_TempOverrideTrackWidth && aStartItem != nullptr )
     {
-        found = inheritTrackWidth( aStartItem, &trackWidth, startPosInt );
+        found = inheritTrackWidthAndDpGap( aStartItem, aStartPosition, &trackWidth, nullptr );
 
         if( found )
             aSizes.SetWidthSource( _( "existing track" ) );
@@ -1232,8 +1246,8 @@ bool PNS_KICAD_IFACE_BASE::ImportSizes( PNS::SIZES_SETTINGS& aSizes, PNS::ITEM* 
 
     // First try to pick up diff pair width from starting track, if enabled
     if( bds.m_UseConnectedTrackWidth && aStartItem )
-        found = inheritTrackWidth( aStartItem, &diffPairWidth, startPosInt );
-
+        found = inheritTrackWidthAndDpGap( aStartItem, aStartPosition, &diffPairWidth, &diffPairGap );
+ 
     // Next, pick up gap from netclass, and width also if we didn't get a starting width above
     if( bds.UseNetClassDiffPair() && aStartItem )
     {
@@ -1893,15 +1907,23 @@ std::unique_ptr<PNS::VIA> PNS_KICAD_IFACE_BASE::syncVia( PCB_VIA* aVia )
 
 bool PNS_KICAD_IFACE_BASE::syncZone( PNS::NODE* aWorld, ZONE* aZone, SHAPE_POLY_SET* aBoardOutline )
 {
-    static wxString msg;
-    SHAPE_POLY_SET* poly;
+    // If this ever becomes multi-threaded, we'll need to lose the 'static's.  But for now they
+    // will help performance a tiny bit.
+    static wxString       msg;
+    static SHAPE_POLY_SET polyStorage;
+    SHAPE_POLY_SET*       poly = &polyStorage;
 
     if( !aZone->GetIsRuleArea() || !aZone->HasKeepoutParametersSet() )
         return false;
 
     LSET layers = aZone->GetLayerSet();
 
-    poly = aZone->Outline();
+    // GetBoardOutline() is expensive.  Only use it in the router where we have to.
+    if( aZone->GetParentFootprint() )
+        polyStorage = aZone->GetBoardOutline();
+    else
+        poly = aZone->Outline();
+
     poly->CacheTriangulation();
 
     if( !poly->IsTriangulationUpToDate() )
@@ -2315,6 +2337,7 @@ void PNS_KICAD_IFACE_BASE::SyncWorld( PNS::NODE *aWorld )
             break;
 
         case PCB_TABLE_T:
+        case PCB_DRILL_CHART_T:
             syncTextItem( aWorld, static_cast<PCB_TABLE*>( gitem ), gitem->GetLayer() );
             break;
 
@@ -2332,7 +2355,7 @@ void PNS_KICAD_IFACE_BASE::SyncWorld( PNS::NODE *aWorld )
 
         case PCB_REFERENCE_IMAGE_T:     // ignore
         case PCB_TARGET_T:
-        case PCB_GRIDITEM_T:
+        case PCB_GRID_ITEM_T:
             break;
 
         default:

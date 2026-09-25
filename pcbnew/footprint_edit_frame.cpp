@@ -40,6 +40,7 @@
 #include <bitmaps.h>
 #include <api/api_handler_common.h>
 #include <api/api_handler_footprint.h>
+#include <api/api_handler_libraries.h>
 #include <api/api_server.h>
 #include <board.h>
 #include <project/net_settings.h>
@@ -366,6 +367,9 @@ FOOTPRINT_EDIT_FRAME::FOOTPRINT_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     {
         m_apiHandlerCommon = std::make_unique<API_HANDLER_COMMON>();
         Pgm().GetApiServer().RegisterHandler( m_apiHandlerCommon.get() );
+        m_apiHandlerFpLibs = std::make_unique<API_HANDLER_LIBRARIES>(
+                LIBRARY_TABLE_TYPE::DESIGN_BLOCK );
+        Pgm().GetApiServer().RegisterHandler( m_apiHandlerFpLibs.get() );
     }
 
     GetToolManager()->PostAction( ACTIONS::zoomFitScreen );
@@ -787,10 +791,7 @@ void FOOTPRINT_EDIT_FRAME::updateInfoBar()
                 wxArrayString msgs;
                 int           infobarFlags = wxICON_INFORMATION;
                 FOOTPRINT*    footprint = GetBoard() ? GetBoard()->GetFirstFootprint() : nullptr;
-                wxString      lib;
-
-                if( footprint )
-                    lib = UnescapeString( footprint->GetFPID().GetLibNickname() );
+                wxString      lib = footprint ? footprint->GetFPID().GetLibNickname() : UTF8();
 
                 if( IsCurrentFPFromBoard() )
                 {
@@ -1201,10 +1202,7 @@ FOOTPRINT_EDITOR_TAB_CONTEXT* FOOTPRINT_EDIT_FRAME::findOrCreateFootprintInstanc
 
     // Re-editing the same placed footprint focuses the live tab rather than duplicating it.
     if( int existing = m_tabsPanel->FindTab( key ); existing >= 0 )
-    {
-        m_tabsPanel->AddTab( key, reference + wxS( " " ) + _( "[from board]" ), false );
         return m_tabContexts[existing].get();
-    }
 
     std::unique_ptr<BOARD> board = makeFpHolderBoard();
     board->GetDesignSettings().m_DRCSeverities[DRCE_MISSING_COURTYARD] = RPT_SEVERITY_WARNING;
@@ -1268,32 +1266,30 @@ FOOTPRINT_EDITOR_TAB_CONTEXT* FOOTPRINT_EDIT_FRAME::findOrCreateFootprintInstanc
 
     // Index-aligned with the panel model; the context is at its final index before AddTab fires
     // onActivateTab.
-    m_tabsPanel->AddTab( key, reference + wxS( " " ) + _( "[from board]" ), false );
+    m_tabsPanel->AddTab( key, m_tabContexts.back()->GetDisplayName(), false );
 
     return raw;
 }
 
 
-FOOTPRINT_EDITOR_TAB_CONTEXT* FOOTPRINT_EDIT_FRAME::createUnsavedFootprintTab()
+FOOTPRINT_EDITOR_TAB_CONTEXT* FOOTPRINT_EDIT_FRAME::CreateUnsavedFootprintTab()
 {
     std::unique_ptr<FOOTPRINT_EDITOR_TAB_CONTEXT> ctx =
             FOOTPRINT_EDITOR_TAB_CONTEXT::MakeUnsaved( makeFpHolderBoard() );
 
     const wxString                key = ctx->GetTabKey();
-    const wxString                label = ctx->GetDisplayName();
     FOOTPRINT_EDITOR_TAB_CONTEXT* raw = ctx.get();
 
     m_tabContexts.push_back( std::move( ctx ) );
 
     // At its final index before AddTab fires onActivateTab, which makes the new tab active
-    m_tabsPanel->AddTab( key, label, false );
+    m_tabsPanel->AddTab( key, m_tabContexts.back()->GetDisplayName(), false );
 
     return raw;
 }
 
 
-void FOOTPRINT_EDIT_FRAME::freeUndoRedoCommandsWithItems( UNDO_REDO_CONTAINER& aUndo,
-                                                          UNDO_REDO_CONTAINER& aRedo )
+void FOOTPRINT_EDIT_FRAME::freeUndoRedoCommandsWithItems( UNDO_REDO_CONTAINER& aUndo, UNDO_REDO_CONTAINER& aRedo )
 {
     // Free the UR_TRANSIENT board items each command owns and the command wrappers. The frame's own
     // ClearUndoRedoList() and the bare container destructor delete only the wrappers and leak the
@@ -1333,8 +1329,7 @@ bool FOOTPRINT_EDIT_FRAME::promptAndCloseFootprintTab( int aIdx )
     if( ctx->IsModified() && !m_silentFootprintTabClose )
     {
         // Prompt while the closing tab is still fully live so a save reads its real board.
-        wxString msg = wxString::Format( _( "Save changes to '%s' before closing?" ),
-                                         ctx->GetDisplayName() );
+        wxString msg = wxString::Format( _( "Save changes to '%s' before closing?" ), ctx->GetDisplayName( true ) );
 
         KIDIALOG dlg( this, msg, _( "Confirmation" ), wxYES_NO | wxCANCEL | wxICON_WARNING );
         dlg.SetYesNoCancelLabels( _( "Save" ), _( "Discard Changes" ), _( "Cancel" ) );
@@ -1365,9 +1360,12 @@ bool FOOTPRINT_EDIT_FRAME::promptAndCloseFootprintTab( int aIdx )
             break;
         }
 
-        case wxID_NO:     break;
+        case wxID_NO:
+            break;
+
         default:
-        case wxID_CANCEL: return false;
+        case wxID_CANCEL:
+            return false;
         }
     }
 
@@ -1445,6 +1443,11 @@ void FOOTPRINT_EDIT_FRAME::RenameFootprintTab( const LIB_ID& aOldId, const LIB_I
 
         return;
     }
+
+    // A board footprint's tab is named from the board instance's reference, not any properties of the
+    // edited copy.
+    if( m_activeTab && m_activeTab->IsFromBoard() )
+        return;
 
     const wxString oldLib = aOldId.GetLibNickname();
     const wxString oldName = aOldId.GetLibItemName();
@@ -1528,11 +1531,11 @@ void FOOTPRINT_EDIT_FRAME::RefreshLibraryFootprintTab( const FOOTPRINT& aFootpri
 }
 
 
-bool FOOTPRINT_EDIT_FRAME::hasDirtyInactiveTransientTabs() const
+bool FOOTPRINT_EDIT_FRAME::hasDirtyInactiveTabs() const
 {
     for( const std::unique_ptr<FOOTPRINT_EDITOR_TAB_CONTEXT>& ctx : m_tabContexts )
     {
-        if( ctx.get() != m_activeTab && ctx->IsTransient() && ctx->IsModified() )
+        if( ctx.get() != m_activeTab && ctx->IsModified() )
             return true;
     }
 
@@ -1540,53 +1543,35 @@ bool FOOTPRINT_EDIT_FRAME::hasDirtyInactiveTransientTabs() const
 }
 
 
-bool FOOTPRINT_EDIT_FRAME::promptToSaveInactiveTransientTabs()
+bool FOOTPRINT_EDIT_FRAME::HandleUnsavedChanges( bool aFromBoardOnly )
 {
-    // Collect first; saving activates a tab, which mutates m_activeTab and the live board pointer.
-    std::vector<FOOTPRINT_EDITOR_TAB_CONTEXT*> dirty;
-
-    for( const std::unique_ptr<FOOTPRINT_EDITOR_TAB_CONTEXT>& ctx : m_tabContexts )
+    // Active tab always goes first
+    for( int ii = 0; ii < (int) m_tabContexts.size(); ++ii )
     {
-        // The active tab and the persisted library tabs are handled by the main canCloseWindow check
-        if( ctx.get() != m_activeTab && ctx->IsTransient() && ctx->IsModified() )
-            dirty.push_back( ctx.get() );
-    }
+        if( aFromBoardOnly && !m_tabContexts[ii]->IsFromBoard() )
+            continue;
 
-    // Saving activates each dirty tab in turn; restore the tab the user was on so a vetoed close leaves
-    // the editor where it was and a successful close persists the real active tab, not a discarded one.
-    FOOTPRINT_EDITOR_TAB_CONTEXT* originalActive = m_activeTab;
-
-    for( FOOTPRINT_EDITOR_TAB_CONTEXT* ctx : dirty )
-    {
-        wxString msg = wxString::Format( _( "Save changes to '%s' before closing?" ), ctx->GetDisplayName() );
-        KIDIALOG dlg( this, msg, _( "Confirmation" ), wxYES_NO | wxCANCEL | wxICON_WARNING );
-        dlg.SetYesNoCancelLabels( _( "Save" ), _( "Discard Changes" ), _( "Cancel" ) );
-
-        const int answer = dlg.ShowModal();
-
-        if( answer == wxID_YES )
+        if( m_tabContexts[ii].get() == m_activeTab )
         {
-            // SaveFootprint reads the active tab's load baseline and uuid remap, so make this tab
-            // active first; it does not clear the dirty flag, so ClearModify below does it or a
-            // vetoed close would re-prompt an already-saved tab.
-            activateFootprintTab( ctx );
+            wxSafeYield( this, true );      // Allow frame to come to front before showing "Save Changes?"
 
-            if( !SaveFootprint( ctx->GetBoard()->GetFirstFootprint() ) )
-            {
-                activateFootprintTab( originalActive );
+            if( !m_tabsPanel->CloseTab( ii ) )
                 return false;
-            }
-
-            ClearModify();
-        }
-        else if( answer != wxID_NO )
-        {
-            activateFootprintTab( originalActive );
-            return false;
         }
     }
 
-    activateFootprintTab( originalActive );
+    // Go from back so we don't have to worry about deletions
+    for( int ii = (int) m_tabContexts.size() - 1; ii >= 0; --ii )
+    {
+        if( aFromBoardOnly && !m_tabContexts[ii]->IsFromBoard() )
+            continue;
+
+        activateFootprintTab( m_tabContexts[ii].get() );
+        wxSafeYield( this, true );      // Allow tab to come to front before showing "Save Changes?"
+
+        if( !m_tabsPanel->CloseTab( ii ) )
+            return false;
+    }
 
     return true;
 }
@@ -1862,66 +1847,18 @@ const BOX2I FOOTPRINT_EDIT_FRAME::GetDocumentExtents( bool aIncludeAllVisible ) 
 }
 
 
-bool FOOTPRINT_EDIT_FRAME::CanCloseFPFromBoard( bool doClose )
-{
-    if( IsContentModified() )
-    {
-        wxString footprintName = GetBoard()->GetFirstFootprint()->GetReference();
-        wxString msg = _( "Save changes to '%s' before closing?" );
-
-        if( !HandleUnsavedChanges( this, wxString::Format( msg, footprintName ),
-                                   [&]() -> bool
-                                   {
-                                       return SaveFootprint( GetBoard()->GetFirstFootprint() );
-                                   } ) )
-        {
-            return false;
-        }
-    }
-
-    if( doClose )
-        Clear_Pcb( false );
-
-    return true;
-}
-
-
 bool FOOTPRINT_EDIT_FRAME::canCloseWindow( wxCloseEvent& aEvent )
 {
     // Shutdown blocks must be determined and vetoed as early as possible, before any modal prompt.
-    // IsContentModified only sees the active tab, so also account for dirty inactive instance tabs.
-    if( KIPLATFORM::APP::SupportsShutdownBlockReason()
-            && aEvent.GetId() == wxEVT_QUERY_END_SESSION
-            && ( IsContentModified() || hasDirtyInactiveTransientTabs() ) )
+    // IsContentModified only sees the active tab, so also account for dirty inactive tabs.
+    if( KIPLATFORM::APP::SupportsShutdownBlockReason() && aEvent.GetId() == wxEVT_QUERY_END_SESSION
+                                                       && ( IsContentModified() || hasDirtyInactiveTabs() ) )
     {
         aEvent.Veto();
         return false;
     }
 
-    if( IsCurrentFPFromBoard() && !CanCloseFPFromBoard( false ) )
-    {
-        aEvent.Veto();
-        return false;
-    }
-
-    if( IsContentModified() )
-    {
-        wxString footprintName = GetBoard()->GetFirstFootprint()->GetFPID().GetLibItemName();
-        wxString msg = _( "Save changes to '%s' before closing?" );
-
-        if( !HandleUnsavedChanges( this, wxString::Format( msg, footprintName ),
-                                   [&]() -> bool
-                                   {
-                                       return SaveFootprint( GetBoard()->GetFirstFootprint() );
-                                   } ) )
-        {
-            aEvent.Veto();
-            return false;
-        }
-    }
-
-    // Prompt for any dirty inactive instance tabs, which the active-tab check above misses.
-    if( !promptToSaveInactiveTransientTabs() )
+    if( !HandleUnsavedChanges( false ) )
     {
         aEvent.Veto();
         return false;
@@ -1956,7 +1893,7 @@ void FOOTPRINT_EDIT_FRAME::doCloseWindow()
     m_auimgr.GetPane( wxT( "LayersManager" ) ).Show( false );
     m_auimgr.GetPane( wxT( "SelectionFilter" ) ).Show( false );
 
-    Clear_Pcb( false );
+    Clear_Pcb();
 }
 
 

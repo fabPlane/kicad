@@ -19,8 +19,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#ifndef __KICAD_TYPEINFO_H
-#define __KICAD_TYPEINFO_H
+#pragma once
 
 
 #include <type_traits>
@@ -235,8 +234,10 @@ enum KICAD_T
     // (IPC clients with stale protobuf-generated headers depend on stable values).
     PCB_SHAPE_LOCATE_ELLIPSE_T,
     PCB_SHAPE_LOCATE_ELLIPSE_ARC_T,
-    PCB_CONSTRAINT_T,      ///< class PCB_CONSTRAINT, a geometric constraint between board items
-    PCB_GRIDITEM_T,
+    PCB_CONSTRAINT_T,                   ///< a geometric constraint between board items
+    PCB_GRID_ITEM_T,                    ///< a subgrid placed on a board
+    PCB_DRILL_CHART_T,     ///< class PCB_DRILL_CHART, a live drill chart derived from PCB_TABLE
+    PCB_DRILL_MAP_T,       ///< class PCB_DRILL_MAP, drill symbols drawn at the holes
 
     // End value
     MAX_STRUCT_TYPE_ID
@@ -304,6 +305,9 @@ constexpr KICAD_T BaseType( const KICAD_T aType )
     case PCB_DIM_ORTHOGONAL_T:
     case PCB_DIM_LEADER_T:
         return PCB_DIMENSION_T;
+
+    case PCB_DRILL_CHART_T:
+        return PCB_TABLE_T;
 
     default:
         return aType;
@@ -459,13 +463,15 @@ constexpr bool IsPcbnewType( const KICAD_T aType )
     case PCB_DIM_RADIAL_T:
     case PCB_DIM_ORTHOGONAL_T:
     case PCB_TARGET_T:
+    case PCB_DRILL_CHART_T:
+    case PCB_DRILL_MAP_T:
     case PCB_POINT_T:
     case PCB_ZONE_T:
     case PCB_ITEM_LIST_T:
     case PCB_NETINFO_T:
     case PCB_GROUP_T:
     case PCB_GENERATOR_T:
-    case PCB_GRIDITEM_T:
+    case PCB_GRID_ITEM_T:
 
     case PCB_FIELD_LOCATE_REFERENCE_T:
     case PCB_FIELD_LOCATE_VALUE_T:
@@ -490,6 +496,39 @@ constexpr bool IsPcbnewType( const KICAD_T aType )
     case PCB_SHAPE_LOCATE_ELLIPSE_ARC_T:
     case PCB_BOARD_OUTLINE_T:
     case PCB_CONSTRAINT_T:
+        return true;
+
+    default:
+        return false;
+    }
+}
+
+constexpr bool IsSingleLayerType( const KICAD_T aType )
+{
+    switch( aType )
+    {
+    case PCB_SHAPE_T:
+    case PCB_REFERENCE_IMAGE_T:
+    case PCB_FIELD_T:
+    case PCB_TEXT_T:
+    case PCB_TEXTBOX_T:
+    case PCB_BARCODE_T:
+    case PCB_TABLE_T:
+    case PCB_DRILL_CHART_T:
+    case PCB_DRILL_MAP_T:
+    case PCB_TABLECELL_T:
+    case PCB_TRACE_T:
+    case PCB_ARC_T:
+    case PCB_MARKER_T:
+    case PCB_DIMENSION_T:
+    case PCB_DIM_ALIGNED_T:
+    case PCB_DIM_LEADER_T:
+    case PCB_DIM_CENTER_T:
+    case PCB_DIM_RADIAL_T:
+    case PCB_DIM_ORTHOGONAL_T:
+    case PCB_TARGET_T:
+    case PCB_POINT_T:
+    case PCB_GENERATOR_T:
         return true;
 
     default:
@@ -559,5 +598,3 @@ constexpr bool IsTypeCorrect( KICAD_T aType )
         || IsPageLayoutEditorType( aType )
         || IsMiscType( aType );
 }
-
-#endif // __KICAD_TYPEINFO_H

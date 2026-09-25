@@ -76,8 +76,7 @@ tl::expected<bool, ApiResponseStatus> API_HANDLER_FOOTPRINT::validateDocumentInt
     if( aDocument.type() != DocumentType::DOCTYPE_FOOTPRINT )
     {
         ApiResponseStatus e;
-        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        e.set_error_message( "the requested document is not a footprint" );
+        e.set_status( ApiStatusCode::AS_UNHANDLED );
         return tl::unexpected( e );
     }
 
@@ -115,16 +114,15 @@ tl::expected<bool, ApiResponseStatus> API_HANDLER_FOOTPRINT::validateDocumentInt
     return true;
 }
 
+
 HANDLER_RESULT<FOOTPRINT*> API_HANDLER_FOOTPRINT::validateAndGetFootprint(
         const DocumentSpecifier& aDocument )
 {
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aDocument ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
-
-    HANDLER_RESULT<bool> documentValidation = validateDocument( aDocument );
-
-    if( !documentValidation )
-        return tl::unexpected( documentValidation.error() );
 
     FOOTPRINT* editorFootprint = board()->GetFirstFootprint();
 
@@ -138,6 +136,7 @@ HANDLER_RESULT<FOOTPRINT*> API_HANDLER_FOOTPRINT::validateAndGetFootprint(
 
     return editorFootprint;
 }
+
 
 HANDLER_RESULT<Empty> API_HANDLER_FOOTPRINT::handleOpenLibraryItem(
     const HANDLER_CONTEXT<OpenLibraryItem>& aCtx )
@@ -205,6 +204,7 @@ HANDLER_RESULT<Empty> API_HANDLER_FOOTPRINT::handleOpenLibraryItem(
 
     return Empty();
 }
+
 
 HANDLER_RESULT<GetOpenDocumentsResponse> API_HANDLER_FOOTPRINT::handleGetOpenDocuments(
         const HANDLER_CONTEXT<GetOpenDocuments>& aCtx )
@@ -314,31 +314,42 @@ HANDLER_RESULT<Empty> API_HANDLER_FOOTPRINT::handleSaveCopyOfDocument(
 HANDLER_RESULT<Empty> API_HANDLER_FOOTPRINT::handleRevertDocument(
         const HANDLER_CONTEXT<RevertDocument>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
-    HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() );
-
-    if( !documentValidation )
+    // Validate first: another editor's document must get AS_UNHANDLED, not the headless error
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
         return tl::unexpected( documentValidation.error() );
 
     if( std::optional<ApiResponseStatus> headless = checkForHeadless( "RevertDocument" ) )
         return tl::unexpected( *headless );
 
-    frame()->GetScreen()->SetContentModified( false );
-    frame()->RevertFootprint(); // dialog is suppressed by ^
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    frame()->RevertFootprint( /* aSkipConfirmation = */ true );
 
     bumpRevision();
     return Empty();
 }
 
 
+// Footprint types that are directly retrievable by GetItems
+static const std::vector<KICAD_T> s_allowedFootprintTypes = {
+        PCB_PAD_T,
+        PCB_SHAPE_T,
+        PCB_FIELD_T,
+        PCB_TEXT_T,
+        PCB_TEXTBOX_T,
+        PCB_TABLE_T,
+        PCB_TABLECELL_T,
+        PCB_DIMENSION_T,
+        PCB_ZONE_T,
+        PCB_GROUP_T,
+        PCB_BARCODE_T
+};
+
+
 HANDLER_RESULT<GetItemsResponse> API_HANDLER_FOOTPRINT::handleGetItems(
         const HANDLER_CONTEXT<GetItems>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     // validateItemHeaderDocument already answers AS_UNHANDLED for another editor's
     // document type; anything else it reports is a real error for this client
     if( HANDLER_RESULT<std::optional<KIID>> header = validateItemHeaderDocument( aCtx.Request.header() );
@@ -347,12 +358,20 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_FOOTPRINT::handleGetItems(
         return tl::unexpected( header.error() );
     }
 
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
     GetItemsResponse response;
 
     std::vector<BOARD_ITEM*> items;
     std::set<KICAD_T>        typesRequested;
 
-    if( !collectItems( parseRequestedItemTypes( aCtx.Request.types() ), items, typesRequested ) )
+    std::vector<KICAD_T> requestedTypes = parseRequestedItemTypes( aCtx.Request.types() );
+
+    if( aCtx.Request.types().empty() )
+        requestedTypes.assign( s_allowedFootprintTypes.begin(), s_allowedFootprintTypes.end() );
+
+    if( !collectItems( requestedTypes, items, typesRequested ) )
     {
         ApiResponseStatus e;
         e.set_status( ApiStatusCode::AS_BAD_REQUEST );
