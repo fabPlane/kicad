@@ -38,6 +38,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 # Never two nightlies at once (they would race on the rolling release); queue instead.
 concurrency:
@@ -304,7 +305,9 @@ jobs:
           name: kicad-cli-${{ matrix.platform }}
           path: out/*
           if-no-files-found: error
-          retention-days: 7
+          # These only move build outputs between jobs. Published nightlies live in
+          # GitHub Releases, so a short fallback retention is enough if publishing fails.
+          retention-days: 1
 
   # ------------------------------------------------------------------ publish
   release:
@@ -331,6 +334,7 @@ jobs:
           merge-multiple: true
 
       - name: Publish releases
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -341,6 +345,20 @@ jobs:
           NIGHTLY_PLATFORMS: ${{ needs.prepare.outputs.platforms }}
           NIGHTLY_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: bash "$NIGHTLY_TOOLS/release.sh" assets
+
+      - name: Remove intermediate workflow artifacts
+        if: steps.publish.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api --paginate \
+            "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[].id' |
+            while read -r artifact_id; do
+              gh api --method DELETE "repos/$GH_REPO/actions/artifacts/$artifact_id"
+            done
 
       - name: Fail the run if a platform did not build
         if: needs.build.result != 'success'
