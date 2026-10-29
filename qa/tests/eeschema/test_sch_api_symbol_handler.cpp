@@ -266,7 +266,7 @@ BOOST_AUTO_TEST_CASE( CreateUpdateDeleteChildren )
 
     bool found = false;
 
-    for( const SCH_PIN* symbolPin : m_symbol->GetPins() )
+    for( const SCH_PIN* symbolPin : m_symbol->GetGraphicalPins( ALL_UNITS, ALL_BODY_STYLES ) )
     {
         if( symbolPin->GetNumber() == wxS( "42" ) )
             found = true;

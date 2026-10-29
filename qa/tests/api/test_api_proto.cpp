@@ -233,8 +233,8 @@ BOOST_AUTO_TEST_CASE( FileFormatStateRoundTrip )
         BOOST_CHECK_EQUAL( copy.GetLibTextAngle().AsDegrees(), 315.0 );
         BOOST_CHECK_EQUAL( copy.GetLibTextAngle().AsDegrees(), text->GetLibTextAngle().AsDegrees() );
         BOOST_CHECK_EQUAL( copy.GetTextAngle().AsDegrees(), text->GetTextAngle().AsDegrees() );
-        BOOST_CHECK_EQUAL( copy.GetAttributes().m_Angle.AsDegrees(),
-                           text->GetAttributes().m_Angle.AsDegrees() );
+        BOOST_CHECK_EQUAL( copy.GetAttributes().m_Angle.GetAngle().AsDegrees(),
+                           text->GetAttributes().m_Angle.GetAngle().AsDegrees() );
     }
 
     // A board-level text keeps its rotation
