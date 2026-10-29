@@ -422,7 +422,7 @@ bool PCB_DIMENSION_BASE::Deserialize( const google::protobuf::Any &aContainer )
 
     // Sync the footprint-relative angle copy (see PCB_TEXT::Deserialize).  Done after the text
     // position mode is known: the setter triggers Update(), which moves automatic text.
-    SetTextAngle( GetAttributes().m_Angle );
+    SetTextAngle( GetAttributes().m_Angle.GetAngle() );
 
     Update();
 

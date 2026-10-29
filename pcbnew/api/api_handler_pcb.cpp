@@ -4336,6 +4336,10 @@ API_HANDLER_PCB::handleUpdateFootprintsFromLibrary( const HANDLER_CONTEXT<Update
 
     const UpdateFootprintsFromLibrary& req = aCtx.Request;
     BOARD*                             brd = board();
+
+    // The editor's flip direction when there is one; headless sessions use its default
+    FLIP_DIRECTION flipDirection = frame() ? frame()->GetPcbNewSettings()->m_FlipDirection
+                                           : FLIP_DIRECTION::TOP_BOTTOM;
     std::vector<FOOTPRINT*>            targets;
 
     for( const types::KIID& id : req.footprints() )
@@ -4431,7 +4435,8 @@ API_HANDLER_PCB::handleUpdateFootprintsFromLibrary( const HANDLER_CONTEXT<Update
             continue;
         }
 
-        brd->ExchangeFootprint( footprint, libFootprint, *commit, req.match_pad_positions(), deleteExtraTexts,
+        brd->ExchangeFootprint( footprint, libFootprint, *commit, flipDirection, req.match_pad_positions(),
+                                deleteExtraTexts,
                                 resetTextLayers, resetTextEffects, resetTextPositions, resetTextContent,
                                 resetFabAttrs, resetClearances, reset3DModels, req.reset_transform(), &updated,
                                 &shifted );

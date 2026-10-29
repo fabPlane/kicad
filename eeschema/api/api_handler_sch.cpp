@@ -4354,8 +4354,7 @@ API_HANDLER_SCH::handleSyncSchematicToBoard( const HANDLER_CONTEXT<SyncSchematic
     SCH_SHEET_LIST sheets = sch->Hierarchy();
 
     // The netlist needs every symbol annotated, as SCH_EDIT_FRAME::ReadyToNetlist checks
-    sheets.AnnotatePowerSymbols();
-
+    // (power symbols are no longer annotated)
     SCH_REFERENCE_LIST references;
     sheets.GetSymbols( references, SYMBOL_FILTER_NON_POWER );
 

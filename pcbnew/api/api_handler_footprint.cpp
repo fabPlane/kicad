@@ -234,7 +234,10 @@ HANDLER_RESULT<GetOpenDocumentsResponse> API_HANDLER_FOOTPRINT::handleGetOpenDoc
     }
 
     GetOpenDocumentsResponse response;
-    response.mutable_documents()->Add( *Document() );
+
+    if( std::optional<DocumentSpecifier> doc = Document() )
+        response.mutable_documents()->Add( std::move( *doc ) );
+
     return response;
 }
 
@@ -245,8 +248,9 @@ std::optional<DocumentSpecifier> API_HANDLER_FOOTPRINT::Document() const
 
     LIB_ID fpid = footprintContext()->GetLoadedFPID();
 
+    // A new footprint has no document until it exists
     if( !board()->GetFirstFootprint() )
-        return response;
+        return std::nullopt;
 
     doc.set_type( DocumentType::DOCTYPE_FOOTPRINT );
     doc.mutable_lib_id()->set_library_nickname( fpid.GetUniStringLibNickname() );

@@ -140,11 +140,13 @@ public:
             m_sink->SaveCopyInUndoList( undoList, false );
     }
 
-    void Revert() override
+    void Revert() override { RevertToCheckpoint( 0 ); }
+
+    void RevertToCheckpoint( int aCheckpoint ) override
     {
-        for( auto it = m_entries.rbegin(); it != m_entries.rend(); ++it )
+        for( int ii = (int) m_entries.size() - 1; ii >= aCheckpoint; --ii )
         {
-            COMMIT_LINE& ent = *it;
+            COMMIT_LINE& ent = m_entries[ii];
             SCH_ITEM*    item = static_cast<SCH_ITEM*>( ent.m_item );
             SCH_ITEM*    copy = static_cast<SCH_ITEM*>( ent.m_copy );
 
@@ -178,7 +180,7 @@ public:
             }
         }
 
-        clear();
+        dropEntriesAfter( aCheckpoint );
     }
 
     EDA_ITEM* ResolveItem( KIID& aID ) override

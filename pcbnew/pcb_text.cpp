@@ -134,7 +134,7 @@ void PCB_TEXT::Serialize( kiapi::board::types::BoardText& boardText ) const
     // in-range angle is not the same object.
     EDA_ANGLE angle = GetTextAngle();
     angle.Normalize();
-    EDA_ANGLE stored = GetAttributes().m_Angle;
+    EDA_ANGLE stored = GetAttributes().m_Angle.GetAngle();
     EDA_ANGLE storedNormalized = stored;
     storedNormalized.Normalize();
 
@@ -187,7 +187,7 @@ bool PCB_TEXT::Deserialize( const kiapi::board::types::BoardText& boardText )
 
     // EDA_TEXT only stored the attributes; the footprint-relative copy of the angle that the
     // file format and footprint transforms use is maintained by the setter
-    SetTextAngle( GetAttributes().m_Angle );
+    SetTextAngle( GetAttributes().m_Angle.GetAngle() );
     kiapi::common::UnpackCustomProperties( boardText.custom_properties(), *this );
 
     return true;
