@@ -277,7 +277,9 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
 
     // Note: frame == nullptr happens in QA tests
 
-    if( !frame )
+    // Frameless commits have nowhere to keep undo history unless a headless API session
+    // installed a sink
+    if( !frame && !m_toolMgr->GetUndoRedoSink() )
         aCommitFlags |= SKIP_UNDO;
 
     std::vector<BOARD_ITEM*> bulkAddedItems;
