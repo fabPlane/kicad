@@ -71,7 +71,6 @@
 #include "cli/command_pcb_export_ipc2581.h"
 #include "cli/command_pcb_export_idf.h"
 #include "cli/command_pcb_export_ipcd356.h"
-#include "cli/command_pcb_export_specctra.h"
 #include "cli/command_pcb_export_odb.h"
 #include "cli/command_pcb_export_pdf.h"
 #include "cli/command_pcb_export_png.h"
@@ -197,7 +196,6 @@ static CLI::PCB_EXPORT_SPECCTRA_COMMAND  exportPcbSpecctraCmd{};
 static CLI::PCB_EXPORT_IPC2581_COMMAND   exportPcbIpc2581Cmd{};
 static CLI::PCB_EXPORT_IDF_COMMAND       exportPcbIdfCmd{};
 static CLI::PCB_EXPORT_IPCD356_COMMAND   exportPcbIpcD356Cmd{};
-static CLI::PCB_EXPORT_SPECCTRA_COMMAND  exportPcbSpecctraCmd{};
 static CLI::PCB_EXPORT_ODB_COMMAND       exportPcbOdbCmd{};
 static CLI::PCB_EXPORT_COMMAND           exportPcbCmd{};
 static CLI::SCH_EXPORT_COMMAND           exportSchCmd{};
