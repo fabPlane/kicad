@@ -105,7 +105,11 @@ void POSITION_RELATIVE_TOOL::Reset( RESET_REASON aReason )
         m_selectionAnchor = VECTOR2I();
     }
 
-    m_commit = std::make_unique<BOARD_COMMIT>( frame() );
+    // A headless API session has no frame; the tool's own manager stands in for it
+    if( frame() )
+        m_commit = std::make_unique<BOARD_COMMIT>( frame() );
+    else
+        m_commit = std::make_unique<BOARD_COMMIT>( this );
 }
 
 

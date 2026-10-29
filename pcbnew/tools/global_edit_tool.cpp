@@ -53,7 +53,11 @@ GLOBAL_EDIT_TOOL::GLOBAL_EDIT_TOOL() :
 
 void GLOBAL_EDIT_TOOL::Reset( RESET_REASON )
 {
-    m_commit = std::make_unique<BOARD_COMMIT>( frame() );
+    // A headless API session has no frame; the tool's own manager stands in for it
+    if( frame() )
+        m_commit = std::make_unique<BOARD_COMMIT>( frame() );
+    else
+        m_commit = std::make_unique<BOARD_COMMIT>( this );
 }
 
 
