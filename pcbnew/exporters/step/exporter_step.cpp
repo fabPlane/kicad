@@ -26,6 +26,7 @@
 #include <bezier_curves.h>
 #include <convert_basic_shapes_to_polygon.h>
 #include <footprint.h>
+#include <pcb_3d_body.h>
 #include <pcb_textbox.h>
 #include <pcb_table.h>
 #include <pcb_tablecell.h>
@@ -654,9 +655,10 @@ bool EXPORTER_STEP::buildFootprint3DShapes( FOOTPRINT* aFootprint, const VECTOR2
 
     }
 
-    if( aFootprint->HasExtrudedBody() && aFootprint->GetExtrudedBody()->m_show )
+    if( aFootprint->HasBody() && aFootprint->GetBody()->GetExtruded()->m_show )
     {
-        const EXTRUDED_3D_BODY* body = aFootprint->GetExtrudedBody();
+        const PCB_3D_BODY* bodyItem = aFootprint->GetBody();
+        const EXTRUDED_3D_BODY* body = bodyItem->GetExtruded();
         SHAPE_POLY_SET          outline;
 
         if( GetExtrusionOutline( aFootprint, outline ) && outline.OutlineCount() > 0 )
@@ -714,6 +716,15 @@ bool EXPORTER_STEP::buildFootprint3DShapes( FOOTPRINT* aFootprint, const VECTOR2
 }
 
 
+bool EXPORTER_STEP::IsViaHoleOpen( const PCB_VIA& aVia, bool aFillAllVias )
+{
+    if( aFillAllVias )
+        return false;
+
+    return aVia.GetFillingMode() != FILLING_MODE::FILLED && aVia.GetCappingMode() != CAPPING_MODE::CAPPED;
+}
+
+
 bool EXPORTER_STEP::buildTrack3DShape( PCB_TRACK* aTrack, const VECTOR2D& aOrigin )
 {
     bool skipCopper = !m_params.m_ExportTracksVias || !netFilterMatches( aTrack->GetNetname() );
@@ -764,7 +775,8 @@ bool EXPORTER_STEP::buildTrack3DShape( PCB_TRACK* aTrack, const VECTOR2D& aOrigi
         }
 
         // Use the drill shape directly. holePoly is shrunk to fit the copper barrel.
-        if( m_layersToExport.Contains( F_SilkS ) || m_layersToExport.Contains( B_SilkS ) )
+        if( ( m_layersToExport.Contains( F_SilkS ) || m_layersToExport.Contains( B_SilkS ) )
+            && IsViaHoleOpen( *via, m_params.m_FillAllVias ) )
         {
             SHAPE_POLY_SET silkHole;
             holeShape->TransformToPolygon( silkHole, via->GetMaxError(), ERROR_INSIDE );
@@ -1407,6 +1419,10 @@ bool EXPORTER_STEP::Export()
         };
 
         ~SCOPED_PRINTER() { Message::DefaultMessenger()->RemovePrinter( m_handle ); }
+
+        // No copying or it can lead to double or early-removal of the printer.
+        SCOPED_PRINTER( const SCOPED_PRINTER& ) = delete;
+        SCOPED_PRINTER& operator=( const SCOPED_PRINTER& ) = delete;
     };
 
     Message::DefaultMessenger()->RemovePrinters( STANDARD_TYPE( Message_PrinterOStream ) );

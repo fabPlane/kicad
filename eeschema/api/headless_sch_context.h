@@ -58,6 +58,8 @@ public:
 
     bool SaveSchematic() override;
 
+    bool SaveSchematicAs( const wxString& aFileName ) override;
+
     bool SaveSchematicCopy( const wxString& aFileName, bool aCreateProject ) override;
 
     API_UNDO_STACK* GetUndoStack() const override { return m_undoStack.get(); }

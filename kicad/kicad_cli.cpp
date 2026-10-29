@@ -67,7 +67,9 @@
 #include "cli/command_pcb_export_gerbers.h"
 #include "cli/command_pcb_export_hpgl.h"
 #include "cli/command_pcb_export_gencad.h"
+#include "cli/command_pcb_export_specctra.h"
 #include "cli/command_pcb_export_ipc2581.h"
+#include "cli/command_pcb_export_idf.h"
 #include "cli/command_pcb_export_ipcd356.h"
 #include "cli/command_pcb_export_specctra.h"
 #include "cli/command_pcb_export_odb.h"
@@ -82,6 +84,7 @@
 #include "cli/command_sch_export_netlist.h"
 #include "cli/command_sch_export_plot.h"
 #include "cli/command_pcb_upgrade.h"
+#include "cli/command_pcb_downgrade.h"
 #include "cli/command_pcb_import.h"
 #include "cli/command_sch_import.h"
 #include "cli/command_import.h"
@@ -91,8 +94,11 @@
 #include "cli/command_fp_upgrade.h"
 #include "cli/command_sch.h"
 #include "cli/command_sch_erc.h"
+#include "cli/command_project.h"
+#include "cli/command_project_downgrade.h"
 #include "cli/command_sch_export.h"
 #include "cli/command_sch_upgrade.h"
+#include "cli/command_sch_downgrade.h"
 #include "cli/command_sym.h"
 #include "cli/command_sym_export.h"
 #include "cli/command_sym_export_svg.h"
@@ -150,6 +156,7 @@ static CLI::MERGETOOL_COMMAND            mergetoolCmd{};
 static CLI::GIT_MERGEDRIVER_COMMAND      gitMergeDriverCmd{};
 static CLI::PCB_RENDER_COMMAND           pcbRenderCmd{};
 static CLI::PCB_UPGRADE_COMMAND          pcbUpgradeCmd{};
+static CLI::PCB_DOWNGRADE_COMMAND        pcbDowngradeCmd{};
 static CLI::PCB_IMPORT_COMMAND           pcbImportCmd{};
 static CLI::SCH_IMPORT_COMMAND           schImportCmd{};
 static CLI::IMPORT_COMMAND               importCmd{};
@@ -186,16 +193,21 @@ static CLI::PCB_EXPORT_STACKUP_COMMAND   exportPcbStackupCmd{};
 static CLI::PCB_EXPORT_GERBERS_COMMAND   exportPcbGerbersCmd{};
 static CLI::PCB_EXPORT_HPGL_COMMAND      exportPcbHpglCmd{};
 static CLI::PCB_EXPORT_GENCAD_COMMAND    exportPcbGencadCmd{};
+static CLI::PCB_EXPORT_SPECCTRA_COMMAND  exportPcbSpecctraCmd{};
 static CLI::PCB_EXPORT_IPC2581_COMMAND   exportPcbIpc2581Cmd{};
+static CLI::PCB_EXPORT_IDF_COMMAND       exportPcbIdfCmd{};
 static CLI::PCB_EXPORT_IPCD356_COMMAND   exportPcbIpcD356Cmd{};
 static CLI::PCB_EXPORT_SPECCTRA_COMMAND  exportPcbSpecctraCmd{};
 static CLI::PCB_EXPORT_ODB_COMMAND       exportPcbOdbCmd{};
 static CLI::PCB_EXPORT_COMMAND           exportPcbCmd{};
 static CLI::SCH_EXPORT_COMMAND           exportSchCmd{};
+static CLI::PROJECT_COMMAND              projectCmd{};
+static CLI::PROJECT_DOWNGRADE_COMMAND    projectDowngradeCmd{};
 static CLI::SCH_COMMAND                  schCmd{};
 static CLI::SCH_DIFF_COMMAND             schDiffCmd{};
 static CLI::SCH_ERC_COMMAND              schErcCmd{};
 static CLI::SCH_UPGRADE_COMMAND          schUpgradeCmd{};
+static CLI::SCH_DOWNGRADE_COMMAND        schDowngradeCmd{};
 static CLI::EXPORT_BOM_COMMAND           exportSchBomCmd{ KIWAY::FACE_SCH };
 static CLI::SCH_EXPORT_PYTHONBOM_COMMAND exportSchPythonBomCmd{};
 static CLI::SCH_EXPORT_NETLIST_COMMAND   exportSchNetlistCmd{};
@@ -283,6 +295,7 @@ static std::vector<COMMAND_ENTRY> commandStack = {
                     &exportPcbGencadCmd,
                     &exportPcbGlbCmd,
                     &exportPcbIpc2581Cmd,
+                    &exportPcbIdfCmd,
                     &exportPcbIpcD356Cmd,
                     &exportPcbOdbCmd,
                     &exportPcbPdfCmd,
@@ -305,6 +318,17 @@ static std::vector<COMMAND_ENTRY> commandStack = {
             },
             {
                 &pcbUpgradeCmd
+            },
+            {
+                &pcbDowngradeCmd
+            }
+        }
+    },
+    {
+        &projectCmd,
+        {
+            {
+                &projectDowngradeCmd
             }
         }
     },
@@ -336,6 +360,9 @@ static std::vector<COMMAND_ENTRY> commandStack = {
             },
             {
                 &schUpgradeCmd
+            },
+            {
+                &schDowngradeCmd
             }
         }
     },
@@ -779,21 +806,27 @@ struct APP_KICAD_CLI : public wxAppConsole
 #endif
 
         program.OnPgmExit();
+        program.ExitIfTeardownUnsafe();
+
         return ret;
     }
 
     int OnRun() override
     {
+        int ret = -1;
+
         try
         {
-            return program.OnPgmRun();
+            ret = program.OnPgmRun();
         }
         catch( ... )
         {
             Pgm().HandleException( std::current_exception() );
         }
 
-        return -1;
+        program.SetRunResult( ret );
+
+        return ret;
     }
 
     int FilterEvent( wxEvent& aEvent ) override { return Event_Skip; }

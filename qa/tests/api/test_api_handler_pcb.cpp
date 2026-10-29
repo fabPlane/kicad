@@ -38,6 +38,7 @@
 #include <api/common/commands/editor_commands.pb.h>
 #include <api/common/envelope.pb.h>
 #include <api/common/types/base_types.pb.h>
+#include <jobs/job_export_pcb_odb.h>
 
 #include <board.h>
 #include <drc/drc_item.h>
@@ -232,6 +233,60 @@ kiapi::common::ApiRequest makeRevertRequest( BOARD* aBoard )
 
 
 BOOST_FIXTURE_TEST_SUITE( ApiHandlerPcb, API_HANDLER_PCB_FIXTURE )
+
+
+BOOST_AUTO_TEST_CASE( OdbJobRequestMapsVariants )
+{
+    using PACKAGING = JOB_EXPORT_PCB_ODB::VARIANT_PACKAGING;
+    kiapi::board::jobs::RunBoardJobExportODB request;
+    request.add_variant_names( "var1" );
+    request.add_variant_names( "var2" );
+    request.set_variant( "legacy" );
+    request.set_variant_packaging( kiapi::board::jobs::ODBVP_COMBINED );
+    request.set_manufacturer_part_number_column( "MPN" );
+    JOB_EXPORT_PCB_ODB job;
+    ApplyOdbJobRequest( request, job );
+    BOOST_REQUIRE_EQUAL( job.m_variantNames.size(), 2u );
+    BOOST_CHECK_EQUAL( job.m_variantNames[0], wxS( "var1" ) );
+    BOOST_CHECK_EQUAL( job.m_variantNames[1], wxS( "var2" ) );
+    BOOST_CHECK( job.m_variantPackaging == PACKAGING::COMBINED );
+    BOOST_CHECK_EQUAL( job.m_colMfgPn, wxString( wxS( "MPN" ) ) );
+
+    kiapi::board::jobs::RunBoardJobExportODB legacyRequest;
+    legacyRequest.set_variant( "legacy" );
+    JOB_EXPORT_PCB_ODB legacyJob;
+    ApplyOdbJobRequest( legacyRequest, legacyJob );
+    BOOST_REQUIRE_EQUAL( legacyJob.m_variantNames.size(), 1u );
+    BOOST_CHECK_EQUAL( legacyJob.m_variantNames[0], wxS( "legacy" ) );
+    BOOST_CHECK( legacyJob.m_variantPackaging == PACKAGING::SEPARATE );
+}
+
+
+BOOST_AUTO_TEST_CASE( OdbJobRequestMapsExportOptions )
+{
+    kiapi::board::jobs::RunBoardJobExportODB request;
+    request.set_origin( kiapi::board::jobs::ODBO_GRID );
+    request.set_product_name( "board product" );
+    request.mutable_content()->set_data_set( kiapi::board::jobs::FDS_ASSEMBLY );
+    request.mutable_content()->set_sections( "KP" );
+    request.mutable_content()->set_net_names( kiapi::board::jobs::FNNP_ANONYMIZE );
+
+    JOB_EXPORT_PCB_ODB job;
+    ApplyOdbJobRequest( request, job );
+    BOOST_CHECK( job.m_origin == JOB_EXPORT_PCB_ODB::ORIGIN::GRID );
+    BOOST_CHECK_EQUAL( job.m_productName, wxString( wxS( "board product" ) ) );
+    BOOST_CHECK( job.m_dataSet == JOB_EXPORT_PCB_FAB::DATA_SET::ASSEMBLY );
+    BOOST_REQUIRE( job.m_sections );
+    BOOST_CHECK_EQUAL( *job.m_sections, wxString( wxS( "KP" ) ) );
+    BOOST_CHECK( job.m_netNames == JOB_EXPORT_PCB_FAB::NET_NAMES::ANONYMIZE );
+
+    kiapi::board::jobs::RunBoardJobExportODB legacy;
+    JOB_EXPORT_PCB_ODB                       defaultJob;
+    ApplyOdbJobRequest( legacy, defaultJob );
+    BOOST_CHECK( defaultJob.m_origin == JOB_EXPORT_PCB_ODB::ORIGIN::ABSOLUTE_COORDS );
+    BOOST_CHECK( defaultJob.m_dataSet == JOB_EXPORT_PCB_FAB::DATA_SET::USERDEF );
+    BOOST_CHECK( defaultJob.m_netNames == JOB_EXPORT_PCB_FAB::NET_NAMES::INCLUDE );
+}
 
 
 BOOST_AUTO_TEST_CASE( RefillZonesSubset )

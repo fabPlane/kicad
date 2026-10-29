@@ -89,6 +89,7 @@
 #include <font/font.h>
 #include <macros.h>
 #include <trigo.h>
+#include <geometry/shape_rect.h>
 #include <fmt/format.h>
 
 #include <cstdint>
@@ -426,6 +427,14 @@ void SVG_PLOTTER::Rect( const VECTOR2I& p1, const VECTOR2I& p2, FILL_T fill, int
                     rect_dev.GetPosition().y, m_precision,
                     rect_dev.GetEnd().x, m_precision,
                     rect_dev.GetEnd().y, m_precision );
+    }
+    else if( aCornerRadius > 0 )
+    {
+        BOX2I box( p1, VECTOR2I( p2.x - p1.x, p2.y - p1.y ) );
+        box.Normalize();
+        SHAPE_RECT roundedRect( box );
+        roundedRect.SetRadius( aCornerRadius );
+        PLOTTER::PlotPoly( roundedRect.Outline(), fill, width, nullptr );
     }
     else
     {
@@ -999,7 +1008,7 @@ void SVG_PLOTTER::PlotText( const VECTOR2I&        aPos,
     if( aAttributes.m_Mirrored )
         size.x = -size.x;
 
-    SVG_PLOTTER::Text( aPos, aColor, aText, aAttributes.m_Angle, size, aAttributes.m_Halign,
+    SVG_PLOTTER::Text( aPos, aColor, aText, aAttributes.m_Angle.GetAngle(), size, aAttributes.m_Halign,
                        aAttributes.m_Valign, aAttributes.m_StrokeWidth, aAttributes.m_Italic,
                        aAttributes.m_Bold, aAttributes.m_Multiline, aFont, aFontMetrics, aData );
 }

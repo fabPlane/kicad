@@ -572,6 +572,9 @@ void PCB_BASE_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList, bool
                 else
                     GetModel()->Remove( boardItem, REMOVE_MODE::BULK );
 
+                if( PCB_GROUP* group = dynamic_cast<PCB_GROUP*>( boardItem ) )
+                    group->RemoveAll();
+
                 update_item_change_state( eda_item, ITEM_CHANGE_TYPE::DELETED );
 
                 if( eda_item->Type() != PCB_NETINFO_T )
@@ -757,7 +760,13 @@ void PCB_BASE_EDIT_FRAME::ClearUndoORRedoList( UNDO_REDO_LIST whichList, int aIt
 
     if( aItemCount < 0 )
     {
-        list.ClearCommandList();
+        for( PICKED_ITEMS_LIST* cmd : list.m_CommandsList )
+        {
+            ClearListAndDeleteItems( cmd );
+            delete cmd;
+        }
+
+        list.m_CommandsList.clear();
     }
     else
     {

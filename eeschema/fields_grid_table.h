@@ -89,13 +89,13 @@ class FIELDS_GRID_TABLE : public WX_GRID_TABLE_BASE, public std::vector<SCH_FIEL
 {
 public:
     FIELDS_GRID_TABLE( DIALOG_SHIM* aDialog, SCH_BASE_FRAME* aFrame, WX_GRID* aGrid,
-                       LIB_SYMBOL* aSymbol, std::vector<EMBEDDED_FILES*> aFilesStack = {} );
+                       LIB_SYMBOL* aSymbol, std::vector<EMBEDDED_FILES*>& aFilesStack );
     FIELDS_GRID_TABLE( DIALOG_SHIM* aDialog, SCH_EDIT_FRAME* aFrame, WX_GRID* aGrid,
-                       SCH_SYMBOL* aSymbol );
+                       SCH_SYMBOL* aSymbol, LIB_SYMBOL* aPart, std::vector<EMBEDDED_FILES*>& aFilesStack );
     FIELDS_GRID_TABLE( DIALOG_SHIM* aDialog, SCH_EDIT_FRAME* aFrame, WX_GRID* aGrid,
-                       SCH_SHEET* aSheet );
+                       SCH_SHEET* aSheet, std::vector<EMBEDDED_FILES*>& aFilesStack );
     FIELDS_GRID_TABLE( DIALOG_SHIM* aDialog, SCH_EDIT_FRAME* aFrame, WX_GRID* aGrid,
-                       SCH_LABEL_BASE* aLabel );
+                       SCH_LABEL_BASE* aLabel, std::vector<EMBEDDED_FILES*>& aFilesStack );
     ~FIELDS_GRID_TABLE() override;
 
     int GetNumberRows() override { return getVisibleRowCount(); }
@@ -126,23 +126,29 @@ public:
     SCH_FIELD* GetField( FIELD_T aFieldId );
     int GetFieldRow( FIELD_T aFieldId );
 
-    void AddInheritedField( const SCH_FIELD& aParent );
+    /**
+     * Append a row for an ancestor field the symbol does not define.
+     */
+    void AddInheritedField( const SCH_FIELD& aParent, const wxString& aSource );
 
-    void SetFieldInherited( size_t aRow, const SCH_FIELD& aParent )
-    {
-        if( m_isInherited.size() <= aRow )
-            m_isInherited.resize( aRow + 1, false );
+    /**
+     * Record the ancestor field that \a aFieldIndex resolves against.  A field the symbol does
+     * not override (an empty mandatory field or a row already showing an ancestor's value)
+     * takes on the ancestor's content so the grid shows what the symbol resolves to.
+     */
+    void SetFieldInherited( size_t aFieldIndex, const SCH_FIELD& aParent, const wxString& aSource );
 
-        if( m_parentFields.size() <= aRow )
-            m_parentFields.resize( aRow + 1 );
-
-        m_parentFields[aRow] = aParent;
-        m_isInherited[aRow] = true;
-    }
-
+    /**
+     * @return true if the row still shows its ancestor's value rather than an override.
+     */
     bool IsInherited( size_t aRow ) const;
 
     const SCH_FIELD& ParentField( size_t aRow ) const;
+
+    /**
+     * @return the name of the ancestor symbol the row inherits from.
+     */
+    const wxString& InheritedFrom( size_t aRow ) const;
 
     void push_back( const SCH_FIELD& field );
     // For std::vector compatibility, but we don't use it directly.
@@ -152,8 +158,6 @@ public:
     void SwapRows( size_t a, size_t b );
 
     void DetachFields();
-
-    const std::vector<EMBEDDED_FILES*>& GetEmbeddedFilesStack() const { return m_filesStack; }
 
 protected:
     void initGrid( WX_GRID* aGrid );
@@ -168,18 +172,13 @@ protected:
     SCH_FIELD& getField( int aRow );
 
 private:
-    SCH_BASE_FRAME*              m_frame;
-    DIALOG_SHIM*                 m_dialog;
-    KICAD_T                      m_parentType;
-
-    // Owns a private copy of the schematic symbol's library part when the source is a unique_ptr
-    // that the still-live schematic could free while this quasi-modal dialog is open.  Null for
-    // the symbol-editor path, where m_part points at an externally-owned working symbol.
-    std::unique_ptr<LIB_SYMBOL>  m_ownedPart;
-    LIB_SYMBOL*                  m_part;
-    std::vector<EMBEDDED_FILES*> m_filesStack;
-    wxString                     m_symbolNetlist;
-    wxString                     m_curdir;
+    SCH_BASE_FRAME*               m_frame;
+    DIALOG_SHIM*                  m_dialog;
+    KICAD_T                       m_parentType;
+    LIB_SYMBOL*                   m_part;
+    std::vector<EMBEDDED_FILES*>& m_filesStack;
+    wxString                      m_symbolNetlist;
+    wxString                      m_curdir;
 
     FIELD_VALIDATOR   m_fieldNameValidator;
     FIELD_VALIDATOR   m_referenceValidator;
@@ -204,8 +203,15 @@ private:
     wxGridCellAttr*   m_fontAttr;
     wxGridCellAttr*   m_colorAttr;
 
-    std::vector<bool>      m_isInherited;
-    std::vector<SCH_FIELD> m_parentFields;
+    struct INHERITANCE
+    {
+        SCH_FIELD m_parentField;
+        wxString  m_source;
+        bool      m_hasParent = false;
+        bool      m_derived = false; ///< Row shows the ancestor's value instead of owning one
+    };
+
+    std::vector<INHERITANCE> m_inheritance;
 
     std::unique_ptr<NUMERIC_EVALUATOR>        m_eval;
     std::map< std::pair<int, int>, wxString > m_evalOriginal;

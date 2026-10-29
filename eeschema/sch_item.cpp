@@ -93,6 +93,7 @@ SCH_ITEM& SCH_ITEM::operator=( const SCH_ITEM& aItem )
     if( SCH_SCREEN* screen = GetParentScreen() )
         screen->BumpConnectivityRevision( Type() );
 
+    m_customProperties   = aItem.m_customProperties;
     m_layer              = aItem.m_layer;
     m_unit               = aItem.m_unit;
     m_bodyStyle          = aItem.m_bodyStyle;
@@ -107,14 +108,14 @@ SCH_ITEM& SCH_ITEM::operator=( const SCH_ITEM& aItem )
 
 SCH_ITEM::~SCH_ITEM()
 {
-    for( const auto& weakOwner : m_connectivityOwners )
+    for( const std::weak_ptr<CONNECTION_GRAPH_LIFETIME>& weakOwner : m_connectivityOwners )
     {
-        if( const auto owner = weakOwner.lock() )
+        if( const std::shared_ptr<CONNECTION_GRAPH_LIFETIME>& owner = weakOwner.lock() )
             owner->graph->RemoveItem( this );
     }
 
-    for( const auto& it : m_connection_map )
-        delete it.second;
+    for( const auto& [path, connection] : m_connection_map )
+        delete connection;
 
     // Remove this item from any rule areas that contain it
     for( SCH_RULE_AREA* ruleArea : m_rule_areas_cache )
@@ -124,9 +125,13 @@ SCH_ITEM::~SCH_ITEM()
 
 void SCH_ITEM::registerConnectivityOwner( const std::shared_ptr<CONNECTION_GRAPH_LIFETIME>& aOwner )
 {
-    std::erase_if( m_connectivityOwners, []( const auto& owner ) { return owner.expired(); } );
+    std::erase_if( m_connectivityOwners,
+                   []( const auto& owner )
+                   {
+                       return owner.expired();
+                   } );
 
-    for( const auto& owner : m_connectivityOwners )
+    for( const std::weak_ptr<CONNECTION_GRAPH_LIFETIME>& owner : m_connectivityOwners )
     {
         if( owner.lock() == aOwner )
             return;
@@ -326,7 +331,11 @@ void SCH_ITEM::invalidateConnectivity( KICAD_T aChangedType )
     {
         // Plotting and property dialogs use child copies with a live parent pointer
         bool owned = false;
-        owner->RunOnChildren( [&]( SCH_ITEM* child ) { owned |= child == this; }, RECURSE_MODE::NO_RECURSE );
+        owner->RunOnChildren( [&]( SCH_ITEM* child )
+                              {
+                                  owned |= child == this;
+                              },
+                              RECURSE_MODE::NO_RECURSE );
 
         if( owned && screen->CheckIfOnDrawList( owner ) )
             screen->BumpConnectivityRevision( aChangedType );
@@ -362,8 +371,7 @@ SYMBOL* SCH_ITEM::GetParentSymbol()
 }
 
 
-bool SCH_ITEM::ResolveExcludedFromSim( const SCH_SHEET_PATH* aInstance,
-                                       const wxString& aVariantName ) const
+bool SCH_ITEM::ResolveExcludedFromSim( const SCH_SHEET_PATH* aInstance, const wxString& aVariantName ) const
 {
     if( GetExcludedFromSim( aInstance, aVariantName ) )
         return true;
@@ -381,8 +389,7 @@ bool SCH_ITEM::ResolveExcludedFromSim( const SCH_SHEET_PATH* aInstance,
 }
 
 
-bool SCH_ITEM::ResolveExcludedFromBOM( const SCH_SHEET_PATH* aInstance,
-                                       const wxString& aVariantName ) const
+bool SCH_ITEM::ResolveExcludedFromBOM( const SCH_SHEET_PATH* aInstance, const wxString& aVariantName ) const
 {
     if( GetExcludedFromBOM( aInstance, aVariantName ) )
         return true;
@@ -400,8 +407,7 @@ bool SCH_ITEM::ResolveExcludedFromBOM( const SCH_SHEET_PATH* aInstance,
 }
 
 
-bool SCH_ITEM::ResolveExcludedFromBoard( const SCH_SHEET_PATH* aInstance,
-                                         const wxString& aVariantName ) const
+bool SCH_ITEM::ResolveExcludedFromBoard( const SCH_SHEET_PATH* aInstance, const wxString& aVariantName ) const
 {
     if( GetExcludedFromBoard( aInstance, aVariantName ) )
         return true;
@@ -419,8 +425,7 @@ bool SCH_ITEM::ResolveExcludedFromBoard( const SCH_SHEET_PATH* aInstance,
 }
 
 
-bool SCH_ITEM::ResolveExcludedFromPosFiles( const SCH_SHEET_PATH* aInstance,
-                                            const wxString& aVariantName ) const
+bool SCH_ITEM::ResolveExcludedFromPosFiles( const SCH_SHEET_PATH* aInstance, const wxString& aVariantName ) const
 {
     if( GetExcludedFromPosFiles( aInstance, aVariantName ) )
         return true;
@@ -501,18 +506,14 @@ wxString SCH_ITEM::ResolveText( const wxString& aText, const SCH_SHEET_PATH* aPa
                 if( !aPath )
                     return false;
 
-                SCH_SHEET* sheet = static_cast<SCH_SHEET*>( m_parent );
-
-                SCHEMATIC*     schematic = Schematic();
+                SCH_SHEET*     sheet = static_cast<SCH_SHEET*>( m_parent );
                 SCH_SHEET_PATH path = *aPath;
-                path.push_back( sheet );
 
-                bool retval = sheet->ResolveTextVar( &path, token, depth + 1 );
+                if( path.Last() != sheet )
+                    path.push_back( sheet );
 
-                if( schematic )
-                    retval |= schematic->ResolveTextVar( &path, token, depth + 1 );
-
-                return retval;
+                // Sheet resolver will recurse to ancestors, including the schematic itself
+                return sheet->ResolveTextVar( &path, token, depth + 1 );
             };
 
     std::function<bool( wxString* )> labelResolver =
@@ -613,7 +614,7 @@ void SCH_ITEM::SetConnectionGraph( CONNECTION_GRAPH* aGraph )
 
 
 static std::optional<SCH_CONNECTIVITY::ITEM_VIEW> publishedConnection( const SCH_ITEM& aItem,
-                                                                        const SCH_SHEET_PATH* aSheet )
+                                                                       const SCH_SHEET_PATH* aSheet )
 {
     SCHEMATIC* schematic = aItem.Schematic();
 
@@ -626,7 +627,7 @@ static std::optional<SCH_CONNECTIVITY::ITEM_VIEW> publishedConnection( const SCH
 
 
 std::optional<wxString> SCH_ITEM::GetConnectionName( const SCH_SHEET_PATH* aSheet, bool aLocal,
-                                                   bool aIgnoreSheet ) const
+                                                     bool aIgnoreSheet ) const
 {
     if( ADVANCED_CFG::GetCfg().m_ConnectivityEngine && wxThread::IsMain() )
     {
@@ -676,7 +677,7 @@ bool SCH_ITEM::MatchesNetName( const EDA_SEARCH_DATA& aSearchData, const SCH_SHE
 {
     if( ADVANCED_CFG::GetCfg().m_ConnectivityEngine && wxThread::IsMain() )
     {
-        const auto connection = publishedConnection( *this, aSheet );
+        const std::optional<SCH_CONNECTIVITY::ITEM_VIEW> connection = publishedConnection( *this, aSheet );
 
         if( !connection )
             return false;
@@ -684,7 +685,7 @@ bool SCH_ITEM::MatchesNetName( const EDA_SEARCH_DATA& aSearchData, const SCH_SHE
         if( !connection->IsBus() )
             return EDA_ITEM::Matches( connection->Name(), aSearchData );
 
-        for( const auto& member : connection->Members().leaves )
+        for( const SCH_CONNECTIVITY::NET_VIEW& member : connection->Members().leaves )
         {
             if( EDA_ITEM::Matches( member.Name(), aSearchData ) )
                 return true;
@@ -786,8 +787,7 @@ void SCH_ITEM::AddConnectionTo( const SCH_SHEET_PATH& aSheet, SCH_ITEM* aItem )
 }
 
 
-SCH_CONNECTION* SCH_ITEM::InitializeConnection( const SCH_SHEET_PATH& aSheet,
-                                                CONNECTION_GRAPH* aGraph )
+SCH_CONNECTION* SCH_ITEM::InitializeConnection( const SCH_SHEET_PATH& aSheet, CONNECTION_GRAPH* aGraph )
 {
     SCH_CONNECTION* connection = Connection( &aSheet );
 
@@ -810,8 +810,7 @@ SCH_CONNECTION* SCH_ITEM::InitializeConnection( const SCH_SHEET_PATH& aSheet,
 }
 
 
-SCH_CONNECTION* SCH_ITEM::GetOrInitConnection( const SCH_SHEET_PATH& aSheet,
-                                               CONNECTION_GRAPH* aGraph )
+SCH_CONNECTION* SCH_ITEM::GetOrInitConnection( const SCH_SHEET_PATH& aSheet, CONNECTION_GRAPH* aGraph )
 {
     if( !IsConnectable() )
         return nullptr;
@@ -968,6 +967,28 @@ int SCH_ITEM::compare( const SCH_ITEM& aOther, int aCompareFlags ) const
             return 1;
     }
 
+    for( const auto& [name, value] : m_customProperties )
+    {
+        if( !aOther.m_customProperties.contains( name ) )
+        {
+            if( !value.IsEmpty() )
+                return 1;
+
+            continue;
+        }
+
+        int cmp = aOther.m_customProperties.at( name ).Cmp( value );
+
+        if( cmp != 0 )
+            return cmp;
+    }
+
+    for( const auto& [name, value] : aOther.m_customProperties )
+    {
+        if( !m_customProperties.contains( name ) )
+            return -1;
+    }
+
     return 0;
 }
 
@@ -1028,13 +1049,22 @@ int SCH_ITEM::GetEffectivePenWidth( const SCH_RENDER_SETTINGS* aSettings ) const
 
 bool SCH_ITEM::RenderAsBitmap( double aWorldScale ) const
 {
+    return aWorldScale < BitmapWorldScaleLimit();
+}
+
+
+double SCH_ITEM::BitmapWorldScaleLimit() const
+{
     if( HasHypertext() )
-        return false;
+        return 0.0;
 
     if( const EDA_TEXT* text = dynamic_cast<const EDA_TEXT*>( this ) )
-        return text->GetTextHeight() * aWorldScale < BITMAP_FONT_SIZE_THRESHOLD;
+    {
+        if( text->GetTextHeight() > 0 )
+            return BITMAP_FONT_SIZE_THRESHOLD / static_cast<double>( text->GetTextHeight() );
+    }
 
-    return false;
+    return 0.0;
 }
 
 

@@ -35,6 +35,7 @@
 
 #if defined( _WIN32 )
 #include <windows.h>
+#include <sddl.h>
 #else
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -412,6 +413,26 @@ BOOST_AUTO_TEST_CASE( AtomicWriteFile_PreservesPosixMode )
 }
 
 
+BOOST_AUTO_TEST_CASE( AtomicWriteFile_NewTargetHonoursUmask )
+{
+    KI_TEST::SCOPED_TEMP_DIR tempDir( wxT( "kicad-atomicsave-umask" ) );
+    const wxString target = tempDir.PathStr() + wxFileName::GetPathSeparator() + wxT( "target" );
+    const std::string payload = "fresh\n";
+    const mode_t      previousMask = umask( 022 );
+    wxString          err;
+
+    const bool written = KIPLATFORM::IO::AtomicWriteFile( target, payload.data(), payload.size(), &err );
+
+    umask( previousMask );
+
+    BOOST_REQUIRE_MESSAGE( written, err );
+
+    struct stat st;
+    BOOST_REQUIRE_EQUAL( stat( target.fn_str(), &st ), 0 );
+    BOOST_CHECK_EQUAL( st.st_mode & 0777, 0644 );
+}
+
+
 BOOST_AUTO_TEST_CASE( AtomicWriteFile_FollowsSymlinkTarget )
 {
     // Regression: pre-atomic saves opened the referent via wxFopen so the symlink
@@ -494,6 +515,33 @@ BOOST_AUTO_TEST_CASE( AtomicWriteFile_PreservesWindowsAttributes )
     // Clear READONLY so the SCOPED_TEMP_DIR teardown (std::filesystem::remove_all) can
     // delete the file on Windows, where remove() does not clear the attribute itself.
     SetFileAttributesW( target.wc_str(), FILE_ATTRIBUTE_NORMAL );
+}
+
+
+BOOST_AUTO_TEST_CASE( AtomicWriteFile_SavesWhenPermissionsCannotBeCopied )
+{
+    KI_TEST::SCOPED_TEMP_DIR tempDir( wxT( "kicad-atomicsave-noacl" ) );
+    const wxString target = tempDir.PathStr() + wxFileName::GetPathSeparator() + wxT( "target" );
+    const wxString probe = tempDir.PathStr() + wxFileName::GetPathSeparator() + wxT( "probe" );
+    writeFileContents( target, "original\n" );
+    writeFileContents( probe, "" );
+
+    // An OWNER RIGHTS entry without READ_CONTROL hides the DACL even from the file's owner,
+    // standing in for a cloud-drive volume that has no security descriptor to hand out
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    BOOST_REQUIRE( ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:P(A;;0x11019f;;;OW)(A;;0x11019f;;;WD)", SDDL_REVISION_1, &sd, nullptr ) );
+
+    const BOOL applied = SetFileSecurityW( target.wc_str(), DACL_SECURITY_INFORMATION, sd );
+    LocalFree( sd );
+    BOOST_REQUIRE( applied );
+    BOOST_REQUIRE( !KIPLATFORM::IO::DuplicatePermissions( target, probe ) );
+
+    const std::string payload = "replacement\n";
+    wxString          err;
+    BOOST_REQUIRE_MESSAGE( KIPLATFORM::IO::AtomicWriteFile( target, payload.data(), payload.size(), &err ),
+                           err );
+    BOOST_REQUIRE_EQUAL( KI_TEST::LoadStringData( target ), payload );
 }
 
 #endif // _WIN32

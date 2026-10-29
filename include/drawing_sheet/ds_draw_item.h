@@ -142,6 +142,11 @@ public:
     const VECTOR2I& GetEnd() const { return m_end; }
     void            SetEnd( const VECTOR2I& aPos ) override { m_end = aPos; }
 
+    int GetLength() const
+    {
+        return m_start.Distance( m_end );
+    }
+
     VECTOR2I GetPosition() const override { return GetStart(); }
     void     SetPosition( const VECTOR2I& aPos ) override { SetStart( aPos ); }
 
@@ -549,8 +554,6 @@ public:
      *
      * @param aPageInfo The PAGE_INFO, for page size, margins...
      * @param aTitleBlock The sheet title block, for basic inscriptions.
-     * @param aColor The color for drawing.
-     * @param aAltColor The color for items which need to be "highlighted".
      */
     void BuildDrawItemsList( const PAGE_INFO& aPageInfo, const TITLE_BLOCK& aTitleBlock );
 

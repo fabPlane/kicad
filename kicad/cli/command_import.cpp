@@ -22,6 +22,7 @@
 #include <jobs/job_pcb_import.h>
 #include <jobs/job_sch_import.h>
 #include <jobs/job_import_utils.h>
+#include <ki_exception.h>
 #include <pgm_base.h>
 #include <settings/settings_manager.h>
 #include <project.h>
@@ -34,7 +35,8 @@
 #include <wx/crt.h>
 #include <wx/filename.h>
 
-#include <memory>
+#include <string>
+#include <set>
 #include <vector>
 
 
@@ -54,9 +56,9 @@ CLI::IMPORT_COMMAND::IMPORT_COMMAND() : COMMAND( "import" )
 
     m_argParser.add_argument( "-o", ARG_OUTPUT )
             .default_value( std::string() )
-            .help( UTF8STDSTR( _( "Output project path stem; produces <stem>.kicad_pro plus the "
-                                  "imported <stem>.kicad_pcb and/or <stem>.kicad_sch beside it. "
-                                  "Defaults to the first input's name in the current directory." ) ) )
+            .help( UTF8STDSTR( _( "Output project path stem; produces <stem>.kicad_pro plus "
+                                  "imported board and/or schematic files beside it. Defaults to the first "
+                                  "input's name in the current directory." ) ) )
             .metavar( "PROJECT" );
 
     m_argParser.add_argument( ARG_LAYER_MAP )
@@ -102,6 +104,10 @@ int CLI::IMPORT_COMMAND::doPerform( KIWAY& aKiway )
     if( !outputArg.IsEmpty() )
     {
         projectFn.Assign( outputArg );
+
+        // The argument is a stem, so a dot in it is part of the name unless it names a project file
+        if( projectFn.HasExt() && projectFn.GetExt() != FILEEXT::ProjectFileExtension )
+            projectFn.SetName( projectFn.GetFullName() );
     }
     else
     {
@@ -143,6 +149,7 @@ int CLI::IMPORT_COMMAND::doPerform( KIWAY& aKiway )
 
     bool haveBoard = false;
     bool haveSch = false;
+    std::vector<FILE_INFO_PAIR> boards;
     int  retCode = EXIT_CODES::SUCCESS;
 
     std::map<wxString, wxString> netNameMap;
@@ -151,6 +158,8 @@ int CLI::IMPORT_COMMAND::doPerform( KIWAY& aKiway )
     // Preserve board-first format detection, but defer loading until the schematic supplies its names.
     for( const wxString& input : inputFiles )
     {
+        bool accepted = false;
+
         if( !haveBoard )
         {
             JOB_PCB_IMPORT probe;
@@ -161,9 +170,65 @@ int CLI::IMPORT_COMMAND::doPerform( KIWAY& aKiway )
 
             if( pcbResult == EXIT_CODES::SUCCESS )
             {
-                haveBoard = true;
-                boardInput = input;
-                continue;
+                const auto& sourcePcbs = probe.m_projectBoards;
+
+                if( !sourcePcbs.empty() )
+                {
+                    const bool         hasMultipleBoards = sourcePcbs.size() > 1;
+                    std::set<wxString> usedBoardNames;
+
+                    for( const auto& [pcbId, sourceName] : sourcePcbs )
+                    {
+                        wxFileName outputFn = boardFn;
+
+                        if( hasMultipleBoards )
+                        {
+                            wxString boardName = EscapeString( sourceName, CTX_FILENAME );
+
+                            if( boardName.empty() )
+                                boardName = pcbId;
+
+                            wxString uniqueBoardName = boardName;
+                            unsigned duplicate = 2;
+
+                            while( !usedBoardNames.insert( uniqueBoardName ).second )
+                            {
+                                uniqueBoardName = wxString::Format( wxS( "%s-%u" ), boardName, duplicate );
+                                ++duplicate;
+                            }
+
+                            outputFn.SetName( uniqueBoardName );
+                        }
+
+                        JOB_PCB_IMPORT pcbJob;
+                        pcbJob.m_inputFile = input;
+                        pcbJob.m_importPcbId = pcbId;
+                        pcbJob.m_isPartOfMultiBoardProject = hasMultipleBoards;
+                        pcbJob.SetConfiguredOutputPath( outputFn.GetFullPath() );
+
+                        pcbResult = aKiway.ProcessJob( KIWAY::FACE_PCB, &pcbJob, &reporter );
+
+                        if( pcbResult != EXIT_CODES::SUCCESS )
+                        {
+                            retCode = pcbResult;
+                            break;
+                        }
+
+                        boards.emplace_back( KIID(), outputFn.GetFullName() );
+                        haveBoard = true;
+                    }
+
+                    if( retCode != EXIT_CODES::SUCCESS )
+                        break;
+                }
+                else
+                {
+                    boards.emplace_back( KIID(), boardFn.GetFullName() );
+                    haveBoard = true;
+                    boardInput = input;
+                }
+
+                accepted = true;
             }
             else if( pcbResult != EXIT_CODES::ERR_UNKNOWN_FILE_FORMAT )
             {
@@ -172,6 +237,8 @@ int CLI::IMPORT_COMMAND::doPerform( KIWAY& aKiway )
             }
         }
 
+        // Some formats keep the board and the schematic in one file, so a board input is offered to both faces;
+        // a board file without a schematic is still a good board
         if( !haveSch )
         {
             JOB_SCH_IMPORT schJob;
@@ -185,14 +252,17 @@ int CLI::IMPORT_COMMAND::doPerform( KIWAY& aKiway )
             {
                 haveSch = true;
                 netNameMap = std::move( schJob.m_netNameMap );
-                continue;
+                accepted = true;
             }
-            else if( schResult != EXIT_CODES::ERR_UNKNOWN_FILE_FORMAT )
+            else if( schResult != EXIT_CODES::ERR_UNKNOWN_FILE_FORMAT && !accepted )
             {
                 retCode = schResult;
                 break;
             }
         }
+
+        if( accepted )
+            continue;
 
         if( haveBoard && haveSch )
         {
@@ -208,7 +278,7 @@ int CLI::IMPORT_COMMAND::doPerform( KIWAY& aKiway )
         break;
     }
 
-    if( retCode == EXIT_CODES::SUCCESS && haveBoard )
+    if( retCode == EXIT_CODES::SUCCESS && !boardInput.empty() )
     {
         JOB_PCB_IMPORT pcbJob;
         pcbJob.m_inputFile = boardInput;
@@ -230,9 +300,8 @@ int CLI::IMPORT_COMMAND::doPerform( KIWAY& aKiway )
         // The schematic handler already registered any sheets; link the board here.
         if( haveBoard )
         {
-            std::vector<FILE_INFO_PAIR>& boards = project->GetProjectFile().GetBoards();
-            boards.clear();
-            boards.emplace_back( std::make_pair( KIID(), boardFn.GetFullName() ) );
+            std::vector<FILE_INFO_PAIR>& projectBoards = project->GetProjectFile().GetBoards();
+            projectBoards = boards;
         }
 
         if( mgr.SaveProject( projectFn.GetFullPath() ) )

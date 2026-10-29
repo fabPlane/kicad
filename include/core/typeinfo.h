@@ -45,7 +45,7 @@ bool IsA( const I& aObject )
 /**
  * A lightweight dynamic downcast.
  *
- * Cast \a aObject to type Casted*.  Uses #EDA_ITEM::Type() and #EDA_ITEM::ClassOf() to
+ * Cast \a aObject to type Casted*.  Uses #EDA_ITEM::Type() and object specific ClassOf method to
  * check if type matches.
  *
  * @param aObject object to be casted.
@@ -238,6 +238,7 @@ enum KICAD_T
     PCB_GRID_ITEM_T,                    ///< a subgrid placed on a board
     PCB_DRILL_CHART_T,     ///< class PCB_DRILL_CHART, a live drill chart derived from PCB_TABLE
     PCB_DRILL_MAP_T,       ///< class PCB_DRILL_MAP, drill symbols drawn at the holes
+    PCB_3D_BODY_T,         ///< class PCB_3D_BODY, a 3D body (extruded or model) on a footprint
 
     // End value
     MAX_STRUCT_TYPE_ID
@@ -317,6 +318,14 @@ constexpr KICAD_T BaseType( const KICAD_T aType )
 constexpr bool IsNullType( const KICAD_T aType )
 {
     return aType <= 0;
+}
+
+/**
+ * A PCB_TABLE subclass whose cells are generated from the board rather than typed by the user
+ */
+constexpr bool IsGeneratedTableType( const KICAD_T aType )
+{
+    return aType == PCB_DRILL_CHART_T;
 }
 
 constexpr bool IsInstantiableType( const KICAD_T aType )
@@ -465,6 +474,7 @@ constexpr bool IsPcbnewType( const KICAD_T aType )
     case PCB_TARGET_T:
     case PCB_DRILL_CHART_T:
     case PCB_DRILL_MAP_T:
+    case PCB_3D_BODY_T:
     case PCB_POINT_T:
     case PCB_ZONE_T:
     case PCB_ITEM_LIST_T:

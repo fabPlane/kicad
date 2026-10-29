@@ -20,13 +20,15 @@
 
 #pragma once
 
+#include <io/common/plugin_common_choose_project.h>
 #include <io/io_base.h>
 #include <pcb_io/pcb_io_mgr.h>
 
 #include <memory>
+#include <utility>
+#include <vector>
 
 #include <config.h>
-#include <vector>
 #include <wx/arrstr.h>
 #include <i18n_utility.h>
 
@@ -55,7 +57,7 @@ inline constexpr char APPEND_PRESERVE_DESTINATION_STACKUP[] = "append_preserve_d
  *The compiler writes the "zero argument" constructor for a PCB_IO automatically if you do
  * not provide one.  If you decide you need to provide a zero argument constructor of your
  * own design, that is allowed.  It must be public, and it is what the #PCB_IO_MGR uses.  Parameters
- * may be passed into a PCB_IO via the #PROPERTIES variable for any of the public API functions
+ * may be passed into a PCB_IO via the properties map variable for any of the public API functions
  * which take one.
  *
  *
@@ -76,7 +78,7 @@ class PCB_IO : public IO_BASE
 {
 public:
     /**
-     * Returns board file description for the PCB_IO.
+     * Return board file description for the PCB_IO.
      */
     virtual const IO_BASE::IO_FILE_DESC GetBoardFileDesc() const
     {
@@ -89,19 +91,40 @@ public:
     bool IsPCB_IO() const override { return true; }
 
     /**
-     * Checks if this PCB_IO can read the specified board file.
+     * Check if this PCB_IO can read the specified board file.
      * If not overriden, extension check is used.
      */
+
+    /**
+     * Return the PCB document identifiers and source names in a project container.
+     *
+     * Plugins that do not support project containers return an empty list.
+     */
+    virtual std::vector<std::pair<wxString, wxString>>
+    EnumerateProjectBoards( const wxString& aFileName ) const
+    {
+        return {};
+    }
+
+    /**
+     * Return the KiCad projects a project container splits into, one per board entry and one per PCB or schematic
+     * no entry names.  Plugins that do not support project containers return an empty list.
+     */
+    virtual std::vector<IMPORT_PROJECT_DESC> EnumerateProjectEntries( const wxString& aFileName ) const
+    {
+        return {};
+    }
+
     virtual bool CanReadBoard( const wxString& aFileName ) const;
 
     /**
-     * Checks if this PCB_IO can read a footprint from specified file or directory.
+     * Check if this PCB_IO can read a footprint from specified file or directory.
      * If not overriden, extension check is used.
      */
     virtual bool CanReadFootprint( const wxString& aFileName ) const;
 
     /**
-     * Registers a KIDIALOG callback for collecting info from the user.
+     * Register a KIDIALOG callback for collecting info from the user.
      */
     virtual void SetQueryUserCallback( std::function<bool( wxString aTitle, int aIcon,
                                                            wxString aMessage,
@@ -138,7 +161,10 @@ public:
      * Same as \ref LoadBoard(), but appends the loaded board to an existing board, which must
      * already exist.
      *
+     * @param aFileName is the file name of the board to load and append to \a aAppendToMe.
      * @param aAppendToMe is the existing board to append to. The caller always owns it.
+     * @param[in] aProperties are any custom properties for the plugin.
+     * @param[in] aProject is an optional #PROJECT object.
      */
     void LoadAndAppendBoard( const wxString& aFileName, BOARD& aAppendToMe,
                              const std::map<std::string, UTF8>* aProperties = nullptr, PROJECT* aProject = nullptr );
@@ -152,6 +178,13 @@ public:
      * @return Footprints (caller owns the objects)
      */
     virtual std::vector<FOOTPRINT*> GetImportedCachedLibraryFootprints();
+    /**
+     * Return custom DRC rules generated while importing the most recent board.
+     *
+     * The caller owns persistence of these rules beside the imported KiCad board.
+     */
+    virtual wxString GetImportedDesignRules() const { return wxEmptyString; }
+
 
     /**
      * Write @a aBoard to a storage file in a format that this PCB_IO implementation knows
@@ -205,7 +238,7 @@ public:
      * If this is a footprint library, the first footprint should be loaded.
      * The default implementation uses FootprintEnumerate and FootprintLoad to load first footprint.
      *
-     * @param aLibraryPath is a path of the footprint file.
+     * @param aFootprintPath is a path of the footprint file.
      * @param aFootprintNameOut is the name output of the loaded footprint.
      * @param aProperties is an associative array that can be used to tell the loader
      *                    implementation to do something special, because it can take
@@ -319,12 +352,11 @@ public:
      * Append supported PLUGIN options to @a aListToAppenTo along with internationalized
      * descriptions.
      *
-     * Options are typically appended so that a derived #PLUGIN can call its base class
+     * Options are typically appended so that a derived #PCB_IO can call its base class
      * function by the same name first, thus inheriting options declared there.  Some base
      * class options could pertain to all Footprint*() functions in all derived PLUGINs.
      *
-     * @note Since aListToAppendTo is a #PROPERTIES object, all options will be unique and
-     *       last guy wins.
+     * @note Since aListToAppendTo is a map all options will be unique and the last guy wins.
      *
      * @param aListToAppendTo holds a tuple of
      * <dl>
@@ -357,9 +389,13 @@ protected:
     /**
      * Parse @a aFileName into @a aBoard.  The caller owns @a aBoard in both cases.
      *
+     * @param aFileName is the file name of the board to load.
+     * @param[in] aBoard is the #BOARD object to load \a aFileName into.
      * @param aIsNewLoad is true for a fresh load (adopt the file's setup, keep the
      *                   file's UUIDs) and false when merging into an existing board
      *                   (preserve its setup, regenerate UUIDs that would clash).
+     * @param aProperties are any optional properties used by the plugin.
+     * @param aProject
      */
     virtual void loadBoard( const wxString& aFileName, BOARD& aBoard, bool aIsNewLoad,
                             const std::map<std::string, UTF8>* aProperties, PROJECT* aProject );

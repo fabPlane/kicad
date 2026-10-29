@@ -19,6 +19,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <bitmaps.h>
 #include <settings/settings_manager.h>
 #include <advanced_config.h>
 #include <gestfich.h>
@@ -57,12 +58,10 @@ wxDEFINE_EVENT( EDA_EVT_CLOSE_ERC_DIALOG, wxCommandEvent );
 
 
 // Route marker exclusion through the provider so its cached severity counts stay in sync.
-static void setMarkerExcluded( const std::shared_ptr<RC_ITEMS_PROVIDER>& aProvider,
-                               SCH_MARKER* aMarker, bool aExcluded,
-                               const wxString& aComment = wxEmptyString )
+static void setMarkerExcluded( const std::shared_ptr<RC_ITEMS_PROVIDER>& aProvider, SCH_MARKER* aMarker,
+                               bool aExcluded, const wxString& aComment = wxEmptyString )
 {
-    static_cast<SHEETLIST_ERC_ITEMS_PROVIDER&>( *aProvider ).SetMarkerExcluded( aMarker, aExcluded,
-                                                                                aComment );
+    static_cast<SHEETLIST_ERC_ITEMS_PROVIDER&>( *aProvider ).SetMarkerExcluded( aMarker, aExcluded, aComment );
 }
 
 
@@ -76,6 +75,25 @@ static SCHEMATIC* g_lastERCSchematic = nullptr;
 static bool       g_lastERCRun = false;
 
 static std::vector<std::pair<wxString, int>> g_lastERCIgnored;
+
+
+static SCH_MARKER* findMarker( SCHEMATIC* aSchematic, const std::shared_ptr<RC_ITEM>& aItem )
+{
+    SCH_SCREENS screens( aSchematic->Root() );
+
+    for( SCH_SCREEN* screen = screens.GetFirst(); screen; screen = screens.GetNext() )
+    {
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_MARKER_T ) )
+        {
+            SCH_MARKER* marker = static_cast<SCH_MARKER*>( item );
+
+            if( marker->GetRCItem() == aItem )
+                return marker;
+        }
+    }
+
+    return nullptr;
+}
 
 
 DIALOG_ERC::DIALOG_ERC( SCH_EDIT_FRAME* parent ) :
@@ -103,7 +121,6 @@ DIALOG_ERC::DIALOG_ERC( SCH_EDIT_FRAME* parent ) :
 
     m_markerTreeModel = new ERC_TREE_MODEL( parent, m_markerDataView );
     m_markerDataView->AssociateModel( m_markerTreeModel );
-    m_markerTreeModel->Update( m_markerProvider, getSeverities() );
 
     // Prevent RTL locales from mirroring the text in the data views
     m_markerDataView->SetLayoutDirection( wxLayout_LeftToRight );
@@ -181,21 +198,18 @@ void DIALOG_ERC::UpdateAnnotationWarning()
 {
     if( m_parent->CheckAnnotate(
                 []( ERCE_T, const wxString&, SCH_REFERENCE*, SCH_REFERENCE* )
-                {
-                },
-                ANNOTATE_ALL,
-                true,
-                SYMBOL_FILTER_NON_POWER ) )
+                {},
+                ANNOTATE_ALL, true ) )
     {
         if( !m_infoBar->IsShownOnScreen() )
         {
             m_infoBar->RemoveAllButtons();
             m_infoBar->AddLink( _( "Show Annotation dialog" ),
-                          [&]( wxHyperlinkEvent& aEvent )
-                          {
-                              wxHtmlLinkEvent htmlEvent( aEvent.GetId(), wxHtmlLinkInfo( aEvent.GetURL() ) );
-                              OnLinkClicked( htmlEvent );
-                          } );
+                                [&]( wxHyperlinkEvent& aEvent )
+                                {
+                                    wxHtmlLinkEvent htmlEvent( aEvent.GetId(), wxHtmlLinkInfo( aEvent.GetURL() ) );
+                                    OnLinkClicked( htmlEvent );
+                                } );
 
             m_infoBar->ShowMessage( _( "Schematic is not fully annotated. ERC results will be incomplete." ) );
         }
@@ -534,9 +548,7 @@ void DIALOG_ERC::OnRunERCClick( wxCommandEvent& event )
                 SCH_MARKER* marker = new SCH_MARKER( std::move( ercItem ), aItemA->GetSymbol()->GetPosition() );
                 aItemA->GetSheetPath().LastScreen()->Append( marker );
             },
-            ANNOTATE_ALL,
-            true,
-            SYMBOL_FILTER_NON_POWER );
+            ANNOTATE_ALL, true );
 
     testErc();
 
@@ -647,11 +659,15 @@ void DIALOG_ERC::OnERCItemSelected( wxDataViewEvent& aEvent )
             case RC_TREE_NODE::MAIN_ITEM:
                 if( ercItem->MainItemHasSheetPath() )
                     sheet = ercItem->GetMainItemSheetPath();
+
                 break;
+
             case RC_TREE_NODE::AUX_ITEM:
                 if( ercItem->AuxItemHasSheetPath() )
                     sheet = ercItem->GetAuxItemSheetPath();
+
                 break;
+
             default:
                 break;
             }
@@ -713,8 +729,12 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
     ERC_SETTINGS& settings = m_parent->Schematic().ErcSettings();
 
     std::shared_ptr<RC_ITEM> rcItem = node->m_RcItem;
+    SCH_MARKER*              currentMarker = findMarker( m_currentSchematic, rcItem );
     wxString                 listName;
     wxMenu                   menu;
+
+    if( !currentMarker )
+        return;
 
     switch( settings.GetSeverity( rcItem->GetErrorCode() ) )
     {
@@ -741,7 +761,7 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
         ID_EDIT_SEVERITIES,
     };
 
-    if( rcItem->GetParent()->IsExcluded() )
+    if( currentMarker->IsExcluded() )
     {
         menu.Append( ID_REMOVE_EXCLUSION,
                      _( "Remove exclusion for this violation" ),
@@ -827,14 +847,27 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
     bool modified = false;
     int  command = GetPopupMenuSelectionFromUser( menu );
 
+    // A popup runs a nested event loop, so the marker may have been removed while it was open.
+    currentMarker = findMarker( m_currentSchematic, rcItem );
+    node = RC_TREE_MODEL::ToNode( aEvent.GetItem() );
+
+    if( !currentMarker || !node )
+        return;
+
     switch( command )
     {
     case ID_EDIT_EXCLUSION_COMMENT:
-        if( SCH_MARKER* marker = dynamic_cast<SCH_MARKER*>( node->m_RcItem->GetParent() ) )
+        if( SCH_MARKER* marker = currentMarker )
         {
             WX_TEXT_ENTRY_DIALOG dlg( this, wxEmptyString, _( "Exclusion Comment" ), marker->GetComment(), true );
 
             if( dlg.ShowModal() == wxID_CANCEL )
+                break;
+
+            marker = findMarker( m_currentSchematic, rcItem );
+            node = RC_TREE_MODEL::ToNode( aEvent.GetItem() );
+
+            if( !marker || !node )
                 break;
 
             setMarkerExcluded( m_markerProvider, marker, true, dlg.GetValue() );
@@ -847,7 +880,7 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
         break;
 
     case ID_REMOVE_EXCLUSION:
-        if( SCH_MARKER* marker = dynamic_cast<SCH_MARKER*>( node->m_RcItem->GetParent() ) )
+        if( SCH_MARKER* marker = currentMarker )
         {
             setMarkerExcluded( m_markerProvider, marker, false );
             m_parent->GetCanvas()->GetView()->Update( marker );
@@ -861,7 +894,7 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
 
     case ID_ADD_EXCLUSION:
     case ID_ADD_EXCLUSION_WITH_COMMENT:
-        if( SCH_MARKER* marker = dynamic_cast<SCH_MARKER*>( node->m_RcItem->GetParent() ) )
+        if( SCH_MARKER* marker = currentMarker )
         {
             wxString comment;
 
@@ -870,6 +903,12 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
                 WX_TEXT_ENTRY_DIALOG dlg( this, wxEmptyString, _( "Exclusion Comment" ), wxEmptyString, true );
 
                 if( dlg.ShowModal() == wxID_CANCEL )
+                    break;
+
+                marker = findMarker( m_currentSchematic, rcItem );
+                node = RC_TREE_MODEL::ToNode( aEvent.GetItem() );
+
+                if( !marker || !node )
                     break;
 
                 comment = dlg.GetValue();
@@ -887,11 +926,11 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
         break;
 
     case ID_INSPECT_VIOLATION:
-        inspectionTool->InspectERCError( node->m_RcItem );
+        inspectionTool->InspectERCError( rcItem );
         break;
 
     case ID_FIX_VIOLATION:
-        editTool->FixERCError( node->m_RcItem );
+        editTool->FixERCError( rcItem );
         break;
 
     case ID_SET_SEVERITY_TO_ERROR:
@@ -956,10 +995,18 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
 
     case ID_EDIT_PIN_CONFLICT_MAP:
         m_parent->ShowSchematicSetupDialog( _( "Pin Conflicts Map" ) );
+
+        // Rebuild model and view
+        static_cast<RC_TREE_MODEL*>( aEvent.GetModel() )->Update( m_markerProvider, getSeverities() );
+        updateDisplayedCounts();
         break;
 
     case ID_EDIT_SEVERITIES:
         m_parent->ShowSchematicSetupDialog( _( "Violation Severity" ) );
+
+        // Rebuild model and view
+        static_cast<RC_TREE_MODEL*>( aEvent.GetModel() )->Update( m_markerProvider, getSeverities() );
+        updateDisplayedCounts();
         break;
 
     case ID_EDIT_CONNECTION_GRID:
@@ -995,6 +1042,7 @@ void DIALOG_ERC::OnIgnoredItemRClick( wxListEvent& event )
         if( settings.GetSeverity( errorCode ) != severity )
         {
             settings.SetSeverity( errorCode, (SEVERITY) severity );
+            m_ignoredList->DeleteItem( event.m_itemIndex );
 
             updateDisplayedCounts();
             redrawDrawPanel();
@@ -1063,12 +1111,12 @@ void DIALOG_ERC::ExcludeMarker( SCH_MARKER* aMarker )
 
     RC_TREE_NODE* node = nullptr;
 
-    if( m_notebook->GetSelection() == 0 )
+    if( !marker && m_notebook->GetSelection() == 0 )
     {
         node = RC_TREE_MODEL::ToNode( m_markerDataView->GetCurrentItem() );
 
         if( node && node->m_RcItem )
-            marker = dynamic_cast<SCH_MARKER*>( node->m_RcItem->GetParent() );
+            marker = findMarker( m_currentSchematic, node->m_RcItem );
     }
 
     if( !marker || marker->IsExcluded() )
@@ -1156,7 +1204,8 @@ void DIALOG_ERC::OnSaveReport( wxCommandEvent& aEvent )
     ERC_REPORT reportWriter( &m_parent->Schematic(), m_parent->GetUserUnits(), m_markerProvider );
 
     bool success = false;
-    if( fn.GetExt() == FILEEXT::JsonFileExtension )
+
+    if( fn.GetExt().Lower() == FILEEXT::JsonFileExtension )
         success = reportWriter.WriteJsonReport( fn.GetFullPath() );
     else
         success = reportWriter.WriteTextReport( fn.GetFullPath() );

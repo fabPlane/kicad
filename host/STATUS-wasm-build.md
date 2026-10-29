@@ -32,7 +32,7 @@ conditionals in those headers only add *separate derived* classes.  Option (b) w
 - `include/font/fontconfig.h`: no `<fontconfig/fontconfig.h>` under `KICAD_HEADLESS_API`.
 - `common/eda_text.cpp`: `<wx/uri.h>`; `<wx/url.h>` needs wxUSE_SOCKETS.
 - Three transitive includes a GUI wx used to supply: `<wx/log.h>` in `api_server_host.cpp`,
-  `<ki_exception.h>` in `headless_symbol_context.cpp`, `<kiway_player.h>` in `pcbnew.cpp`.
+  `<ki_exception.h>` in `headless_symbol_editor_context.cpp`, `<kiway_player.h>` in `pcbnew.cpp`.
 - `host/wx_headless/wx_colour.cpp`: `#ifdef __WXOSX__` / `__WXGTK__` port split.
 - `host/wasm/main_wasm.cpp`: `EM_JS` event sink → `Module.__kiapiEvent(HEAPU8.subarray(...))`,
   installed from `main()`; `setlocale(LC_ALL,"C.UTF-8")` in a `constructor(101)` so it beats the

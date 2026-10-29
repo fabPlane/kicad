@@ -23,6 +23,7 @@
 #include <functional>
 #include <optional>
 #include <set>
+#include <utility>
 
 #include <geometry/shape_line_chain.h>
 #include <pcb_generator.h>
@@ -156,6 +157,12 @@ public:
 
     void ShowPropertiesDialog( PCB_BASE_EDIT_FRAME* aEditFrame ) override;
 
+    /**
+     * Indicates that the via stack can be selected as a connected entity:
+     * when the selection crosses one, it is included as part of the connected selection.
+     */
+    bool IsSelectableAsConnected() const override { return true; }
+
     void             ApplyPreset( const VIA_STACK_PRESET& aPreset );
     VIA_STACK_PRESET ToPreset() const;
 
@@ -220,6 +227,12 @@ public:
      * previews).
      */
     std::vector<BOARD_ITEM*> BuildMembers( BOARD* aBoard, int aNetCode ) const;
+
+    /**
+     * The microvia diameter and drill that "use netclass values" gives hops on @a aNetCode,
+     * falling back to the current via size when the net class leaves them unset.
+     */
+    static std::pair<int, int> GetNetclassViaSize( BOARD* aBoard, int aNetCode );
 
     // The net shared by every hop. Read from a member when present, else the stored value.
     // Setting it applies the net to every existing member as well.

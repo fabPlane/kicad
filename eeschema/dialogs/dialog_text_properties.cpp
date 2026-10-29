@@ -19,6 +19,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <bitmaps.h>
 #include <sch_edit_frame.h>
 #include <symbol_edit_frame.h>
 #include <widgets/bitmap_button.h>
@@ -236,7 +237,7 @@ void DIALOG_TEXT_PROPERTIES::getContextualTextVars( const wxString& aCrossRef,
         if( schematic )
         {
             SCH_REFERENCE_LIST refs;
-            schematic->Hierarchy().GetSymbols( refs, SYMBOL_FILTER_ALL );
+            schematic->Hierarchy().GetSymbols( refs, SYMBOL_FILTER_NON_POWER );
 
             for( int jj = 0; jj < (int) refs.GetCount(); jj++ )
             {
@@ -352,9 +353,9 @@ bool DIALOG_TEXT_PROPERTIES::TransferDataToWindow()
         SYMBOL* symbol = m_currentItem->GetParentSymbol();
 
         m_privateCheckbox->SetValue( m_currentItem->IsPrivate() );
-        m_commonToAllUnits->SetValue( symbol->IsMultiUnit() && m_currentItem->GetUnit() == 0 );
+        m_commonToAllUnits->SetValue( symbol->IsMultiUnit() && m_currentItem->GetUnit() == ALL_UNITS );
         m_commonToAllUnits->Enable( symbol->IsMultiUnit() );
-        m_commonToAllBodyStyles->SetValue( symbol->IsMultiBodyStyle() && m_currentItem->GetBodyStyle() == 0 );
+        m_commonToAllBodyStyles->SetValue( symbol->IsMultiBodyStyle() && m_currentItem->GetBodyStyle() == ALL_BODY_STYLES );
         m_commonToAllBodyStyles->Enable( symbol->IsMultiBodyStyle() );
     }
 

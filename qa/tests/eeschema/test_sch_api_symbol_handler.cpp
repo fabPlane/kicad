@@ -28,7 +28,7 @@
 #include <api/api_handler_symbol.h>
 #include <api/api_sch_utils.h>
 #include <api/api_utils.h>
-#include <api/headless_symbol_context.h>
+#include <api/headless_symbol_editor_context.h>
 #include <api/common/commands/editor_commands.pb.h>
 #include <api/common/envelope.pb.h>
 #include <api/schematic/schematic_types.pb.h>
@@ -63,8 +63,8 @@ struct API_HANDLER_SYMBOL_FIXTURE
         }
 
         m_symbol = symbol.get();
-        m_context = std::make_shared<HEADLESS_SYMBOL_CONTEXT>( std::move( symbol ), m_libId,
-                                                               &m_settingsManager.Prj() );
+        m_context = std::make_shared<HEADLESS_SYMBOL_EDITOR_CONTEXT>( std::move( symbol ), m_libId,
+                                                                      &m_settingsManager.Prj(), nullptr );
         m_handler = std::make_unique<API_HANDLER_SYMBOL>( m_context );
     }
 
@@ -116,7 +116,7 @@ struct API_HANDLER_SYMBOL_FIXTURE
     SETTINGS_MANAGER                         m_settingsManager;
     LIB_ID                                   m_libId;
     LIB_SYMBOL*                              m_symbol = nullptr;
-    std::shared_ptr<HEADLESS_SYMBOL_CONTEXT> m_context;
+    std::shared_ptr<HEADLESS_SYMBOL_EDITOR_CONTEXT> m_context;
     std::unique_ptr<API_HANDLER_SYMBOL>      m_handler;
 };
 

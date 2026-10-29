@@ -33,8 +33,7 @@
 /* Generate CADSTAR net list. */
 static wxString StartLine( wxT( "." ) );
 
-bool NETLIST_EXPORTER_CADSTAR::writeNetlist( const wxString& aOutFileName,
-                                             unsigned /* aNetlistOptions */,
+bool NETLIST_EXPORTER_CADSTAR::writeNetlist( const wxString& aOutFileName, unsigned /* aNetlistOptions */,
                                              REPORTER& aReporter )
 {
     int ret = 0;
@@ -74,10 +73,11 @@ bool NETLIST_EXPORTER_CADSTAR::writeNetlist( const wxString& aOutFileName,
             for( EDA_ITEM* item : sheet.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
                 sheetItems.push_back( item );
 
-            auto pred = []( const EDA_ITEM* item1, const EDA_ITEM* item2 )
-            {
-                return item1->m_Uuid < item2->m_Uuid;
-            };
+            auto pred =
+                    []( const EDA_ITEM* item1, const EDA_ITEM* item2 )
+                    {
+                        return item1->m_Uuid < item2->m_Uuid;
+                    };
 
             std::sort( sheetItems.begin(), sheetItems.end(), pred );
 
@@ -89,10 +89,10 @@ bool NETLIST_EXPORTER_CADSTAR::writeNetlist( const wxString& aOutFileName,
                 if( !symbol )
                     continue;
 
-                if( symbol->GetExcludedFromBoard() )
+                if( symbol->GetExcludedFromBoard( &sheet, m_exportVariant ) )
                     continue;
 
-                footprint = symbol->GetFootprintFieldText( &sheet, RESOLVED );
+                footprint = symbol->GetFootprintFieldText( &sheet, RESOLVED, m_exportVariant );
 
                 if( footprint.IsEmpty() )
                     footprint = "$noname";
@@ -101,7 +101,7 @@ bool NETLIST_EXPORTER_CADSTAR::writeNetlist( const wxString& aOutFileName,
                 fmt::print( f, "{}     ", TO_UTF8( StartCmpDesc ) );
                 fmt::print( f, "{}", TO_UTF8( msg ) );
 
-                msg = symbol->GetValue( &sheet, RESOLVED );
+                msg = symbol->GetValue( &sheet, RESOLVED, m_exportVariant );
                 msg.Replace( wxT( " " ), wxT( "_" ) );
                 fmt::print( f, "     \"{}\"", TO_UTF8( msg ) );
                 fmt::print( f, "     \"{}\"", TO_UTF8( footprint ) );
@@ -127,7 +127,8 @@ bool NETLIST_EXPORTER_CADSTAR::writeNetlist( const wxString& aOutFileName,
     }
     catch( const fmt::format_error& e )
     {
-        aReporter.Report( wxString::Format( _( "Formatting error writing netlist: %s" ), e.what() ), RPT_SEVERITY_ERROR );
+        aReporter.Report( wxString::Format( _( "Formatting error writing netlist: %s" ), e.what() ),
+                          RPT_SEVERITY_ERROR );
         ret = -1;
     }
 

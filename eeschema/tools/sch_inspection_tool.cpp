@@ -518,6 +518,7 @@ DIALOG_KICAD_DIFF::SHEET_SWITCHER makeSchSwitcher( SCHEMATIC* aRef, SCHEMATIC* a
                 refScreen = sp->LastScreen();
         }
 
+        aCanvas.SetContextItems( {} );
         holder->clear();
 
         if( refScreen )
@@ -788,8 +789,8 @@ int SCH_INSPECTION_TOOL::showSchematicComparison( const wxString& aOtherPath, co
                     }
                     else
                     {
-                        wxFileName newCompFn( wxFileName( drillCurrent.compFile ).GetPath(), sheetFile );
-                        newCompFn.MakeAbsolute();
+                        wxFileName newCompFn( sheetFile );
+                        newCompFn.MakeAbsolute( wxFileName( drillCurrent.compFile ).GetPath() );
 
                         SCHEMATIC* loaded = EESCHEMA_HELPERS::LoadSchematic( newCompFn.GetFullPath(),
                                                                              /*aSetActive*/ false,
@@ -835,6 +836,9 @@ int SCH_INSPECTION_TOOL::showSchematicComparison( const wxString& aOtherPath, co
     }
 
     dlgDiff.ShowModal();
+
+    if( WIDGET_DIFF_CANVAS* canvas = dlgDiff.DiffCanvas() )
+        canvas->SetContextItems( {} );
 
     // Detach schematics from the project before unloading so the project's
     // ERC and schematic settings release cleanly.
@@ -1174,8 +1178,8 @@ int SCH_INSPECTION_TOOL::CompareSchematicWithHistory( const TOOL_EVENT& aEvent )
                     }
                     else
                     {
-                        wxFileName subFn( wxFileName( drillCurrent.compFile ).GetPath(), sheet->GetFileName() );
-                        subFn.MakeAbsolute();
+                        wxFileName subFn( sheet->GetFileName() );
+                        subFn.MakeAbsolute( wxFileName( drillCurrent.compFile ).GetPath() );
 
                         SCHEMATIC* loaded = nullptr;
 

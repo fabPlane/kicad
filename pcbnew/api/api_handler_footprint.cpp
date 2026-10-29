@@ -26,6 +26,7 @@
 #include <board_commit.h>
 #include <footprint.h>
 #include <footprint_edit_frame.h>
+#include <pcb_3d_body.h>
 #include <ki_exception.h>
 #include <pad.h>
 #include <pcb_group.h>
@@ -78,6 +79,22 @@ tl::expected<bool, ApiResponseStatus> API_HANDLER_FOOTPRINT::validateDocumentInt
         ApiResponseStatus e;
         e.set_status( ApiStatusCode::AS_UNHANDLED );
         return tl::unexpected( e );
+    }
+
+    // An empty library nickname addresses an unsaved new footprint
+    if( aDocument.lib_id().library_nickname().empty() )
+    {
+        BOARD* board = this->board();
+
+        if( !board || !board->GetFirstFootprint() )
+        {
+            ApiResponseStatus e;
+            e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( "no footprint is currently open" );
+            return tl::unexpected( e );
+        }
+
+        return true;
     }
 
     LIB_ID target_fp = footprintContext()->GetLoadedFPID();
@@ -228,6 +245,9 @@ std::optional<DocumentSpecifier> API_HANDLER_FOOTPRINT::Document() const
 
     LIB_ID fpid = footprintContext()->GetLoadedFPID();
 
+    if( !board()->GetFirstFootprint() )
+        return response;
+
     doc.set_type( DocumentType::DOCTYPE_FOOTPRINT );
     doc.mutable_lib_id()->set_library_nickname( fpid.GetUniStringLibNickname() );
     doc.mutable_lib_id()->set_entry_name( fpid.GetUniStringLibItemName() );
@@ -343,12 +363,12 @@ static const std::vector<KICAD_T> s_allowedFootprintTypes = {
         PCB_DIMENSION_T,
         PCB_ZONE_T,
         PCB_GROUP_T,
-        PCB_BARCODE_T
+        PCB_BARCODE_T,
+        PCB_3D_BODY_T
 };
 
 
-HANDLER_RESULT<GetItemsResponse> API_HANDLER_FOOTPRINT::handleGetItems(
-        const HANDLER_CONTEXT<GetItems>& aCtx )
+HANDLER_RESULT<GetItemsResponse> API_HANDLER_FOOTPRINT::handleGetItems( const HANDLER_CONTEXT<GetItems>& aCtx )
 {
     // validateItemHeaderDocument already answers AS_UNHANDLED for another editor's
     // document type; anything else it reports is a real error for this client
@@ -382,7 +402,8 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_FOOTPRINT::handleGetItems(
     std::erase_if( items,
                    [&]( const BOARD_ITEM* aItem )
                    {
-                       return !typesRequested.count( aItem->Type() );
+                       return !typesRequested.count( aItem->Type() )
+                              && !typesRequested.count( BaseType( aItem->Type() ) );
                    } );
 
     windowItems( aCtx.Request, items, response,
@@ -404,72 +425,46 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_FOOTPRINT::handleGetItems(
 
 
 bool API_HANDLER_FOOTPRINT::collectItems( const std::vector<KICAD_T>& aTypes, std::vector<BOARD_ITEM*>& items,
-                       std::set<KICAD_T>& typesRequested ) const
+                                          std::set<KICAD_T>& typesRequested ) const
 {
-    FOOTPRINT* footprint = board()->GetFirstFootprint();
-    std::set<KICAD_T> typesInserted;
-    bool              handledAnything = false;
+    FOOTPRINT*        footprint = board()->GetFirstFootprint();
+    std::set<KICAD_T> typesHandled;
 
     for( KICAD_T type : aTypes )
     {
         typesRequested.emplace( type );
 
-        if( typesInserted.count( type ) )
+        if( typesHandled.count( type ) )
             continue;
 
         switch( type )
         {
         case PCB_PAD_T:
-        {
-            handledAnything = true;
-
-            std::copy( footprint->Pads().begin(), footprint->Pads().end(),
-                       std::back_inserter( items ) );
-
-            typesInserted.insert( PCB_PAD_T );
+            std::ranges::copy( footprint->Pads(), std::back_inserter( items ) );
+            typesHandled.insert( PCB_PAD_T );
             break;
-        }
 
         case PCB_FIELD_T:
-        {
-            handledAnything = true;
-
-            std::copy( footprint->GetFields().begin(), footprint->GetFields().end(),
-                       std::back_inserter( items ) );
-
-            typesInserted.insert( PCB_FIELD_T );
+            std::ranges::copy( footprint->GetFields(), std::back_inserter( items ) );
+            typesHandled.insert( PCB_FIELD_T );
             break;
-        }
 
         case PCB_SHAPE_T:
         case PCB_TEXT_T:
         case PCB_TEXTBOX_T:
         case PCB_BARCODE_T:
         case PCB_TABLE_T:
-        {
-            handledAnything = true;
-            bool inserted = false;
-
+        case PCB_DIMENSION_T:
             for( BOARD_ITEM* item : footprint->GraphicalItems() )
             {
-                if( item->Type() == type )
-                {
+                if( item->Type() == type || BaseType( item->Type() ) == type )
                     items.emplace_back( item );
-                    inserted = true;
-                }
             }
 
-            if( inserted )
-                typesInserted.insert( type );
-
+            typesHandled.insert( type );
             break;
-        }
 
         case PCB_TABLECELL_T:
-        {
-            handledAnything = true;
-            bool inserted = false;
-
             for( BOARD_ITEM* item : footprint->GraphicalItems() )
             {
                 if( item->Type() != PCB_TABLE_T )
@@ -479,79 +474,39 @@ bool API_HANDLER_FOOTPRINT::collectItems( const std::vector<KICAD_T>& aTypes, st
                         [&]( BOARD_ITEM* child )
                         {
                             items.emplace_back( child );
-                            inserted = true;
                         },
                         RECURSE_MODE::NO_RECURSE );
             }
 
-            if( inserted )
-                typesInserted.insert( PCB_TABLECELL_T );
-
+            typesHandled.insert( PCB_TABLECELL_T );
             break;
-        }
-
-        case PCB_DIMENSION_T:
-        {
-            handledAnything = true;
-            bool inserted = false;
-
-            for( BOARD_ITEM* item : footprint->GraphicalItems() )
-            {
-                switch( item->Type() )
-                {
-                case PCB_DIM_ALIGNED_T:
-                case PCB_DIM_CENTER_T:
-                case PCB_DIM_RADIAL_T:
-                case PCB_DIM_ORTHOGONAL_T:
-                case PCB_DIM_LEADER_T:
-                    items.emplace_back( item );
-                    inserted = true;
-                    break;
-                default:
-                    break;
-                }
-            }
-
-            // we have to add the dimension subtypes to the requested to get them out
-            typesRequested.insert( { PCB_DIM_ALIGNED_T, PCB_DIM_CENTER_T, PCB_DIM_RADIAL_T,
-                                     PCB_DIM_ORTHOGONAL_T, PCB_DIM_LEADER_T } );
-
-            if( inserted )
-            {
-                typesInserted.insert( { PCB_DIM_ALIGNED_T, PCB_DIM_CENTER_T, PCB_DIM_RADIAL_T,
-                                        PCB_DIM_ORTHOGONAL_T, PCB_DIM_LEADER_T } );
-            }
-
-            break;
-        }
 
         case PCB_ZONE_T:
-        {
-            handledAnything = true;
-
-            std::copy( footprint->Zones().begin(), footprint->Zones().end(),
-                       std::back_inserter( items ) );
-
-            typesInserted.insert( PCB_ZONE_T );
+            std::ranges::copy( footprint->Zones(), std::back_inserter( items ) );
+            typesHandled.insert( PCB_ZONE_T );
             break;
-        }
 
         case PCB_GROUP_T:
-        {
-            handledAnything = true;
-
-            std::copy( footprint->Groups().begin(), footprint->Groups().end(),
-                       std::back_inserter( items ) );
-
-            typesInserted.insert( PCB_GROUP_T );
+            std::ranges::copy( footprint->Groups(), std::back_inserter( items ) );
+            typesHandled.insert( PCB_GROUP_T );
             break;
-        }
+
+        case PCB_3D_BODY_T:
+            for( PCB_3D_BODY* body : footprint->Bodies() )
+            {
+                if( body->GetExtruded()->m_height > 0 )
+                    items.push_back( body );
+            }
+
+            typesHandled.insert( PCB_3D_BODY_T );
+            break;
 
         default:
             break;
         }
     }
-    return handledAnything;
+
+    return !typesHandled.empty();
 }
 
 
@@ -560,7 +515,7 @@ std::map<KICAD_T, uint32_t> API_HANDLER_FOOTPRINT::countItems( const DocumentSpe
     // Every type handleGetItems serves
     static const std::vector<KICAD_T> allTypes = { PCB_PAD_T,     PCB_FIELD_T, PCB_SHAPE_T,     PCB_TEXT_T,
                                                    PCB_TEXTBOX_T, PCB_BARCODE_T, PCB_TABLE_T,   PCB_TABLECELL_T,
-                                                   PCB_DIMENSION_T, PCB_ZONE_T, PCB_GROUP_T };
+                                                   PCB_DIMENSION_T, PCB_ZONE_T, PCB_GROUP_T, PCB_3D_BODY_T };
 
     std::vector<BOARD_ITEM*> items;
     std::set<KICAD_T>        typesRequested;
@@ -571,7 +526,7 @@ std::map<KICAD_T, uint32_t> API_HANDLER_FOOTPRINT::countItems( const DocumentSpe
 
     for( const BOARD_ITEM* item : items )
     {
-        if( typesRequested.count( item->Type() ) )
+        if( typesRequested.count( item->Type() ) || typesRequested.count( BaseType( item->Type() ) ) )
             ++counts[item->Type()];
     }
 

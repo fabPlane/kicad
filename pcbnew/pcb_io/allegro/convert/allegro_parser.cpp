@@ -157,7 +157,9 @@ FMT_VER HEADER_PARSER::FormatFromMagic( uint32_t aMagic )
     switch( masked )
     {
     case 0x00130000: return FMT_VER::V_160;
-    case 0x00130400: return FMT_VER::V_162;
+    case 0x00130200: return FMT_VER::V_161;
+    case 0x00130400:
+    case 0x00130500: return FMT_VER::V_162;
     case 0x00130C00: return FMT_VER::V_164;
     case 0x00131000: return FMT_VER::V_165;
     case 0x00131500: return FMT_VER::V_166;
@@ -180,6 +182,12 @@ FMT_VER HEADER_PARSER::FormatFromMagic( uint32_t aMagic )
     uint32_t majorVer = ( aMagic >> 16 ) & 0xFFFF;
 
     if( majorVer <= 0x0012 )
+        return FMT_VER::V_PRE_V16;
+
+    // Allegro 14 and 15 keep the family in the top byte of the magic
+    const uint32_t topByte = aMagic >> 24;
+
+    if( topByte >= 0x0F && topByte <= 0x12 && ( aMagic & 0x00FF0000 ) == 0 )
         return FMT_VER::V_PRE_V16;
 
     // Struct sizes depend on version, so we can't do anything useful with
@@ -999,6 +1007,23 @@ static std::unique_ptr<BLOCK_BASE> ParseBlock_0x15_16_17_SEGMENT( FILE_STREAM& a
 }
 
 
+static std::unique_ptr<BLOCK_BASE> ParseBlock_0x1A( FILE_STREAM& aStream, FMT_VER aVer )
+{
+    auto block = std::make_unique<BLOCK<BLK_0x1A_UNKNOWN>>( aStream.Position() );
+
+    auto& data = block->GetData();
+
+    data.m_Type = aStream.ReadU8();
+    data.m_T2 = aStream.ReadU16();
+    data.m_Key = aStream.ReadU32();
+    block->SetKey( data.m_Key );
+
+    ReadArrayU32( aStream, data.m_UnknownArray );
+
+    return block;
+}
+
+
 static std::unique_ptr<BLOCK_BASE> ParseBlock_0x1B_NET( FILE_STREAM& stream, FMT_VER aVer )
 {
     auto block = std::make_unique<BLOCK<BLK_0x1B_NET>>( stream.Position() );
@@ -1241,8 +1266,14 @@ static std::unique_ptr<BLOCK_BASE> ParseBlock_0x1D( FILE_STREAM& aStream, FMT_VE
 
     data.m_DataB.resize( data.m_SizeB );
 
+    // This version stores 12 values per copper layer where later ones store 14
+    const size_t layerRecordSize = aVer == FMT_VER::V_161 ? 48 : sizeof( data.m_DataB[0] );
+
     for( auto& item : data.m_DataB )
-        aStream.ReadBytes( item.data(), item.size() );
+    {
+        item.fill( 0 );
+        aStream.ReadBytes( item.data(), layerRecordSize );
+    }
 
     data.m_DataA.resize( data.m_SizeA );
 
@@ -1604,7 +1635,8 @@ static std::unique_ptr<BLOCK_BASE> ParseBlock_0x2A( FILE_STREAM& aStream, FMT_VE
         {
             BLK_0x2A_LAYER_LIST::NONREF_ENTRY& entry = data.m_NonRefEntries->emplace_back();
 
-            entry.m_Name = aStream.ReadStringFixed( 36, true );
+            entry.m_Name = aStream.ReadStringFixed( 32, true );
+            entry.m_Properties = aStream.ReadU32();
         }
     }
     else
@@ -2060,7 +2092,7 @@ static std::unique_ptr<BLOCK_BASE> ParseBlock_0x36( FILE_STREAM& aStream, FMT_VE
                          aStream.Position() );
     }
 
-    // Each block has m_NumItems slots but only m_Count are populated; the rest are
+    // Each block has m_NumItems slots but only the first m_Count are populated; the rest are
     // zeroes. Iterate all slots to stride across them correctly, but only keep the
     // actual existing items.
     data.m_Items.reserve( data.m_Count );
@@ -2490,6 +2522,11 @@ std::unique_ptr<BLOCK_BASE> ALLEGRO::BLOCK_PARSER::ParseBlock( bool& aEndOfObjec
     case 0x17:
     {
         block = ParseBlock_0x15_16_17_SEGMENT( m_stream, m_ver, type );
+        break;
+    }
+    case 0x1A:
+    {
+        block = ParseBlock_0x1A( m_stream, m_ver );
         break;
     }
     case 0x1B:

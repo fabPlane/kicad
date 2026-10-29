@@ -29,7 +29,6 @@
 #include <cstdint>
 #include <map>
 #include <optional>
-#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -50,7 +49,6 @@
 #include <schematic.h>
 #include <sch_screen.h>
 #include <sch_sheet.h>
-#include <sch_sheet_path.h>
 
 #include <sch_io/orcad/orcad_cache.h>
 #include <sch_io/orcad/orcad_cis.h>
@@ -58,6 +56,7 @@
 #include <sch_io/orcad/orcad_library.h>
 #include <sch_io/orcad/orcad_page.h>
 #include <sch_io/orcad/orcad_records.h>
+#include <sch_io/orcad/orcad_stream.h>
 
 
 std::string OrcadNormalizeCfbName( const std::string& aName )
@@ -71,40 +70,6 @@ std::string OrcadNormalizeCfbName( const std::string& aName )
 
 namespace
 {
-
-void assignPostImportUuids( SCHEMATIC* aSchematic, const std::string& aSourceId )
-{
-    std::set<SCH_SCREEN*> screens;
-    size_t                screenOrdinal = 0;
-
-    for( const SCH_SHEET_PATH& path : aSchematic->BuildSheetListSortedByPageNumbers() )
-    {
-        SCH_SCREEN* screen = path.LastScreen();
-
-        if( !screen || !screens.insert( screen ).second )
-            continue;
-
-        std::map<std::string, size_t> ordinals;
-
-        for( SCH_ITEM* item : screen->Items() )
-        {
-            std::string uuid = item->m_Uuid.AsStdString();
-
-            if( uuid.size() > 14 && uuid[14] == '5' )
-                continue;
-
-            VECTOR2I    position = item->GetPosition();
-            std::string role = std::to_string( static_cast<int>( item->Type() ) ) + ":" + std::to_string( position.x )
-                               + ":" + std::to_string( position.y );
-            size_t ordinal = ordinals[role]++;
-            const_cast<KIID&>( item->m_Uuid ) =
-                    KIID::FromName( "orcad-import:" + aSourceId + ":post:" + std::to_string( screenOrdinal ) + ":"
-                                    + role + ":" + std::to_string( ordinal ) );
-        }
-
-        ++screenOrdinal;
-    }
-}
 
 std::vector<char> readStream( const ALTIUM_COMPOUND_FILE& aFile, const CFB::COMPOUND_FILE_ENTRY* aEntry )
 {
@@ -130,14 +95,12 @@ bool isLongFramedPackageStream( const std::vector<char>& aData )
     if( aData.size() < 11 )
         return false;
 
-    auto byte = [&]( size_t aOffset )
-    {
-        return static_cast<uint8_t>( aData[aOffset] );
-    };
-    uint32_t bodyLength = byte( 3 ) | static_cast<uint32_t>( byte( 4 ) ) << 8 | static_cast<uint32_t>( byte( 5 ) ) << 16
-                          | static_cast<uint32_t>( byte( 6 ) ) << 24;
+    ORCAD_STREAM stream( aData );
+    stream.Skip( 3 );
 
-    return byte( 7 ) == 0 && byte( 8 ) == 0 && byte( 9 ) == 0 && byte( 10 ) == 0 && bodyLength <= aData.size() - 11;
+    uint32_t bodyLength = stream.ReadU32();
+
+    return stream.ReadU32() == 0 && bodyLength <= aData.size() - 11;
 }
 
 
@@ -162,39 +125,17 @@ enumChildren( const ALTIUM_COMPOUND_FILE& aFile, const CFB::COMPOUND_FILE_ENTRY*
 }
 
 
-std::string lowerCopy( const std::string& aText )
+void collectPartOccurrences( const ORCAD_OCC_SCOPE& aScope, std::multimap<uint32_t, uint32_t>& aOccurrences )
 {
-    std::string out = aText;
+    for( const auto& [dbId, occurrence] : aScope.partOccurrenceIds )
+        aOccurrences.emplace( dbId, occurrence );
 
-    std::transform( out.begin(), out.end(), out.begin(),
-                    []( unsigned char c )
-                    {
-                        return static_cast<char>( std::tolower( c ) );
-                    } );
-
-    return out;
+    for( const ORCAD_OCC_BLOCK& block : aScope.blocks )
+        collectPartOccurrences( block.scope, aOccurrences );
 }
 
 
-void mergeCisProperties( ORCAD_OCC_SCOPE& aScope, uint32_t aOccurrence,
-                         const std::map<std::string, std::string>& aProperties, bool& aMatched )
-{
-    if( aScope.partRefs.count( aOccurrence ) || aScope.partProps.count( aOccurrence ) )
-    {
-        auto& target = aScope.partProps[aOccurrence];
-
-        for( const auto& [name, value] : aProperties )
-            target.insert_or_assign( name, value );
-
-        aMatched = true;
-    }
-
-    for( ORCAD_OCC_BLOCK& block : aScope.blocks )
-        mergeCisProperties( block.scope, aOccurrence, aProperties, aMatched );
-}
-
-
-void applyCisVariant( const ALTIUM_COMPOUND_FILE& aFile, const CFB::COMPOUND_FILE_ENTRY* aRoot,
+void readCisVariants( const ALTIUM_COMPOUND_FILE& aFile, const CFB::COMPOUND_FILE_ENTRY* aRoot,
                       const std::map<std::string, UTF8>* aProperties, ORCAD_DESIGN& aDesign, REPORTER* aReporter )
 {
     const CFB::COMPOUND_FILE_ENTRY* cisStorage = aFile.FindStreamSingleLevel( aRoot, "CIS", false );
@@ -233,9 +174,11 @@ void applyCisVariant( const ALTIUM_COMPOUND_FILE& aFile, const CFB::COMPOUND_FIL
     if( selected.empty() )
         return;
 
+    // Capture shows the active variant name where the title block reads "<Core Design>"
     auto applyVariantName = [&]( std::vector<ORCAD_RAW_PAGE>& aPages )
     {
         constexpr std::string_view placeholder = "<Core Design>";
+        constexpr std::string_view variantVar = "${VARIANT}";
 
         for( ORCAD_RAW_PAGE& page : aPages )
         {
@@ -247,8 +190,8 @@ void applyCisVariant( const ALTIUM_COMPOUND_FILE& aFile, const CFB::COMPOUND_FIL
 
                     while( ( offset = value.find( placeholder, offset ) ) != std::string::npos )
                     {
-                        value.replace( offset, placeholder.size(), selected );
-                        offset += selected.size();
+                        value.replace( offset, placeholder.size(), variantVar );
+                        offset += variantVar.size();
                     }
                 }
             }
@@ -263,67 +206,34 @@ void applyCisVariant( const ALTIUM_COMPOUND_FILE& aFile, const CFB::COMPOUND_FIL
     for( auto& [folder, pages] : aDesign.unreferencedFolderPages )
         applyVariantName( pages );
 
-    std::map<std::string, const CFB::COMPOUND_FILE_ENTRY*> variantEntries;
+    struct CIS_GROUP
+    {
+        const CFB::COMPOUND_FILE_ENTRY* membership = nullptr;
+        const CFB::COMPOUND_FILE_ENTRY* updates = nullptr;
+        std::string                     schematicName;
+    };
 
-    for( const auto& [name, entry] : enumChildren( aFile, bomStorage, false ) )
-        variantEntries.emplace( name, entry );
+    // Variant definitions name subgroups "<group>_<sub>"; schematic info names them "<group>-<sub>"
+    std::map<std::string, CIS_GROUP> groups;
 
-    auto selectedEntry = variantEntries.find( selected );
-
-    if( selectedEntry == variantEntries.end() )
-        THROW_IO_ERROR( _( "The selected OrCAD CIS variant has no definition storage." ) );
-
-    const CFB::COMPOUND_FILE_ENTRY* definition = aFile.FindStreamSingleLevel( selectedEntry->second, selected, true );
-
-    if( !definition )
-        THROW_IO_ERROR( _( "The selected OrCAD CIS variant has no definition stream." ) );
-
-    std::vector<std::string>        selectedGroups = OrcadCisParseCountedList( readStream( aFile, definition ), 0xF9 );
-    const CFB::COMPOUND_FILE_ENTRY* groupsStorage = aFile.FindStreamSingleLevel( variantStore, "Groups", false );
-    std::map<std::string, const CFB::COMPOUND_FILE_ENTRY*> updateStreams;
-    std::map<std::string, std::string>                     schematicGroupNames;
-
-    if( groupsStorage )
+    if( const CFB::COMPOUND_FILE_ENTRY* groupsStorage =
+                aFile.FindStreamSingleLevel( variantStore, "Groups", false ) )
     {
         for( const auto& [groupName, groupEntry] : enumChildren( aFile, groupsStorage, false ) )
         {
-            schematicGroupNames.emplace( groupName, groupName );
-
-            if( const CFB::COMPOUND_FILE_ENTRY* update =
-                        aFile.FindStreamSingleLevel( groupEntry, "UpdateStorageGroupDataStream", true ) )
-            {
-                updateStreams.emplace( groupName, update );
-            }
+            groups[groupName] = { aFile.FindStreamSingleLevel( groupEntry, groupName, true ),
+                                  aFile.FindStreamSingleLevel( groupEntry, "UpdateStorageGroupDataStream", true ),
+                                  groupName };
 
             for( const auto& [subgroupName, subgroupEntry] : enumChildren( aFile, groupEntry, false ) )
             {
-                schematicGroupNames.emplace( groupName + "_" + subgroupName, groupName + "-" + subgroupName );
-
-                if( const CFB::COMPOUND_FILE_ENTRY* update =
-                            aFile.FindStreamSingleLevel( subgroupEntry, "UpdateStorageSubGroupDataStream", true ) )
-                {
-                    updateStreams.emplace( groupName + "_" + subgroupName, update );
-                }
+                groups[groupName + "_" + subgroupName] = {
+                    aFile.FindStreamSingleLevel( subgroupEntry, subgroupName, true ),
+                    aFile.FindStreamSingleLevel( subgroupEntry, "UpdateStorageSubGroupDataStream", true ),
+                    groupName + "-" + subgroupName
+                };
             }
         }
-    }
-
-    for( const std::string& groupName : selectedGroups )
-    {
-        if( groupName == "Common" || groupName == "CommonNI" )
-            continue;
-
-        auto stream = updateStreams.find( groupName );
-
-        if( stream == updateStreams.end() )
-        {
-            if( schematicGroupNames.count( groupName ) )
-                continue;
-
-            THROW_IO_ERROR( _( "The selected OrCAD CIS variant references an unknown property group." ) );
-        }
-
-        OrcadCisParsePropertyUpdates( readStream( aFile, stream->second ) );
     }
 
     ORCAD_CIS_SCHEMATIC_INFO        schematicInfo;
@@ -363,32 +273,99 @@ void applyCisVariant( const ALTIUM_COMPOUND_FILE& aFile, const CFB::COMPOUND_FIL
         }
     }
 
-    for( const std::string& selectedGroup : selectedGroups )
+    // Schematic info is keyed by placement; repeated child pages give one placement several occurrences
+    std::multimap<uint32_t, uint32_t> partOccurrences;
+    collectPartOccurrences( aDesign.occurrenceRoot, partOccurrences );
+
+    std::map<std::string, const CFB::COMPOUND_FILE_ENTRY*> variantEntries;
+
+    for( const auto& [name, entry] : enumChildren( aFile, bomStorage, false ) )
+        variantEntries.emplace( name, entry );
+
+    for( const std::string& name : names )
     {
-        auto groupName = schematicGroupNames.find( selectedGroup );
+        ORCAD_CIS_VARIANT variant;
+        variant.name = name;
 
-        if( groupName == schematicGroupNames.end() )
-            continue;
-
-        auto group = schematicInfo.find( groupName->second );
-
-        if( group == schematicInfo.end() )
-            continue;
-
-        for( const auto& [occurrence, properties] : group->second )
+        // Capture matches property names without case, so a later spelling replaces an earlier one
+        auto overlay = [&]( uint32_t aOccurrence, const ORCAD_CIS_PROPERTIES& aOverlay )
         {
-            bool matched = false;
-            mergeCisProperties( aDesign.occurrenceRoot, occurrence, properties, matched );
+            ORCAD_CIS_PROPERTIES& target = variant.props[aOccurrence];
 
-            if( !matched )
+            for( const auto& [property, value] : aOverlay )
             {
-                auto& target = aDesign.occurrenceRoot.partProps[occurrence];
+                auto existing = std::find_if( target.begin(), target.end(),
+                                              [&]( const auto& aExisting )
+                                              {
+                                                  return OrcadIEquals( aExisting.first, property );
+                                              } );
 
-                for( const auto& [name, value] : properties )
-                    target.insert_or_assign( name, value );
+                if( existing != target.end() )
+                    target.erase( existing );
+
+                target.emplace( property, value );
+            }
+        };
+
+        auto entry = variantEntries.find( name );
+        const CFB::COMPOUND_FILE_ENTRY* definition =
+                entry != variantEntries.end() ? aFile.FindStreamSingleLevel( entry->second, name, true ) : nullptr;
+
+        if( !definition )
+            THROW_IO_ERROR( wxString::Format( _( "The OrCAD CIS variant '%s' has no definition stream." ),
+                                              wxString::FromUTF8( name ) ) );
+
+        // Later groups override earlier ones, and schematic info overrides a group's stored updates
+        for( const std::string& groupName : OrcadCisParseCountedList( readStream( aFile, definition ), 0xF9 ) )
+        {
+            auto group = groups.find( groupName );
+
+            if( group == groups.end() )
+            {
+                if( groupName == "Common" || groupName == "CommonNI" )
+                    continue;
+
+                THROW_IO_ERROR( wxString::Format( _( "The OrCAD CIS variant '%s' references an unknown "
+                                                     "property group." ),
+                                                  wxString::FromUTF8( name ) ) );
+            }
+
+            if( group->second.membership )
+            {
+                for( const auto& [occurrence, installed] :
+                     OrcadCisParseMemberships( readStream( aFile, group->second.membership ) ) )
+                {
+                    variant.installed[occurrence] = installed;
+                }
+            }
+
+            if( group->second.updates )
+            {
+                for( const auto& [occurrence, properties] :
+                     OrcadCisParsePropertyUpdates( readStream( aFile, group->second.updates ) ) )
+                {
+                    overlay( occurrence, properties );
+                }
+            }
+
+            auto info = schematicInfo.find( group->second.schematicName );
+
+            if( info == schematicInfo.end() )
+                continue;
+
+            for( const auto& [dbId, properties] : info->second )
+            {
+                auto [first, last] = partOccurrences.equal_range( dbId );
+
+                for( auto it = first; it != last; ++it )
+                    overlay( it->second, properties );
             }
         }
+
+        aDesign.cisVariants.push_back( std::move( variant ) );
     }
+
+    aDesign.cisCurrentVariant = selected;
 
     if( aReporter )
     {
@@ -468,6 +445,15 @@ SCH_SHEET* SCH_IO_ORCAD::LoadSchematicFile( const wxString& aFileName, SCHEMATIC
 {
     wxASSERT( !aFileName.IsEmpty() && aSchematic );
 
+    // A Capture design is a whole document whose load replaces the live top-level sheets and settings
+    if( aProperties && aProperties->count( "hierarchical_sheet_load" ) )
+    {
+        THROW_IO_ERROR( wxString::Format( _( "'%s' contains a complete OrCAD Capture design and cannot be "
+                                             "loaded as a hierarchical sheet. Use File > Import > "
+                                             "Non-KiCad Schematic... instead." ),
+                                          aFileName ) );
+    }
+
     std::optional<wxString> sourceHash = IO_UTILS::fileHashMMH3( aFileName );
 
     if( !sourceHash )
@@ -535,23 +521,16 @@ SCH_SHEET* SCH_IO_ORCAD::LoadSchematicFile( const wxString& aFileName, SCHEMATIC
 
         design.library = OrcadParseLibrary( readStream( cfbFile, libraryEntry ) );
 
-        // Pre-2003 designs use pre-preamble framing; pages and the symbol cache each need
-        // their own reader
-        bool isV2 = design.library.versionMajor < 3;
+        // Pre-2003 designs use pre-preamble framing, read as the legacy dialect
+        bool          isV2 = design.library.versionMajor < 3;
+        ORCAD_DIALECT dialect{ isV2, design.library.versionMajor < 2 };
 
-        // 'Cache' stream: symbol defs and package pin maps
+        // 'Cache' stream: symbol defs and package pin maps. The legacy cache has only ever been read
+        // with the long display-property layout
         if( const CFB::COMPOUND_FILE_ENTRY* cacheEntry = cfbFile.FindStreamSingleLevel( root, "Cache", true ) )
         {
-            if( isV2 )
-            {
-                OrcadParseCacheV2( readStream( cfbFile, cacheEntry ), design.library.strings, warnFn, design.symbols,
-                                   design.packages );
-            }
-            else
-            {
-                OrcadParseCache( readStream( cfbFile, cacheEntry ), design.library.strings, warnFn, design.symbols,
-                                 design.packages );
-            }
+            OrcadParseCache( readStream( cfbFile, cacheEntry ), design.library.strings, warnFn, design.symbols,
+                             design.packages, ORCAD_DIALECT{ isV2, false } );
         }
         else
         {
@@ -572,15 +551,12 @@ SCH_SHEET* SCH_IO_ORCAD::LoadSchematicFile( const wxString& aFileName, SCHEMATIC
                 {
                     std::vector<char> data = readStream( cfbFile, entry );
 
-                    if( isV2 || !isLongFramedPackageStream( data ) )
-                    {
-                        OrcadParseOlbPackageStreamV2( data, design.library.strings, extraSymbols, extraPackages,
-                                                      design.library.versionMajor < 2 );
-                    }
-                    else
-                    {
-                        OrcadParsePackageStream( data, design.library.strings, extraSymbols, extraPackages );
-                    }
+                    // Modern designs can also hold short-framed package streams
+                    ORCAD_DIALECT packageDialect{ isV2 || !isLongFramedPackageStream( data ),
+                                                  dialect.shortDisplayProp };
+
+                    OrcadParsePackageStream( data, design.library.strings, extraSymbols, extraPackages,
+                                             packageDialect );
                 }
                 catch( const IO_ERROR& e )
                 {
@@ -655,13 +631,13 @@ SCH_SHEET* SCH_IO_ORCAD::LoadSchematicFile( const wxString& aFileName, SCHEMATIC
         // Root folder = folder matching Library schematic name (any case); others are
         // hierarchical children, skipped here
         std::string rootFolder;
-        std::string schematicName = lowerCopy( design.library.schematicName );
+        std::string schematicName = OrcadLower( design.library.schematicName );
 
         if( !schematicName.empty() )
         {
             for( const std::string& folder : folders )
             {
-                if( lowerCopy( folder ) == schematicName )
+                if( OrcadLower( folder ) == schematicName )
                 {
                     rootFolder = folder;
                     break;
@@ -722,8 +698,7 @@ SCH_SHEET* SCH_IO_ORCAD::LoadSchematicFile( const wxString& aFileName, SCHEMATIC
                 {
                     std::vector<char> orderData = readStream( cfbFile, orderEntry );
 
-                    for( const std::string& pageName : isV2 ? OrcadParsePageOrderV2( orderData, design.library.strings )
-                                                            : OrcadParsePageOrder( orderData ) )
+                    for( const std::string& pageName : OrcadParsePageOrder( orderData, dialect ) )
                     {
                         if( pageEntries.count( pageName )
                             && std::find( ordered.begin(), ordered.end(), pageName ) == ordered.end() )
@@ -764,9 +739,7 @@ SCH_SHEET* SCH_IO_ORCAD::LoadSchematicFile( const wxString& aFileName, SCHEMATIC
                 try
                 {
                     std::vector<char> pageData = readStream( cfbFile, pageEntries[pageName] );
-                    ORCAD_RAW_PAGE   page = isV2 ? OrcadParsePageV2( pageData, design.library.strings, warnFn,
-                                                                     design.library.versionMajor < 2 )
-                                                       : OrcadParsePage( pageData, design.library.strings, warnFn );
+                    ORCAD_RAW_PAGE    page = OrcadParsePage( pageData, design.library.strings, warnFn, dialect );
                     page.sourcePageNumber = pageIndex + 1;
                     page.sourcePageCount = ordered.size();
                     aOutPages.push_back( std::move( page ) );
@@ -788,8 +761,7 @@ SCH_SHEET* SCH_IO_ORCAD::LoadSchematicFile( const wxString& aFileName, SCHEMATIC
         {
             std::vector<char> hierarchyData = readStream( cfbFile, hierarchyEntry );
 
-            design.occurrenceRoot = isV2 ? OrcadReadOccurrenceTreeV2( hierarchyData, design.library.strings )
-                                         : OrcadReadOccurrenceTree( hierarchyData, design.library.strings, warnFn );
+            design.occurrenceRoot = OrcadReadOccurrenceTree( hierarchyData, design.library.strings, warnFn, dialect );
 
             // Block instance dbId -> child folder name, from occurrence tree
             std::function<void( const ORCAD_OCC_SCOPE& )> collectLinks = [&]( const ORCAD_OCC_SCOPE& aScope )
@@ -813,13 +785,13 @@ SCH_SHEET* SCH_IO_ORCAD::LoadSchematicFile( const wxString& aFileName, SCHEMATIC
         std::map<std::string, std::string> folderByLowerName;
 
         for( const auto& folderEntry : folderEntries )
-            folderByLowerName.emplace( lowerCopy( folderEntry.first ), folderEntry.first );
+            folderByLowerName.emplace( OrcadLower( folderEntry.first ), folderEntry.first );
 
         for( const auto& [dbId, childName] : hierarchyLinks )
         {
-            std::string key = lowerCopy( childName );
+            std::string key = OrcadLower( childName );
 
-            if( key == lowerCopy( rootFolder ) || design.childFolderPages.count( key ) )
+            if( key == OrcadLower( rootFolder ) || design.childFolderPages.count( key ) )
                 continue;
 
             auto childIt = folderByLowerName.find( key );
@@ -830,9 +802,9 @@ SCH_SHEET* SCH_IO_ORCAD::LoadSchematicFile( const wxString& aFileName, SCHEMATIC
 
         for( const std::string& folder : folders )
         {
-            std::string key = lowerCopy( folder );
+            std::string key = OrcadLower( folder );
 
-            if( key == lowerCopy( rootFolder ) || design.childFolderPages.count( key ) )
+            if( key == OrcadLower( rootFolder ) || design.childFolderPages.count( key ) )
                 continue;
 
             std::vector<ORCAD_RAW_PAGE>& pages = design.unreferencedFolderPages[key];
@@ -859,7 +831,7 @@ SCH_SHEET* SCH_IO_ORCAD::LoadSchematicFile( const wxString& aFileName, SCHEMATIC
             }
         }
 
-        applyCisVariant( cfbFile, root, aProperties, design, m_reporter );
+        readCisVariants( cfbFile, root, aProperties, design, m_reporter );
     }
     catch( const CFB::CFBException& e )
     {
@@ -870,6 +842,13 @@ SCH_SHEET* SCH_IO_ORCAD::LoadSchematicFile( const wxString& aFileName, SCHEMATIC
 
     converter.Convert( rootSheet );
 
+    // KiCad's default variant is Capture's core design; the variant selected for import becomes current
+    for( const ORCAD_CIS_VARIANT& variant : design.cisVariants )
+        aSchematic->AddVariant( FromOrcadString( variant.name ) );
+
+    if( !design.cisCurrentVariant.empty() )
+        aSchematic->SetCurrentVariant( FromOrcadString( design.cisCurrentVariant ) );
+
     aSchematic->Settings().m_ShowDNPMarkers = false;
 
     auto [dashRatio, gapRatio] = OrcadDashRatios( design.library.versionMajor );
@@ -878,7 +857,6 @@ SCH_SHEET* SCH_IO_ORCAD::LoadSchematicFile( const wxString& aFileName, SCHEMATIC
 
 
     aSchematic->CurrentSheet().UpdateAllScreenReferences();
-    assignPostImportUuids( aSchematic, sourceId );
 
     return rootSheet;
 }
@@ -911,11 +889,11 @@ const std::vector<std::unique_ptr<LIB_SYMBOL>>& SCH_IO_ORCAD::loadOlbSymbols( co
 
         design.library = OrcadParseLibrary( readStream( cfbFile, libraryEntry ) );
 
-        bool isV2 = design.library.versionMajor < 3;
+        bool          isV2 = design.library.versionMajor < 3;
+        ORCAD_DIALECT dialect{ isV2, design.library.versionMajor < 2 };
 
         // Parse one stream, tolerating a single bad/oversized stream without aborting the
         // library. Modern streams use preamble-framed cache reader; v2.0 uses short-prefix readers
-        bool shortDisplayProp = design.library.versionMajor < 2;
 
         auto parseStream = [&]( const CFB::COMPOUND_FILE_ENTRY* aEntry, const std::string& aStreamName,
                                 bool aIsPackage, bool aIsCache = false )
@@ -927,26 +905,21 @@ const std::vector<std::unique_ptr<LIB_SYMBOL>>& SCH_IO_ORCAD::loadOlbSymbols( co
             {
                 std::vector<char> data = readStream( cfbFile, aEntry );
 
-                if( aIsPackage && ( isV2 || !isLongFramedPackageStream( data ) ) )
+                if( aIsPackage )
                 {
-                    OrcadParseOlbPackageStreamV2( data, design.library.strings, extraSymbols, extraPackages,
-                                                  shortDisplayProp );
-                }
-                else if( isV2 )
-                {
-                    OrcadParseOlbSymbolStreamV2( data, design.library.strings, extraSymbols, shortDisplayProp );
+                    ORCAD_DIALECT packageDialect{ isV2 || !isLongFramedPackageStream( data ),
+                                                  dialect.shortDisplayProp };
+
+                    OrcadParsePackageStream( data, design.library.strings, extraSymbols, extraPackages,
+                                             packageDialect );
                 }
                 else if( aIsCache )
                 {
                     OrcadParseCache( data, design.library.strings, warnFn, extraSymbols, extraPackages );
                 }
-                else if( aIsPackage )
-                {
-                    OrcadParsePackageStream( data, design.library.strings, extraSymbols, extraPackages );
-                }
                 else
                 {
-                    OrcadParseSymbolStream( data, design.library.strings, extraSymbols );
+                    OrcadParseSymbolStream( data, design.library.strings, extraSymbols, dialect );
                 }
             }
             catch( const std::exception& e )

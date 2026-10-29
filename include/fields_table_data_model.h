@@ -266,6 +266,9 @@ public:
 
     virtual void ClearCell( int aRow, int aCol ) = 0;
     bool         CanClearCell( int aRow, int aCol );
+    bool         CanCopyCellFromVariant( int aRow, int aCol );
+    /// Copy each item's raw source value into the displayed variant, retaining staged edits.
+    virtual void CopyCellFromVariant( int aRow, int aCol, const wxString& aVariantName ) = 0;
     virtual bool IsCellClear( int aRow, int aCol ) = 0;
     virtual bool IsCellEdited( int aRow, int aCol ) = 0;
     /// Return true if any cell in the row has been edited.
@@ -348,7 +351,7 @@ protected:
     bool             m_includeExcluded;
     bool             m_rebuildsEnabled;
 
-    ///< Items included by the user selection scope
+    /// Items included by the user selection scope
     std::unordered_set<KIID_PATH> m_selectionItems;
 
     wxString              m_currentVariant;  ///< Current variant name for highlighting
@@ -469,6 +472,32 @@ public:
             clearStoredField( item, fieldName );
 
         m_edited = true;
+    }
+
+
+    void CopyCellFromVariant( int aRow, int aCol, const wxString& aVariantName ) override
+    {
+        if( !CanCopyCellFromVariant( aRow, aCol ) )
+            return;
+
+        const wxString& fieldName = m_cols[aCol].m_fieldName;
+        wxString        variant = aVariantName.CmpNoCase( GetDefaultVariantName() ) == 0 ? wxString() : aVariantName;
+        std::vector<wxString> values;
+
+        // Read every source before writing: grouped items may have different source values.
+        for( const ITEM_TYPE& item : m_rows[aRow].GetCellItems() )
+        {
+            FIELD_STORE_VALUE& field = storedField( item, fieldName, variant );
+            wxString           value = field.m_present ? field.m_variants[variant].m_value : wxString();
+
+            if( ColIsAttribute( aCol ) && attributeForcedOnBySheet( item, fieldName, variant ) )
+                value = wxS( "1" );
+
+            values.push_back( value );
+        }
+
+        setCellValues( aRow, aCol, values );
+        updateEditedState();
     }
 
 
@@ -889,7 +918,13 @@ protected:
      *
      * Returns true if the attribute is forced on by a sheet
      */
-    virtual bool attributeForcedOnBySheet( const ITEM_TYPE& aItem, const wxString& aAttributeName ) const
+    bool attributeForcedOnBySheet( const ITEM_TYPE& aItem, const wxString& aAttributeName ) const
+    {
+        return attributeForcedOnBySheet( aItem, aAttributeName, m_currentVariant );
+    }
+
+    virtual bool attributeForcedOnBySheet( const ITEM_TYPE& aItem, const wxString& aAttributeName,
+                                           const wxString& aVariantName ) const
     {
         return false;
     }
@@ -1199,6 +1234,15 @@ protected:
         field.m_variants[fieldVariant( aFieldName, m_currentVariant )].m_value = aValue;
     }
 
+    /// Write one value per item represented by the cell. Models may propagate shared storage.
+    virtual void setCellValues( int aRow, int aCol, const std::vector<wxString>& aValues )
+    {
+        std::span<const ITEM_TYPE> items = m_rows[aRow].GetCellItems();
+
+        for( size_t i = 0; i < items.size(); ++i )
+            setStoredFieldValue( items[i], m_cols[aCol].m_fieldName, aValues[i] );
+    }
+
     /**
      * Makes sure a field is at least marked present-but-empty without changing its value
      * if it has one already
@@ -1293,10 +1337,15 @@ protected:
 
     FIELD_STORE_VALUE& storedField( const ITEM_TYPE& aItem, const wxString& aFieldName )
     {
+        return storedField( aItem, aFieldName, m_currentVariant );
+    }
+
+    FIELD_STORE_VALUE& storedField( const ITEM_TYPE& aItem, const wxString& aFieldName, const wxString& aVariantName )
+    {
         auto& fields = m_dataStore[getDataStoreKey( aItem )];
         auto [fieldIt, newField] = fields.try_emplace( aFieldName );
         FIELD_STORE_VALUE& field = fieldIt->second;
-        wxString           variant = fieldVariant( aFieldName, m_currentVariant );
+        wxString           variant = fieldVariant( aFieldName, aVariantName );
         auto [valueIt, newVariant] = field.m_variants.try_emplace( variant );
 
         if( newVariant )

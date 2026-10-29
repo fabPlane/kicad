@@ -265,7 +265,6 @@ struct ORCAD_GRAPHIC_INST
     double                             textScaleY = 1.0;
     bool                               useGenericTextBaseline = false;
     bool                               useSymbolLineWidths = false;
-    std::string                        textFaceOverride;
 };
 
 
@@ -354,6 +353,24 @@ struct ORCAD_PACKAGE
      * Placements carry only their own overrides, so these must be merged in. */
     std::map<std::string, std::string> props;
 };
+
+
+/** Store aRecord under its name, or append it as a variant of the entry already there.
+ * Returns the stored default entry. */
+template <typename T>
+T& OrcadAddOrVariant( std::map<std::string, T>& aMap, T&& aRecord )
+{
+    auto existing = aMap.find( aRecord.name );
+
+    if( existing == aMap.end() )
+    {
+        std::string key = aRecord.name;
+        return aMap.emplace( std::move( key ), std::move( aRecord ) ).first->second;
+    }
+
+    existing->second.variants.push_back( std::move( aRecord ) );
+    return existing->second;
+}
 
 
 /** One interface pin of a hierarchical block, at its absolute page position. */
@@ -462,7 +479,11 @@ struct ORCAD_LIBRARY_INFO
 };
 
 
-/** Wire IDs refer to netmap, which supplies the source net names. */
+/**
+ * One parsed 'Views/\<folder\>/Pages/\<page\>' stream, raw structure lists in stream
+ * order.  The net table (netmap) is authoritative for net names: it maps net
+ * database ids to names, and wires carry the same ids.
+ */
 struct ORCAD_RAW_PAGE
 {
     /** Explicit moves prevent vector growth from selecting a copy of the unique_ptr members. */
@@ -477,21 +498,7 @@ struct ORCAD_RAW_PAGE
     size_t                                       sourcePageNumber = 0; ///< 1-based within the OrCAD folder
     size_t                                       sourcePageCount = 0;  ///< pages in the OrCAD folder
     std::map<std::string, std::string>            props;
-    uint32_t                                     createTimestamp = 0;
-    uint32_t                                     modifyTimestamp = 0;
-    uint32_t                                     width = 0; ///< mils, or um when isMetric
-    uint32_t                                     height = 0;
-    bool                                         isMetric = false;
-    uint16_t                                     horizontalCount = 0;
-    uint16_t                                     verticalCount = 0;
-    uint32_t                                     horizontalWidth = 0;
-    uint32_t                                     verticalWidth = 0;
-    bool                                         horizontalChar = false;
-    bool                                         horizontalAscending = false;
-    bool                                         verticalChar = false;
-    bool                                         verticalAscending = false;
-    bool                                         borderPrinted = false;
-    bool                                         gridRefPrinted = false;
+    ORCAD_PAGE_SETTINGS                          settings;
     std::vector<ORCAD_GRAPHIC_INST>              titleBlocks;
     std::vector<ORCAD_WIRE>                      wires;
     std::vector<ORCAD_PLACED_INSTANCE>           instances;
@@ -518,6 +525,7 @@ struct ORCAD_OCC_SCOPE
     std::map<uint32_t, std::string>                        partUnitRefs; ///< dbId -> package unit reference
     std::map<uint32_t, std::map<std::string, std::string>> partProps; ///< dbId -> occurrence properties
     std::map<uint32_t, std::string>                        netNames; ///< occurrence net id -> effective net name
+    std::map<uint32_t, uint32_t>                           partOccurrenceIds; ///< dbId -> part occurrence id
     std::vector<ORCAD_OCC_BLOCK>                           blocks; ///< hierarchical block occurrences
 };
 
@@ -528,6 +536,15 @@ struct ORCAD_OCC_BLOCK
     uint32_t        targetDbId = 0; ///< type-12 drawn-instance dbId on the parent page
     std::string     childFolder;    ///< child schematic folder name
     ORCAD_OCC_SCOPE scope;          ///< the child's occurrences under this path
+};
+
+
+/** A CIS BOM variant, keyed by part occurrence id. Parts it does not mention follow the core design. */
+struct ORCAD_CIS_VARIANT
+{
+    std::string                                            name;
+    std::map<uint32_t, bool>                               installed;
+    std::map<uint32_t, std::map<std::string, std::string>> props;
 };
 
 
@@ -553,6 +570,9 @@ struct ORCAD_DESIGN
     ORCAD_OCC_SCOPE occurrenceRoot;
 
     bool hasHierarchyBlocks = false;
+
+    std::vector<ORCAD_CIS_VARIANT> cisVariants;
+    std::string                    cisCurrentVariant; ///< CIS variant selected for the import
 };
 
 #endif // ORCAD_RECORDS_H_

@@ -35,7 +35,7 @@
 
 #include <bitmaps.h>
 #include <board.h>
-#include <board_design_settings.h>
+#include <board_design_settings_defaults.h>
 #include <collectors.h>
 #include <component_classes/component_class_manager.h>
 #include <confirm.h>
@@ -44,13 +44,11 @@
 #include <component_classes/component_class.h>
 #include <component_classes/component_class_cache_proxy.h>
 #include <core/kicad_algo.h>
-#include <drc/drc_item.h>
 #include <diff_merge/property_value_converter.h>
 #include <embedded_files.h>
 #include <font/font.h>
 #include <font/outline_font.h>
 #include <geometry/convex_hull.h>
-#include <geometry/shape_segment.h>
 #include <geometry/shape_simple.h>
 #include <geometry/geometry_utils.h>
 #include <i18n_utility.h>
@@ -64,6 +62,7 @@
 #include <constraints/pcb_constraint.h>
 #include <pcb_marker.h>
 #include <pcb_point.h>
+#include <pcb_3d_body.h>
 #include <pcb_reference_image.h>
 #include <pcb_textbox.h>
 #include <pcb_track.h>
@@ -162,7 +161,6 @@ private:
 FOOTPRINT::FOOTPRINT( BOARD* parent ) :
         BOARD_ITEM_CONTAINER( (BOARD_ITEM*) parent, PCB_FOOTPRINT_T ),
         m_attributes( 0 ),
-        m_fpStatus( FP_PADS_are_LOCKED ),
         m_fileFormatVersionAtLoad( 0 ),
         m_duplicatePadNumbersAreJumpers( false ),
         m_allowMissingCourtyard( false ),
@@ -238,9 +236,10 @@ FOOTPRINT::FOOTPRINT( const FOOTPRINT& aFootprint ) :
     m_privateLayers    = aFootprint.m_privateLayers;
 
     m_3D_Drawings      = aFootprint.m_3D_Drawings;
+    m_height           = aFootprint.m_height;
 
-    if( aFootprint.m_extrudedBody )
-        m_extrudedBody = std::make_unique<EXTRUDED_3D_BODY>( *aFootprint.m_extrudedBody );
+    for( PCB_3D_BODY* body : aFootprint.m_bodies )
+        Add( static_cast<PCB_3D_BODY*>( body->Clone() ), ADD_MODE::APPEND );
 
     m_initial_comments = aFootprint.m_initial_comments ? new wxArrayString( *aFootprint.m_initial_comments )
                                                        : nullptr;
@@ -391,8 +390,10 @@ FOOTPRINT::~FOOTPRINT()
         delete d;
 
     m_drawings.clear();
-}
 
+    for( PCB_3D_BODY* body : m_bodies )
+        delete body;
+}
 
 std::vector<PROPERTY_BASE*> FOOTPRINT::GetDynamicProperties() const
 {
@@ -400,18 +401,19 @@ std::vector<PROPERTY_BASE*> FOOTPRINT::GetDynamicProperties() const
     const BOARD* board = GetBoard();
     bool isFPedit = board && board->IsFootprintHolder();
 
-    auto getOrCreate = [&]( const wxString& aName )
-    {
-        auto it = m_dynamicPropertyCache.find( aName );
+    auto getOrCreate =
+            [&]( const wxString& aName )
+            {
+                auto it = m_fieldPropsStorageCache.find( aName );
 
-        if( it == m_dynamicPropertyCache.end() )
-        {
-            auto prop = std::make_unique<PCB_FOOTPRINT_FIELD_PROPERTY>( aName );
-            it = m_dynamicPropertyCache.emplace( aName, std::move( prop ) ).first;
-        }
+                if( it == m_fieldPropsStorageCache.end() )
+                {
+                    auto prop = std::make_unique<PCB_FOOTPRINT_FIELD_PROPERTY>( aName );
+                    it = m_fieldPropsStorageCache.emplace( aName, std::move( prop ) ).first;
+                }
 
-        return it->second.get();
-    };
+                return it->second.get();
+            };
 
     for( PCB_FIELD* field : GetFields() )
     {
@@ -541,6 +543,15 @@ void FOOTPRINT::Serialize( google::protobuf::Any &aContainer ) const
         }
     }
 
+    for( const FP_UNIT_INFO& unit : m_unitInfo )
+    {
+        types::FootprintUnitInfo* unitMsg = footprint.add_symbol_units();
+        unitMsg->set_name( unit.m_unitName.ToUTF8() );
+
+        for( const wxString& pinNumber : unit.m_pins )
+            unitMsg->add_pin_numbers( pinNumber.ToUTF8() );
+    }
+
     aContainer.PackFrom( footprint );
 }
 
@@ -581,6 +592,9 @@ void FOOTPRINT::SerializeDefinition( kiapi::board::types::Footprint* aOutput ) c
             jumperGroup->add_pad_names( padName.ToUTF8() );
     }
 
+    if( GetHeight() > 0 )
+        kiapi::common::PackDistance( *aOutput->mutable_height(), GetHeight() );
+
     for( const PCB_FIELD* item : m_fields )
     {
         if( item->IsMandatory() )
@@ -612,6 +626,15 @@ void FOOTPRINT::SerializeDefinition( kiapi::board::types::Footprint* aOutput ) c
     {
         google::protobuf::Any* itemMsg = aOutput->add_items();
         item->Serialize( *itemMsg );
+    }
+
+    for( const PCB_3D_BODY* body : Bodies() )
+    {
+        if( body->GetExtruded()->m_height > 0 )
+        {
+            google::protobuf::Any* itemMsg = aOutput->add_items();
+            body->Serialize( *itemMsg );
+        }
     }
 
     // Constraints name other items of the footprint as members, so they come after them;
@@ -713,6 +736,9 @@ bool FOOTPRINT::DeserializeDefinition( const kiapi::board::types::Footprint& aIn
 
     SetPrivateLayers( privateLayers );
 
+    if( int height = kiapi::common::UnpackDistance( aInput.height() ); height > 0 )
+        SetHeight( height  );
+
     // Footprint items
     for( PCB_FIELD* field : m_fields )
     {
@@ -722,7 +748,7 @@ bool FOOTPRINT::DeserializeDefinition( const kiapi::board::types::Footprint& aIn
 
     // If this footprint is on a board, uncache all items before clearing
     if( BOARD* board = GetBoard() )
-        board->UncacheChildrenById( this );
+        board->UncacheChildrenById( *this );
 
     Pads().clear();
     GraphicalItems().clear();
@@ -731,6 +757,9 @@ bool FOOTPRINT::DeserializeDefinition( const kiapi::board::types::Footprint& aIn
     Constraints().clear();
     Models().clear();
     Points().clear();
+
+    for( PCB_3D_BODY* body : m_bodies )
+        Remove( body );
 
     for( const google::protobuf::Any& itemMsg : aInput.items() )
     {
@@ -911,6 +940,19 @@ bool FOOTPRINT::Deserialize( const google::protobuf::Any &aContainer )
 
         for( const auto& [fieldName, fieldValue] : variantMsg.fields() )
             variant.SetFieldValue( wxString::FromUTF8( fieldName ), wxString::FromUTF8( fieldValue ) );
+    }
+
+    m_unitInfo.clear();
+
+    for( const types::FootprintUnitInfo& unitMsg : footprint.symbol_units() )
+    {
+        FP_UNIT_INFO unit;
+        unit.m_unitName = wxString::FromUTF8( unitMsg.name() );
+
+        for( const std::string& pinNumber : unitMsg.pin_numbers() )
+            unit.m_pins.emplace_back( wxString::FromUTF8( pinNumber ) );
+
+        m_unitInfo.push_back( std::move( unit ) );
     }
 
     return true;
@@ -1169,7 +1211,7 @@ FOOTPRINT& FOOTPRINT::operator=( FOOTPRINT&& aOther )
 
     // If this footprint is on a board, uncache all items before deleting them
     if( BOARD* board = GetBoard() )
-        board->UncacheChildrenById( this );
+        board->UncacheChildrenById( *this );
 
     // Move the fields
     for( PCB_FIELD* field : m_fields )
@@ -1260,7 +1302,7 @@ FOOTPRINT& FOOTPRINT::operator=( FOOTPRINT&& aOther )
 
     // Copy auxiliary data
     m_3D_Drawings      = aOther.m_3D_Drawings;
-    m_extrudedBody = std::move( aOther.m_extrudedBody );
+    m_height           = aOther.m_height;
     m_libDescription   = aOther.m_libDescription;
     m_keywords         = aOther.m_keywords;
     m_privateLayers    = aOther.m_privateLayers;
@@ -1271,6 +1313,16 @@ FOOTPRINT& FOOTPRINT::operator=( FOOTPRINT&& aOther )
             aOther.m_componentClassCacheProxy->GetStaticComponentClass() );
 
     // Clear the other item's containers since this is a move
+
+    for( PCB_3D_BODY* body : m_bodies )
+        delete body;
+
+    m_bodies.clear();
+
+    for( PCB_3D_BODY* body : aOther.m_bodies )
+        Add( body );
+
+    aOther.m_bodies.clear();
     aOther.m_fields.clear();
     aOther.Pads().clear();
     aOther.Zones().clear();
@@ -1309,7 +1361,7 @@ FOOTPRINT& FOOTPRINT::operator=( const FOOTPRINT& aOther )
 
     // If this footprint is on a board, uncache all items before deleting them
     if( BOARD* board = GetBoard() )
-        board->UncacheChildrenById( this );
+        board->UncacheChildrenById( *this );
 
     std::map<EDA_ITEM*, EDA_ITEM*> ptrMap;
 
@@ -1413,11 +1465,10 @@ FOOTPRINT& FOOTPRINT::operator=( const FOOTPRINT& aOther )
 
     // Copy auxiliary data
     m_3D_Drawings   = aOther.m_3D_Drawings;
+    m_height        = aOther.m_height;
 
-    if( aOther.m_extrudedBody )
-        m_extrudedBody = std::make_unique<EXTRUDED_3D_BODY>( *aOther.m_extrudedBody );
-    else
-        m_extrudedBody.reset();
+    for( PCB_3D_BODY* body : aOther.m_bodies )
+        Add( static_cast<PCB_3D_BODY*>( body->Clone() ), ADD_MODE::APPEND );
 
     m_libDescription = aOther.m_libDescription;
     m_keywords      = aOther.m_keywords;
@@ -1514,7 +1565,7 @@ bool FOOTPRINT::ResolveTextVar( wxString* token, const wxString& aVariantName, i
     if( token->IsSameAs( wxT( "REFERENCE" ) ) )
     {
         if( const PCB_FIELD* reference = GetField( FIELD_T::REFERENCE ) )
-            *token = reference->GetShownText( INTERNAL, aDepth + 1 );
+            *token = reference->GetShownText( variant, INTERNAL, aDepth + 1 );
         else
             token->Clear();
 
@@ -1523,7 +1574,7 @@ bool FOOTPRINT::ResolveTextVar( wxString* token, const wxString& aVariantName, i
     else if( token->IsSameAs( wxT( "VALUE" ) ) )
     {
         if( const PCB_FIELD* value = GetField( FIELD_T::VALUE ) )
-            *token = value->GetShownText( INTERNAL, aDepth + 1 );
+            *token = value->GetShownText( variant, INTERNAL, aDepth + 1 );
         else
             token->Clear();
 
@@ -1613,7 +1664,7 @@ bool FOOTPRINT::ResolveTextVar( wxString* token, const wxString& aVariantName, i
     }
     else if( PCB_FIELD* field = GetField( *token ) )
     {
-        *token = field->GetShownText( INTERNAL, aDepth + 1 );
+        *token = field->GetShownText( variant, INTERNAL, aDepth + 1 );
         return true;
     }
     // The great property resolver: ${PROPERTY.My_Property}
@@ -1642,7 +1693,7 @@ bool FOOTPRINT::ResolveTextVar( wxString* token, const wxString& aVariantName, i
         return true;
     }
 
-    if( GetBoard() && GetBoard()->ResolveTextVar( token, aDepth + 1 ) )
+    if( GetBoard() && GetBoard()->ResolveTextVar( token, aVariantName, aDepth + 1 ) )
         return true;
 
     return false;
@@ -1929,6 +1980,14 @@ void FOOTPRINT::Add( BOARD_ITEM* aBoardItem, ADD_MODE aMode, bool aSkipConnectiv
 
         break;
 
+    case PCB_3D_BODY_T:
+        if( aMode == ADD_MODE::APPEND )
+            m_bodies.push_back( static_cast<PCB_3D_BODY*>( aBoardItem ) );
+        else
+            m_bodies.push_front( static_cast<PCB_3D_BODY*>( aBoardItem ) );
+
+        break;
+
     default:
         wxFAIL_MSG( wxString::Format( wxT( "FOOTPRINT::Add(): BOARD_ITEM type (%d) not handled" ),
                                       aBoardItem->Type() ) );
@@ -1943,7 +2002,7 @@ void FOOTPRINT::Add( BOARD_ITEM* aBoardItem, ADD_MODE aMode, bool aSkipConnectiv
     // Skip caching for copy-constructed footprints (inherited board ptr but not a real member).
     if( BOARD* board = GetBoard(); board && board->IsItemIndexedById( this ) )
     {
-        board->CacheItemSubtreeById( aBoardItem );
+        board->CacheItemSubtreeById( *aBoardItem );
 
         // A pad arriving here never passes through BOARD::Add, so this is the only chance to
         // invalidate the drill caches
@@ -2066,6 +2125,10 @@ void FOOTPRINT::Remove( BOARD_ITEM* aBoardItem, REMOVE_MODE aMode )
 
         break;
 
+    case PCB_3D_BODY_T:
+        std::erase( m_bodies, static_cast<PCB_3D_BODY*>( aBoardItem ) );
+        break;
+
     default:
         wxFAIL_MSG( wxString::Format( wxT( "FOOTPRINT::Remove() needs work: BOARD_ITEM type (%d) not handled" ),
                                       aBoardItem->Type() ) );
@@ -2076,7 +2139,7 @@ void FOOTPRINT::Remove( BOARD_ITEM* aBoardItem, REMOVE_MODE aMode )
     {
         if( board->IsItemIndexedById( this ) )
         {
-            board->UncacheItemSubtreeById( aBoardItem );
+            board->UncacheItemSubtreeById( *aBoardItem );
             board->noteDrillModelChange( aBoardItem );
         }
 
@@ -2847,7 +2910,7 @@ bool FOOTPRINT::HitTest( const BOX2I& aRect, bool aContained, int aAccuracy ) co
     else
     {
         // If the rect does not intersect the bounding box, skip any tests
-        if( !aRect.Intersects( GetBoundingBox( false ) ) )
+        if( !arect.Intersects( GetBoundingBox( false ) ) )
             return false;
 
         // If there are no pads, zones, or drawings, allow intersection with text
@@ -3120,20 +3183,22 @@ void FOOTPRINT::Add3DModel( FP_3DMODEL* a3DModel )
 }
 
 
-EXTRUDED_3D_BODY& FOOTPRINT::EnsureExtrudedBody()
+PCB_3D_BODY& FOOTPRINT::EnsureBody()
 {
-    if( !m_extrudedBody )
-        m_extrudedBody = std::make_unique<EXTRUDED_3D_BODY>();
+    if( PCB_3D_BODY* body = GetBody() )
+        return *body;
 
-    return *m_extrudedBody;
+    PCB_3D_BODY* body = new PCB_3D_BODY( this );
+    Add( body, ADD_MODE::APPEND );
+    return *body;
 }
 
 
-void FOOTPRINT::SetExtrudedBody( std::unique_ptr<EXTRUDED_3D_BODY> aBody )
+void FOOTPRINT::ClearBody()
 {
-    m_extrudedBody = std::move( aBody );
+    for( PCB_3D_BODY* body : m_bodies )
+        Remove( body );
 }
-
 
 bool FOOTPRINT::Matches( const EDA_SEARCH_DATA& aSearchData, void* aAuxData ) const
 {
@@ -3233,6 +3298,15 @@ INSPECT_RESULT FOOTPRINT::Visit( INSPECTOR inspector, void* testData,
 
             break;
 
+        case PCB_3D_BODY_T:
+            if( IterateForward<PCB_3D_BODY*>( m_bodies, inspector, testData, { scanType } )
+                    == INSPECT_RESULT::QUIT )
+            {
+                return INSPECT_RESULT::QUIT;
+            }
+
+            break;
+
         default:
             break;
         }
@@ -3288,6 +3362,9 @@ void FOOTPRINT::RunOnChildren( const std::function<void( BOARD_ITEM* )>& aFuncti
 
         for( PCB_GROUP* group : m_groups )
             aFunction( group );
+
+        for( PCB_3D_BODY* body : m_bodies )
+            aFunction( body );
 
         for( PCB_CONSTRAINT* constraint : m_constraints )
             aFunction( constraint );
@@ -3364,8 +3441,12 @@ std::vector<int> FOOTPRINT::ViewGetLayers() const
 
 double FOOTPRINT::ViewGetLOD( int aLayer, const KIGFX::VIEW* aView ) const
 {
-    if( aLayer == LAYER_CONFLICTS_SHADOW && IsConflicting() )
+    if( aLayer == LAYER_CONFLICTS_SHADOW )
     {
+        // The painter draws nothing here for a footprint that is not in conflict
+        if( !IsConflicting() )
+            return LOD_HIDE;
+
         // The locked shadow shape is shown only if the footprint itself is visible
         if( ( m_layer == F_Cu ) && aView->IsLayerVisible( LAYER_FOOTPRINTS_FR ) )
             return LOD_SHOW;
@@ -3496,7 +3577,7 @@ void FOOTPRINT::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
     SetPosition( finalPos );
 
     // Flip layer
-    BOARD_ITEM::SetLayer( GetBoard() ? GetBoard()->FlipLayer( GetLayer() ) : FlipLayer( GetLayer() ) );
+    BOARD_ITEM::SetLayer( GetFlippedLayer( GetLayer() ) );
 
     const VECTOR2I pos = m_transform.GetTranslate();
 
@@ -3557,9 +3638,8 @@ void FOOTPRINT::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
         m_courtyard_cache->front_hash = m_courtyard_cache->front.GetHash();
     }
 
-    // Flip the extrusion source layer to match the new side.
-    if( m_extrudedBody && m_extrudedBody->m_layer != UNDEFINED_LAYER )
-        m_extrudedBody->m_layer = GetBoard()->FlipLayer( m_extrudedBody->m_layer );
+    for( PCB_3D_BODY* body : m_bodies )
+        body->Flip( pos, aFlipDirection );
 
     if( m_geometry_cache )
         m_geometry_cache->hull.Mirror( pos, FLIP_DIRECTION::TOP_BOTTOM );
@@ -4063,141 +4143,10 @@ void FOOTPRINT::IncrementReference( int aDelta )
 }
 
 
-// Calculate the area of a PolySet, polygons with hole are allowed.
-static double polygonArea( SHAPE_POLY_SET& aPolySet )
+double FOOTPRINT::GetCoverageArea( int aTextMargin ) const
 {
-    // Ensure all outlines are closed, before calculating the SHAPE_POLY_SET area
-    for( int ii = 0; ii < aPolySet.OutlineCount(); ii++ )
-    {
-        SHAPE_LINE_CHAIN& outline = aPolySet.Outline( ii );
-        outline.SetClosed( true );
-
-        for( int jj = 0; jj < aPolySet.HoleCount( ii ); jj++ )
-            aPolySet.Hole( ii, jj ).SetClosed( true );
-    }
-
-    return aPolySet.Area();
-}
-
-
-double FOOTPRINT::GetCoverageArea( const BOARD_ITEM* aItem, const GENERAL_COLLECTOR& aCollector  )
-{
-    int            textMargin = aCollector.GetGuide()->Accuracy();
-    SHAPE_POLY_SET poly;
-
-    if( aItem->Type() == PCB_MARKER_T )
-    {
-        const PCB_MARKER* marker = static_cast<const PCB_MARKER*>( aItem );
-        SHAPE_LINE_CHAIN  markerShape;
-
-        marker->ShapeToPolygon( markerShape );
-        return markerShape.Area();
-    }
-    else if( aItem->Type() == PCB_GROUP_T || aItem->Type() == PCB_GENERATOR_T )
-    {
-        double combinedArea = 0.0;
-
-        for( BOARD_ITEM* member : static_cast<const PCB_GROUP*>( aItem )->GetBoardItems() )
-            combinedArea += GetCoverageArea( member, aCollector );
-
-        return combinedArea;
-    }
-    if( aItem->Type() == PCB_FOOTPRINT_T )
-    {
-        const FOOTPRINT* footprint = static_cast<const FOOTPRINT*>( aItem );
-
-        poly = footprint->GetBoundingHull();
-    }
-    else if( aItem->Type() == PCB_FIELD_T || aItem->Type() == PCB_TEXT_T )
-    {
-        const PCB_TEXT* text = static_cast<const PCB_TEXT*>( aItem );
-
-        text->TransformTextToPolySet( poly, textMargin, ARC_LOW_DEF, ERROR_INSIDE );
-    }
-    else if( aItem->Type() == PCB_TEXTBOX_T )
-    {
-        const PCB_TEXTBOX* tb = static_cast<const PCB_TEXTBOX*>( aItem );
-
-        tb->TransformTextToPolySet( poly, textMargin, ARC_LOW_DEF, ERROR_INSIDE );
-    }
-    else if( aItem->Type() == PCB_SHAPE_T )
-    {
-        // Approximate "linear" shapes with just their width squared, as we don't want to consider
-        // a linear shape as being much bigger than another for purposes of selection filtering
-        // just because it happens to be really long.
-
-        const PCB_SHAPE* shape = static_cast<const PCB_SHAPE*>( aItem );
-
-        switch( shape->GetShape() )
-        {
-        case SHAPE_T::SEGMENT:
-        case SHAPE_T::ARC:
-        case SHAPE_T::BEZIER:
-            return shape->GetWidth() * shape->GetWidth();
-
-        case SHAPE_T::RECTANGLE:
-        case SHAPE_T::CIRCLE:
-        case SHAPE_T::POLY:
-        {
-            if( !shape->IsAnyFill() )
-                return shape->GetWidth() * shape->GetWidth();
-
-            KI_FALLTHROUGH;
-        }
-
-        default:
-            shape->TransformShapeToPolygon( poly, UNDEFINED_LAYER, 0, ARC_LOW_DEF, ERROR_OUTSIDE );
-        }
-    }
-    else if( aItem->Type() == PCB_TRACE_T || aItem->Type() == PCB_ARC_T )
-    {
-        double width = static_cast<const PCB_TRACK*>( aItem )->GetWidth();
-        return width * width;
-    }
-    else if( aItem->Type() == PCB_PAD_T )
-    {
-        static_cast<const PAD*>( aItem )->Padstack().ForEachUniqueLayer(
-                [&]( PCB_LAYER_ID aLayer )
-                {
-                    SHAPE_POLY_SET layerPoly;
-                    aItem->TransformShapeToPolygon( layerPoly, aLayer, 0, ARC_LOW_DEF, ERROR_OUTSIDE );
-                    poly.BooleanAdd( layerPoly );
-                } );
-    }
-    else if( aItem->Type() == PCB_ZONE_T )
-    {
-        const ZONE* zone = static_cast<const ZONE*>( aItem );
-
-        if( zone->GetIsRuleArea() )
-        {
-            // Rule areas are never filled, so TransformShapeToPolygon would report a zero coverage
-            // area and make them appear as the smallest item under the cursor.  That incorrectly
-            // gives them selection precedence over the pads, tracks and footprints they enclose.
-            // Use the outline area so an enclosed item is selected first while the rule area stays
-            // available via its border and the disambiguation menu.
-            poly = *zone->Outline();
-        }
-        else
-        {
-            for( PCB_LAYER_ID layer : zone->GetLayerSet() )
-            {
-                SHAPE_POLY_SET layerPoly;
-                zone->TransformShapeToPolygon( layerPoly, layer, 0, ARC_LOW_DEF, ERROR_OUTSIDE );
-                poly.BooleanAdd( layerPoly );
-            }
-
-            // An unfilled zone has no filled polygons; fall back to the outline so it does not
-            // collapse to a zero coverage area and steal precedence like a rule area would.
-            if( poly.OutlineCount() == 0 )
-                poly = *zone->Outline();
-        }
-    }
-    else
-    {
-        aItem->TransformShapeToPolygon( poly, UNDEFINED_LAYER, 0, ARC_LOW_DEF, ERROR_OUTSIDE );
-    }
-
-    return polygonArea( poly );
+    SHAPE_POLY_SET hull = GetBoundingHull();
+    return polygonArea( hull );
 }
 
 
@@ -4598,291 +4547,6 @@ std::vector<PAD*> FOOTPRINT::GetNetTiePads( PAD* aPad ) const
 }
 
 
-void FOOTPRINT::CheckFootprintAttributes( const std::function<void( const wxString& )>& aErrorHandler )
-{
-    int likelyAttr = ( GetLikelyAttribute() & ( FP_SMD | FP_THROUGH_HOLE ) );
-    int setAttr = ( GetAttributes() & ( FP_SMD | FP_THROUGH_HOLE ) );
-
-    if( setAttr && likelyAttr && setAttr != likelyAttr )
-    {
-        wxString msg;
-
-        switch( likelyAttr )
-        {
-        case FP_THROUGH_HOLE:
-            msg.Printf( _( "(expected 'Through hole'; actual '%s')" ), GetTypeName() );
-            break;
-        case FP_SMD:
-            msg.Printf( _( "(expected 'SMD'; actual '%s')" ), GetTypeName() );
-            break;
-        }
-
-        if( aErrorHandler )
-            (aErrorHandler)( msg );
-    }
-}
-
-
-void FOOTPRINT::CheckPads( UNITS_PROVIDER* aUnitsProvider,
-                           const std::function<void( const PAD*, int,
-                                                     const wxString& )>& aErrorHandler )
-{
-    if( aErrorHandler == nullptr )
-        return;
-
-    for( PAD* pad: Pads() )
-    {
-        pad->CheckPad( aUnitsProvider, false,
-                [&]( int errorCode, const wxString& msg )
-                {
-                    aErrorHandler( pad, errorCode, msg );
-                } );
-    }
-}
-
-
-void FOOTPRINT::CheckShortingPads( const std::function<void( const PAD*, const PAD*, int aErrorCode,
-                                                             const VECTOR2I& )>& aErrorHandler )
-{
-    std::unordered_map<PTR_PTR_CACHE_KEY, int> checkedPairs;
-
-    for( PAD* pad : Pads() )
-    {
-        std::vector<PAD*> netTiePads = GetNetTiePads( pad );
-
-        for( PAD* other : Pads() )
-        {
-            if( other == pad )
-                continue;
-
-            // store canonical order so we don't collide in both directions (a:b and b:a)
-            PAD* a = pad;
-            PAD* b = other;
-
-            if( static_cast<void*>( a ) > static_cast<void*>( b ) )
-                std::swap( a, b );
-
-            if( checkedPairs.find( { a, b } ) == checkedPairs.end() )
-            {
-                checkedPairs[ { a, b } ] = 1;
-
-                if( pad->HasDrilledHole() && other->HasDrilledHole() )
-                {
-                    VECTOR2I pos = pad->GetPosition();
-
-                    if( pad->GetPosition() == other->GetPosition() )
-                    {
-                        aErrorHandler( pad, other, DRCE_DRILLED_HOLES_COLOCATED, pos );
-                    }
-                    else
-                    {
-                        std::shared_ptr<SHAPE_SEGMENT> holeA = pad->GetEffectiveHoleShape( UNDEFINED_LAYER,
-                                                                                           HOLE_TO_HOLE_CONSTRAINT );
-                        std::shared_ptr<SHAPE_SEGMENT> holeB = other->GetEffectiveHoleShape( UNDEFINED_LAYER,
-                                                                                             HOLE_TO_HOLE_CONSTRAINT );
-
-                        if( holeA->Collide( holeB->GetSeg(), 0 ) )
-                            aErrorHandler( pad, other, DRCE_DRILLED_HOLES_TOO_CLOSE, pos );
-                    }
-                }
-
-                if( pad->SameLogicalPadAs( other ) || alg::contains( netTiePads, other ) )
-                    continue;
-
-                if( !( ( pad->GetLayerSet() & other->GetLayerSet() ) & LSET::AllCuMask() ).any() )
-                    continue;
-
-                if( pad->GetBoundingBox().Intersects( other->GetBoundingBox() ) )
-                {
-                    VECTOR2I pos;
-
-                    for( PCB_LAYER_ID l : pad->Padstack().RelevantShapeLayers( other->Padstack() ) )
-                    {
-                        SHAPE*   padShape = pad->GetEffectiveShape( l ).get();
-                        SHAPE*   otherShape = other->GetEffectiveShape( l ).get();
-
-                        if( padShape->Collide( otherShape, 0, nullptr, &pos ) )
-                            aErrorHandler( pad, other, DRCE_SHORTING_ITEMS, pos );
-                    }
-                }
-            }
-        }
-    }
-}
-
-
-void FOOTPRINT::CheckNetTies( const std::function<void( const BOARD_ITEM* aItem,
-                                                        const BOARD_ITEM* bItem,
-                                                        const BOARD_ITEM* cItem,
-                                                        const VECTOR2I& )>& aErrorHandler )
-{
-    // First build a map from pad numbers to allowed-shorting-group indexes.  This ends up being
-    // something like O(3n), but it still beats O(n^2) for large numbers of pads.
-
-    std::map<wxString, int> padNumberToGroupIdxMap = MapPadNumbersToNetTieGroups();
-
-    // Now collect all the footprint items which are on copper layers
-
-    std::vector<BOARD_ITEM*> copperItems;
-
-    for( BOARD_ITEM* item : m_drawings )
-    {
-        if( item->IsOnCopperLayer() )
-            copperItems.push_back( item );
-
-        item->RunOnChildren(
-                [&]( BOARD_ITEM* descendent )
-                {
-                    if( descendent->IsOnCopperLayer() )
-                        copperItems.push_back( descendent );
-                },
-                RECURSE_MODE::RECURSE );
-    }
-
-    for( ZONE* zone : m_zones )
-    {
-        if( !zone->GetIsRuleArea() && zone->IsOnCopperLayer() )
-            copperItems.push_back( zone );
-    }
-
-    for( PCB_FIELD* field : m_fields )
-    {
-        if( field->IsOnCopperLayer() )
-            copperItems.push_back( field );
-    }
-
-    for( PCB_LAYER_ID layer : { F_Cu, In1_Cu, B_Cu } )
-    {
-        // Next, build a polygon-set for the copper on this layer.  We don't really care about
-        // nets here, we just want to end up with a set of outlines describing the distinct
-        // copper polygons of the footprint.
-
-        SHAPE_POLY_SET                         copperOutlines;
-        std::map<int, std::vector<const PAD*>> outlineIdxToPadsMap;
-
-        for( BOARD_ITEM* item : copperItems )
-        {
-            if( item->IsOnLayer( layer ) )
-                item->TransformShapeToPolygon( copperOutlines, layer, 0, GetMaxError(), ERROR_OUTSIDE );
-        }
-
-        copperOutlines.Simplify();
-
-        // Index each pad to the outline in the set that it is part of.
-
-        for( const PAD* pad : m_pads )
-        {
-            for( int ii = 0; ii < copperOutlines.OutlineCount(); ++ii )
-            {
-                if( pad->GetEffectiveShape( layer )->Collide( &copperOutlines.Outline( ii ), 0 ) )
-                    outlineIdxToPadsMap[ ii ].emplace_back( pad );
-            }
-        }
-
-        // Finally, ensure that each outline which contains multiple pads has all its pads
-        // listed in an allowed-shorting group.
-
-        for( const auto& [ outlineIdx, pads ] : outlineIdxToPadsMap )
-        {
-            if( pads.size() > 1 )
-            {
-                const PAD* firstPad = pads[0];
-                int        firstGroupIdx = padNumberToGroupIdxMap[ firstPad->GetNumber() ];
-
-                for( size_t ii = 1; ii < pads.size(); ++ii )
-                {
-                    const PAD* thisPad = pads[ii];
-                    int        thisGroupIdx = padNumberToGroupIdxMap[ thisPad->GetNumber() ];
-
-                    if( thisGroupIdx < 0 || thisGroupIdx != firstGroupIdx )
-                    {
-                        BOARD_ITEM* shortingItem = nullptr;
-                        VECTOR2I    pos = ( firstPad->GetPosition() + thisPad->GetPosition() ) / 2;
-
-                        pos = copperOutlines.Outline( outlineIdx ).NearestPoint( pos );
-
-                        for( BOARD_ITEM* item : copperItems )
-                        {
-                            if( item->HitTest( pos, 1 ) )
-                            {
-                                shortingItem = item;
-                                break;
-                            }
-                        }
-
-                        if( shortingItem )
-                            aErrorHandler( shortingItem, firstPad, thisPad, pos );
-                        else
-                            aErrorHandler( firstPad, thisPad, nullptr, pos );
-                    }
-                }
-            }
-        }
-    }
-}
-
-
-void FOOTPRINT::CheckNetTiePadGroups( const std::function<void( const wxString& )>& aErrorHandler )
-{
-    std::set<wxString> padNumbers;
-    wxString           msg;
-
-    for( const auto& [ padNumber, _ ] : MapPadNumbersToNetTieGroups() )
-    {
-        const PAD* pad = FindPadByNumber( padNumber );
-
-        if( !pad )
-        {
-            msg.Printf( _( "(net-tie pad group contains unknown pad number %s)" ), padNumber );
-            aErrorHandler( msg );
-        }
-        else if( !padNumbers.insert( pad->GetNumber() ).second )
-        {
-            msg.Printf( _( "(pad %s appears in more than one net-tie pad group)" ), padNumber );
-            aErrorHandler( msg );
-        }
-    }
-}
-
-
-void FOOTPRINT::CheckClippedSilk( const std::function<void( BOARD_ITEM* aItemA,
-                                                            BOARD_ITEM* aItemB,
-                                                            const VECTOR2I& aPt )>& aErrorHandler )
-{
-    auto checkColliding =
-            [&]( BOARD_ITEM* item, BOARD_ITEM* other )
-            {
-                for( PCB_LAYER_ID silk : { F_SilkS, B_SilkS } )
-                {
-                    PCB_LAYER_ID mask = silk == F_SilkS ? F_Mask : B_Mask;
-
-                    if( !item->IsOnLayer( silk ) || !other->IsOnLayer( mask ) )
-                        continue;
-
-                    std::shared_ptr<SHAPE> itemShape = item->GetEffectiveShape( silk );
-                    std::shared_ptr<SHAPE> otherShape = other->GetEffectiveShape( mask );
-                    int                    actual;
-                    VECTOR2I               pos;
-
-                    if( itemShape->Collide( otherShape.get(), 0, &actual, &pos ) )
-                        aErrorHandler( item, other, pos );
-                }
-            };
-
-    for( BOARD_ITEM* item : m_drawings )
-    {
-        for( BOARD_ITEM* other : m_drawings )
-        {
-            if( other != item )
-                checkColliding( item, other );
-        }
-
-        for( PAD* pad : m_pads )
-            checkColliding( item, pad );
-    }
-}
-
-
 void FOOTPRINT::swapData( BOARD_ITEM* aImage )
 {
     wxASSERT( aImage->Type() == PCB_FOOTPRINT_T );
@@ -4947,7 +4611,22 @@ bool FOOTPRINT::operator==( const FOOTPRINT& aOther ) const
     if( !std::ranges::equal( m_zones, aOther.m_zones, equalItems ) )
         return false;
 
+    if( !std::ranges::equal( m_groups, aOther.m_groups, equalItems ) )
+        return false;
+
+    if( m_netTiePadGroups != aOther.m_netTiePadGroups )
+        return false;
+
+    if( m_jumperPadGroups != aOther.m_jumperPadGroups )
+        return false;
+
     if( m_points.size() != aOther.m_points.size() )
+        return false;
+
+    if( !std::ranges::equal( m_bodies, aOther.m_bodies, equalItems ) )
+        return false;
+
+    if( m_height != aOther.m_height )
         return false;
 
     // Compare fields in ordinally-sorted order
@@ -5202,11 +4881,11 @@ bool FOOTPRINT::cmp_padstack::operator()( const PAD* aFirst, const PAD* aSecond 
     if( aFirst->GetLayerSet() != aSecond->GetLayerSet() )
         return aFirst->GetLayerSet().Seq() < aSecond->GetLayerSet().Seq();
 
-    if( aFirst->GetDrillSizeX() != aSecond->GetDrillSizeX() )
-        return aFirst->GetDrillSizeX() < aSecond->GetDrillSizeX();
+    if( aFirst->GetDrillSize().x != aSecond->GetDrillSize().x )
+        return aFirst->GetDrillSize().x < aSecond->GetDrillSize().x;
 
-    if( aFirst->GetDrillSizeY() != aSecond->GetDrillSizeY() )
-        return aFirst->GetDrillSizeY() < aSecond->GetDrillSizeY();
+    if( aFirst->GetDrillSize().y != aSecond->GetDrillSize().y )
+        return aFirst->GetDrillSize().y < aSecond->GetDrillSize().y;
 
     if( aFirst->GetDrillShape() != aSecond->GetDrillShape() )
         return aFirst->GetDrillShape() < aSecond->GetDrillShape();
@@ -5633,6 +5312,10 @@ static struct FOOTPRINT_DESC
         propMgr.AddProperty( new PROPERTY<FOOTPRINT, wxString>( _HKI( "Keywords" ),
                     NO_SETTER( FOOTPRINT, wxString ), &FOOTPRINT::GetKeywords ),
                     propertyFields );
+
+        propMgr.AddProperty( new PROPERTY<FOOTPRINT, int>( _HKI( "Height" ),
+                    &FOOTPRINT::SetHeight, &FOOTPRINT::GetHeight, PROPERTY_DISPLAY::PT_SIZE ),
+                    propertyFields ).SetIsCopyable();
 
         // Note: Also used by DRC engine
         propMgr.AddProperty( new PROPERTY<FOOTPRINT, wxString>( _HKI( "Component Class" ),

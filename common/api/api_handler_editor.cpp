@@ -591,17 +591,17 @@ HANDLER_RESULT<FocusOnItemResponse> API_HANDLER_EDITOR::handleFocusOnItem(
 HANDLER_RESULT<BeginCommitResponse> API_HANDLER_EDITOR::handleBeginCommit(
         const HANDLER_CONTEXT<BeginCommit>& aCtx )
 {
+    // Before 11.0, commit requests had no header so we assume they are for the PCB editor
+    if( aCtx.Request.has_header() )
+    {
+        HANDLER_RESULT<std::optional<KIID>> valid = validateItemHeaderDocument( aCtx.Request.header() );
+
+        if( !valid )
+            return tl::unexpected( valid.error() );
+    }
+
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
-
-    // Before 11.0, commit requests had no header so we assume they are for the PCB editor
-    if( aCtx.Request.has_header() && !validateItemHeaderDocument( aCtx.Request.header() ) )
-    {
-        ApiResponseStatus e;
-        // No message needed for AS_UNHANDLED; this is an internal flag for the API server
-        e.set_status( ApiStatusCode::AS_UNHANDLED );
-        return tl::unexpected( e );
-    }
 
     if( m_commits.count( aCtx.ClientName ) )
     {
@@ -629,17 +629,17 @@ HANDLER_RESULT<BeginCommitResponse> API_HANDLER_EDITOR::handleBeginCommit(
 HANDLER_RESULT<EndCommitResponse> API_HANDLER_EDITOR::handleEndCommit(
         const HANDLER_CONTEXT<EndCommit>& aCtx )
 {
+    // Before 11.0, commit requests had no header so we assume they are for the PCB editor
+    if( aCtx.Request.has_header() )
+    {
+        HANDLER_RESULT<std::optional<KIID>> valid = validateItemHeaderDocument( aCtx.Request.header() );
+
+        if( !valid )
+            return tl::unexpected( valid.error() );
+    }
+
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
-
-    // Before 11.0, commit requests had no header so we assume they are for the PCB editor
-    if( aCtx.Request.has_header() && !validateItemHeaderDocument( aCtx.Request.header() ) )
-    {
-        ApiResponseStatus e;
-        // No message needed for AS_UNHANDLED; this is an internal flag for the API server
-        e.set_status( ApiStatusCode::AS_UNHANDLED );
-        return tl::unexpected( e );
-    }
 
     if( !m_commits.count( aCtx.ClientName ) )
     {
@@ -1058,9 +1058,6 @@ HANDLER_RESULT<UpdateItemsResponse> API_HANDLER_EDITOR::handleUpdateItems(
 HANDLER_RESULT<DeleteItemsResponse> API_HANDLER_EDITOR::handleDeleteItems(
         const HANDLER_CONTEXT<DeleteItems>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     // validateItemHeaderDocument already answers AS_UNHANDLED for another editor's
     // document type; anything else it reports is a real error for this client
     if( HANDLER_RESULT<std::optional<KIID>> header = validateItemHeaderDocument( aCtx.Request.header() );
@@ -1068,6 +1065,9 @@ HANDLER_RESULT<DeleteItemsResponse> API_HANDLER_EDITOR::handleDeleteItems(
     {
         return tl::unexpected( header.error() );
     }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     std::map<KIID, ItemDeletionStatus> itemsToDelete;
 
@@ -1107,9 +1107,6 @@ HANDLER_RESULT<DeleteItemsResponse> API_HANDLER_EDITOR::handleDeleteItems(
 HANDLER_RESULT<HitTestResponse> API_HANDLER_EDITOR::handleHitTest(
         const HANDLER_CONTEXT<HitTest>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     // validateItemHeaderDocument already answers AS_UNHANDLED for another editor's
     // document type; anything else it reports is a real error for this client
     if( HANDLER_RESULT<std::optional<KIID>> header = validateItemHeaderDocument( aCtx.Request.header() );
@@ -1117,6 +1114,9 @@ HANDLER_RESULT<HitTestResponse> API_HANDLER_EDITOR::handleHitTest(
     {
         return tl::unexpected( header.error() );
     }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     HitTestResponse response;
 

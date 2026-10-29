@@ -175,14 +175,14 @@ public:
     int GetEffectiveTextPenWidth( int aDefaultPenWidth = 0 ) const;
 
     virtual void      SetTextAngle( const EDA_ANGLE& aAngle );
-    virtual EDA_ANGLE GetTextAngle() const { return m_attributes.m_Angle; }
+    virtual EDA_ANGLE GetTextAngle() const { return m_attributes.m_Angle.GetAngle(); }
 
     // For property system:
     void SetTextAngleDegrees( double aOrientation )
     {
         SetTextAngle( EDA_ANGLE( aOrientation, DEGREES_T ) );
     }
-    double GetTextAngleDegrees() const          { return m_attributes.m_Angle.AsDegrees(); }
+    double GetTextAngleDegrees() const          { return m_attributes.m_Angle.GetAngle().AsDegrees(); }
 
     /**
      * Set the text to be italic - this will also update the font if needed.
@@ -266,7 +266,7 @@ public:
 
     void CopyText( const EDA_TEXT& aSrc );
 
-    void SetAttributes( const TEXT_ATTRIBUTES& aTextAttrs ) { m_attributes = aTextAttrs; }
+    void SetAttributes( const TEXT_ATTRIBUTES& aTextAttrs );
     const TEXT_ATTRIBUTES& GetAttributes() const { return m_attributes; }
 
     /**
@@ -327,17 +327,18 @@ public:
     /**
      * Print this text object to the device context \a aDC.
      *
-     * @param aDC the current Device Context.
+     * @param aSettings are the settings used to render the text.
      * @param aOffset draw offset (usually (0,0)).
      * @param aColor text color.
      */
     void Print( const RENDER_SETTINGS* aSettings, const VECTOR2I& aOffset, const COLOR4D& aColor );
 
     /**
-     * build a list of segments (SHAPE_SEGMENT) to describe a text shape.
+     * Build a list of segments (SHAPE_SEGMENT) to describe a text shape.
+     *
      * @param aTriangulate: true to build also the triangulation of each shape
-     * @param aUseTextRotation: true to use the actual text draw rotation.
-     * false to build a list of shape for a not rotated text ("native" shapes).
+     * @param aBBox is the bounding box that contains the text.
+     * @param aAngle is the angle of the text.
      */
     std::shared_ptr<SHAPE_COMPOUND> GetEffectiveTextShape( bool aTriangulate = true,
                                                            const BOX2I& aBBox = BOX2I(),
@@ -366,7 +367,9 @@ public:
      * Useful in multiline texts to calculate the full text or a line area (for zones filling,
      * locate functions....)
      *
+     * @param aSettings are the settings used to render the text.
      * @param aLine The line of text to consider.  Pass -1 for all lines.
+     *
      * @return the rect containing the line of text (i.e. the position and the size of one line)
      *         this rectangle is calculated for 0 orient text.
      *         If orientation is not 0 the rect must be rotated to match the physical area
@@ -379,6 +382,8 @@ public:
      * Calculates the distance (pitch) between two lines of text.  This distance includes the
      * interline distance plus room for characters like j, {, and [.  It also used for single
      * line text, to calculate the text bounding box.
+     *
+     * @param aSettings are the settings used to render the text.
      */
     int GetInterline( const RENDER_SETTINGS* aSettings ) const;
 
@@ -391,6 +396,7 @@ public:
      * Populate \a aPositions with the position of each line of a multiline text, according
      * to the vertical justification and the rotation of the whole text.
      *
+     * @param aSettings are the settings used to render the text.
      * @param aPositions is the list to populate by the VECTOR2I positions.
      * @param aLineCount is the number of lines (not recalculated here for efficiency reasons.
      */
@@ -478,6 +484,7 @@ protected:
     /**
      * Print each line of this EDA_TEXT.
      *
+     * @param aSettings are the settings used to render the text.
      * @param aOffset draw offset (usually (0,0)).
      * @param aColor text color.
      * @param aText the single line of text to draw.
@@ -498,7 +505,7 @@ protected:
     /**
      * A hyperlink URL.  If empty, this text object is not a hyperlink.
      */
-    wxString m_hyperlink;
+    wxString         m_hyperlink;
 
     mutable wxString m_activeUrl;
 
@@ -511,7 +518,7 @@ private:
     // (connection graph, API server, painters) see immutable storage without a
     // lock. Extracted from raw m_text (not m_shown_text) so backslash-escaped
     // ${...} literals do not fabricate dependency edges.
-    std::vector<TEXT_VAR_REF_KEY> m_text_var_refs;
+    std::vector<TEXT_VAR_REF_KEY>                       m_text_var_refs;
 
     std::reference_wrapper<const EDA_IU_SCALE>          m_IuScale;
 
@@ -524,7 +531,7 @@ private:
     };
 
     mutable std::map<int, BBOX_CACHE_ENTRY> m_bbox_cache;
-    mutable std::mutex m_bbox_cacheMutex;
+    mutable std::mutex                      m_bbox_cacheMutex;
 
     TEXT_ATTRIBUTES  m_attributes;
     wxString         m_unresolvedFontName;

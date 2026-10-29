@@ -304,9 +304,7 @@ BOOST_AUTO_TEST_CASE( IntrospectedColorProperties )
             };
 
     checkColor( COLOR4D( 0.25, 0.5, 0.75, 0.5 ), wxT( "rgba(64, 128, 191, 0.502)" ) );
-#ifndef __WXMAC__   // WXMAC doesn't have colour names initialized when run headless
-    checkColor( COLOR4D( wxString( wxT( "red" ) ) ), wxT( "rgb(255, 0, 0)" ) );
-#endif
+    checkColor( COLOR4D( 1.0, 0.0, 0.0, 1.0 ), wxT( "rgb(255, 0, 0)" ) );
 }
 
 
@@ -710,20 +708,27 @@ BOOST_AUTO_TEST_CASE( SingleItemRulePreflight )
 {
     PROPERTY_MANAGER::Instance().Rebuild();
 
-    for( const wxString& constraint : {
-                 wxString( "assertion \"A.Type == 'Graphic'\"" ),
-                 wxString( "hole_size (min 0.2mm)" ), wxString( "text_height (min 1mm)" ),
-                 wxString( "text_thickness (min 0.1mm)" ),
-                 wxString( "track_segment_length (min 1mm)" ), wxString( "annular_width (min 0.1mm)" ),
-                 wxString( "solder_mask_expansion (opt 0mm)" ),
-                 wxString( "solder_paste_abs_margin (opt 0mm)" ),
-                 wxString( "solder_paste_rel_margin (opt 0mm)" ), wxString( "disallow track" ),
-                 wxString( "via_diameter (min 0.5mm)" ), wxString( "length (max 100mm)" ),
-                 wxString( "net_chain_length (max 100mm)" ), wxString( "stub_length (max 1mm)" ),
-                 wxString( "return_path (layer 'B.Cu')" ), wxString( "skew (max 1mm)" ),
-                 wxString( "via_count (max 2)" ),
-                 wxString( "via_dangling (max 0)" ), wxString( "bridged_mask (min 0)" ),
-                 wxString( "microvia_stack_depth (max 2)" ), wxString( "microvia_aspect_ratio (max 1)" ) } )
+    for( const wxString& constraint : { wxString( "assertion \"A.Type == 'Graphic'\"" ),
+                                        wxString( "hole_size (min 0.2mm)" ),
+                                        wxString( "text_height (min 1mm)" ),
+                                        wxString( "text_thickness (min 0.1mm)" ),
+                                        wxString( "track_segment_length (min 1mm)" ),
+                                        wxString( "annular_width (min 0.1mm)" ),
+                                        wxString( "solder_mask_expansion (opt 0mm)" ),
+                                        wxString( "solder_paste_abs_margin (opt 0mm)" ),
+                                        wxString( "solder_paste_rel_margin (opt 0mm)" ),
+                                        wxString( "disallow track" ),
+                                        wxString( "via_diameter (min 0.5mm)" ),
+                                        wxString( "length (max 100mm)" ),
+                                        wxString( "net_chain_length (max 100mm)" ),
+                                        wxString( "stub_length (max 1mm)" ),
+                                        wxString( "return_path (layer 'B.Cu')" ),
+                                        wxString( "skew (max 1mm)" ),
+                                        wxString( "via_count (max 2)" ),
+                                        wxString( "via_dangling (max 0)" ),
+                                        wxString( "bridged_mask (min 0)" ),
+                                        wxString( "microvia_stack_depth (max 2)" ),
+                                        wxString( "hole_aspect_ratio (max 1)" ) } )
     {
         for( bool conditionFirst : { true, false } )
         {

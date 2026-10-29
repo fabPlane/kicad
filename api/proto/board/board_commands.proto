@@ -340,6 +340,59 @@ message ImportNetlistResponse
   string report = 4;
 }
 
+// Imports a Specctra session file into the board: repositions footprints, deletes unlocked
+// existing tracks and vias, and adds the tracks and vias routed in the external router session.
+// Locked tracks and vias are skipped (they are exported as fixed and omitted from the session
+// by design).
+//
+// The session is matched to the board by footprint reference, pad number and net name, and
+// its via padstacks by the names the DSN export gave them, so it must have been routed from a
+// DSN exported from this same board (RunBoardJobExportSpecctraDsn); nets or layers the board
+// no longer has are reported and their items skipped.  Zone fills the router echoes back as
+// polygon wires are ignored, and the board's DRC markers are cleared.  The change is one
+// undoable commit, so this cannot run inside a client commit.
+// Since: 11.0
+message ImportSpecctraSession
+{
+  kiapi.common.types.DocumentSpecifier board = 1;
+
+  // Path to the Specctra session file (.ses), relative to the project if not absolute.
+  // Ignored when contents is set.
+  string session_path = 2;
+
+  // The session file's text, for a client that holds it in memory rather than on disk
+  bytes contents = 3;
+
+  // Delete the board's unlocked tracks, arcs and vias before adding the session's, as the
+  // editor does (locked ones were exported as fixed wires and are not in the session).  When
+  // false, the session's items are added to whatever is on the board.  Defaults to true.
+  optional bool replace_existing_tracks = 4;
+}
+
+message ImportSpecctraSessionResponse
+{
+  // Number of session items skipped due to unresolved reference, layer, or padstack.
+  uint32 skipped_count = 1;
+
+  // Human-readable report of what was imported and any warnings or errors.
+  string report = 2;
+
+  // Tracks and arcs created
+  uint32 tracks_added = 3;
+
+  uint32 vias_added = 4;
+
+  // Tracks, arcs and vias deleted (only when replacing the existing tracks)
+  uint32 tracks_removed = 5;
+
+  // Footprints the session's placement moved, flipped or rotated
+  uint32 footprints_moved = 6;
+
+  // Problems that did not stop the import, such as items whose net, layer or padstack the
+  // board does not have
+  repeated string warnings = 7;
+}
+
 /*
  * Blocking operations
  */
@@ -625,6 +678,33 @@ message PlaceFootprintFromLibrary
 
   // If unspecified, will place on F_Cu.  Footprint will be flipped if placed on B_Cu.
   optional kiapi.board.types.BoardLayer layer = 5;
+}
+
+// What items to use to calculate the board bounding box
+// Since: 11.0
+enum BoardBoundingBoxMode
+{
+  BBBM_UNKNOWN = 0;
+  // All board items on visible layers
+  BBBM_ALL_ITEMS = 1;
+  // Items on visible physical (copper/technical) layers only
+  BBBM_PHYSICAL_LAYERS_ONLY = 2;
+  // Graphics on Edge.Cuts only
+  BBBM_BOARD_EDGES_ONLY = 3;
+}
+
+// Returns BoardBoundingBoxResponse
+// Since: 11.0
+message GetBoardBoundingBox
+{
+  kiapi.common.types.DocumentSpecifier board = 1;
+  BoardBoundingBoxMode mode = 2;
+}
+
+// Since: 11.0
+message BoardBoundingBoxResponse
+{
+  kiapi.common.types.Box2 box = 1;  // zero-size box for an empty board
 }
 
 
@@ -1050,56 +1130,6 @@ message GlobalDeletion
 message GlobalDeletionResponse
 {
   uint32 deleted_count = 1;
-}
-
-
-//// Specctra session import ////
-
-// Merges a Specctra session (.ses) file, the output of an external autorouter such as
-// Freerouting, into an open board: the session's wires and vias become tracks, arcs and vias,
-// and its placement moves the footprints it names, exactly as the board editor's
-// File > Import > Specctra Session does.  The change is one undoable commit.
-//
-// The session is matched to the board by footprint reference, pad number and net name, and
-// its via padstacks by the names the DSN export gave them, so it must have been routed from a
-// DSN that RunBoardJobExportSpecctra produced from this same board (see that job); nets or
-// layers the board no longer has are reported in the warnings and their items skipped.  Zone
-// fills the router echoes back as polygon wires are ignored, and the board's DRC markers are
-// cleared.  Returns ImportSpecctraSessionResponse
-// Since 11.0
-message ImportSpecctraSession
-{
-  kiapi.common.types.DocumentSpecifier board = 1;
-
-  // Path of the session file.  Ignored when contents is set.
-  string path = 2;
-
-  // The session file's text, for a client that holds it in memory rather than on disk
-  bytes contents = 3;
-
-  // Delete the board's unlocked tracks, arcs and vias before adding the session's, as the
-  // editor does (locked ones were exported as fixed wires and are not in the session).
-  // Otherwise the session's items are added to whatever is on the board.
-  bool replace_existing_tracks = 4;
-}
-
-// Since 11.0
-message ImportSpecctraSessionResponse
-{
-  // Tracks and arcs created
-  uint32 tracks_added = 1;
-
-  uint32 vias_added = 2;
-
-  // Tracks, arcs and vias deleted (only with replace_existing_tracks)
-  uint32 tracks_removed = 3;
-
-  // Footprints the session's placement moved, flipped or rotated
-  uint32 footprints_moved = 4;
-
-  // Problems that did not stop the import, such as items whose net, layer or padstack the
-  // board does not have
-  repeated string warnings = 5;
 }
 
 

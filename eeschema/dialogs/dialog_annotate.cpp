@@ -249,9 +249,8 @@ void DIALOG_ANNOTATE::OnAnnotateClick( wxCommandEvent& event )
     bool resetAnnotation = m_rbReset_Annotations->GetValue();
     bool regroupUnits = resetAnnotation && m_checkRegroupUnits->GetValue();
 
-    m_Parent->AnnotateSymbols( &commit, GetScope(), GetSortOrder(), GetAnnotateAlgo(),
-                               m_checkRecursive->GetValue(), GetStartNumber(), resetAnnotation,
-                               regroupUnits, true, reporter, SYMBOL_FILTER_NON_POWER );
+    m_Parent->AnnotateSymbols( &commit, GetScope(), GetSortOrder(), GetAnnotateAlgo(), m_checkRecursive->GetValue(),
+                               GetStartNumber(), resetAnnotation, regroupUnits, true, reporter );
 
     commit.Push( _( "Annotate" ) );
 
@@ -295,7 +294,7 @@ void SCH_EDIT_FRAME::OnAnnotate()
 
 int SCH_EDIT_FRAME::ModalAnnotate( const wxString& aMessage )
 {
-    DIALOG_ANNOTATE dlg( this, aMessage );
+    DIALOG_ANNOTATE* dlg = new DIALOG_ANNOTATE( this, aMessage );
 
-    return dlg.ShowModal();
+    return dlg->ShowModal();
 }

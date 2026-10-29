@@ -22,6 +22,8 @@
 
 #include "dialog_footprint_properties_fp_editor.h"
 
+#include <optional>
+
 #include <wx/debug.h>
 #include <wx/tokenzr.h>
 
@@ -162,7 +164,8 @@ DIALOG_FOOTPRINT_PROPERTIES_FP_EDITOR::DIALOG_FOOTPRINT_PROPERTIES_FP_EDITOR( FO
         m_initialized( false ),
         m_netClearance( aParent, m_NetClearanceLabel, m_NetClearanceCtrl, m_NetClearanceUnits ),
         m_solderMask( aParent, m_SolderMaskMarginLabel, m_SolderMaskMarginCtrl, m_SolderMaskMarginUnits ),
-        m_solderPaste( aParent, m_SolderPasteMarginLabel, m_SolderPasteMarginCtrl, m_SolderPasteMarginUnits )
+        m_solderPaste( aParent, m_SolderPasteMarginLabel, m_SolderPasteMarginCtrl, m_SolderPasteMarginUnits ),
+        m_height( aParent, m_heightLabel, m_heightCtrl, m_heightUnits )
 {
     SetEvtHandlerEnabled( false );
 
@@ -323,13 +326,7 @@ bool DIALOG_FOOTPRINT_PROPERTIES_FP_EDITOR::TransferDataToWindow()
     if( !wxDialog::TransferDataToWindow() )
         return false;
 
-    if( !m_embeddedFiles->CommitPendingChanges() )
-        return false;
-
     if( !m_PanelGeneral->TransferDataToWindow() )
-        return false;
-
-    if( !m_3dPanel->Validate() )
         return false;
 
     LIB_ID   fpID          = m_footprint->GetFPID();
@@ -339,6 +336,11 @@ bool DIALOG_FOOTPRINT_PROPERTIES_FP_EDITOR::TransferDataToWindow()
 
     m_DocCtrl->SetValue( EscapeString( m_footprint->GetLibDescription(), CTX_LINE ) );
     m_KeywordCtrl->SetValue( m_footprint->GetKeywords() );
+
+    if( m_footprint->GetHeight() != 0 )
+        m_height.SetValue( m_footprint->GetHeight() );
+    else
+        m_height.SetValue( wxEmptyString );
 
     // Add the models to the panel
     (void) m_3dPanel->TransferDataToWindow();
@@ -379,7 +381,14 @@ bool DIALOG_FOOTPRINT_PROPERTIES_FP_EDITOR::TransferDataToWindow()
     {
         m_cbCustomLayers->SetValue( false );
 
-        m_copperLayerCount->SetSelection( 0 );
+        // Seed the inactive custom controls so switching to them keeps every layer in use
+        const LSET usedLayers = LAYER_UTILS::GetUsedFootprintLayers( *m_footprint );
+        const LSET usedUserLayers = usedLayers & LSET::UserDefinedLayersMask();
+
+        for( PCB_LAYER_ID userLayer : usedUserLayers )
+            m_customUserLayers->push_back( userLayer );
+
+        m_copperLayerCount->SetSelection( LAYER_UTILS::MinimalCopperLayerCount( usedLayers ) / 2 - 1 );
         break;
     }
     case FOOTPRINT_STACKUP::CUSTOM_LAYERS:
@@ -690,19 +699,35 @@ bool DIALOG_FOOTPRINT_PROPERTIES_FP_EDITOR::TransferDataFromWindow()
             || !m_privateLayersGrid->CommitPendingChanges()
             || !m_nettieGroupsGrid->CommitPendingChanges()
             || !m_jumperGroupsGrid->CommitPendingChanges()
-            || !m_customUserLayersGrid->CommitPendingChanges() )
+            || !m_customUserLayersGrid->CommitPendingChanges()
+            || !m_3dPanel->CommitPendingChanges()
+            || !m_embeddedFiles->CommitPendingChanges() )
     {
         return false;
     }
 
-    KIGFX::PCB_VIEW*    view = m_frame->GetCanvas()->GetView();
-    PCB_SELECTION_TOOL* selectionTool = m_frame->GetToolManager()->GetTool<PCB_SELECTION_TOOL>();
-    BOARD_COMMIT        commit( m_frame );
-    commit.Modify( m_footprint );
+    if( !m_3dPanel->Validate() )
+        return false;
 
-    // Must be done inside the commit to capture the undo state
-    // This will call TransferDataToWindow() on the 3D panel and
-    // the embedded files panel.
+    KIGFX::PCB_VIEW*            view = nullptr;
+    PCB_SELECTION_TOOL*         selectionTool = nullptr;
+    std::optional<BOARD_COMMIT> commit;
+
+    // When invoked from the library tree (Footprint Properties context menu), we edit a temporary
+    // footprint that is not loaded in the editor.  Only update the editor's undo list, view, and
+    // selection when editing its current footprint.  The library-tree path saves its copy directly.
+    bool editingCurrentFootprint = ( m_footprint == m_frame->GetBoard()->GetFirstFootprint() );
+
+    if( editingCurrentFootprint )
+    {
+        view = m_frame->GetCanvas()->GetView();
+        selectionTool = m_frame->GetToolManager()->GetTool<PCB_SELECTION_TOOL>();
+        commit.emplace( m_frame );
+        commit->Modify( m_footprint );
+    }
+
+    // This will call TransferDataToWindow() on the 3D panel and the embedded files panel.  For an
+    // editor footprint, this must be done after Modify() to capture those changes in the undo state.
     if( !DIALOG_SHIM::TransferDataFromWindow() )
         return false;
 
@@ -741,9 +766,11 @@ bool DIALOG_FOOTPRINT_PROPERTIES_FP_EDITOR::TransferDataFromWindow()
 
     m_footprint->SetLibDescription( UnescapeString( m_DocCtrl->GetValue() ) );
     m_footprint->SetKeywords( m_KeywordCtrl->GetValue() );
+    m_footprint->SetHeight( static_cast<int>( m_height.GetValue() ) );
 
     // Update fields
-    m_frame->GetToolManager()->RunAction( ACTIONS::selectionClear );
+    if( editingCurrentFootprint )
+        m_frame->GetToolManager()->RunAction( ACTIONS::selectionClear );
 
     std::vector<PCB_FIELD*> addedFields;
     std::vector<PCB_FIELD*> detachedFields;
@@ -752,19 +779,24 @@ bool DIALOG_FOOTPRINT_PROPERTIES_FP_EDITOR::TransferDataFromWindow()
 
     for( PCB_FIELD* field : detachedFields )
     {
-        view->Remove( field );
+        if( view )
+            view->Remove( field );
+
         delete field;
     }
 
     for( PCB_FIELD* field : m_footprint->GetFields() )
     {
         // Reused fields are already known to the view
-        if( alg::contains( addedFields, field ) )
-            view->Add( field );
-        else
-            view->Update( field );
+        if( view )
+        {
+            if( alg::contains( addedFields, field ) )
+                view->Add( field );
+            else
+                view->Update( field );
+        }
 
-        if( field->IsSelected() )
+        if( selectionTool && field->IsSelected() )
         {
             // The old copy was in the selection list, but this one is not.  Remove the
             // out-of-sync selection flag so we can re-add the field to the selection.
@@ -900,7 +932,8 @@ bool DIALOG_FOOTPRINT_PROPERTIES_FP_EDITOR::TransferDataFromWindow()
     fpList->clear();
     fpList->insert( fpList->end(), panelList.begin(), panelList.end() );
 
-    commit.Push( _( "Edit Footprint Properties" ) );
+    if( commit )
+        commit->Push( _( "Edit Footprint Properties" ) );
 
     return true;
 }
@@ -1208,6 +1241,8 @@ void DIALOG_FOOTPRINT_PROPERTIES_FP_EDITOR::OnPageChanging( wxNotebookEvent& aEv
 
     if( !m_customUserLayersGrid->CommitPendingChanges() )
         aEvent.Veto();
+
+    m_3dPanel->UpdateEmbeddedFiles();
 }
 
 

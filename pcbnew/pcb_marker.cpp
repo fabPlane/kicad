@@ -49,9 +49,9 @@
 
 
 
-PCB_MARKER::PCB_MARKER( std::shared_ptr<RC_ITEM> aItem, const VECTOR2I& aPosition, int aLayer ) :
+PCB_MARKER::PCB_MARKER( std::shared_ptr<DRC_ITEM> aItem, const VECTOR2I& aPosition, int aLayer ) :
         BOARD_ITEM( nullptr, PCB_MARKER_T, F_Cu ),  // parent set during BOARD::Add()
-        MARKER_BASE( SCALING_FACTOR, aItem ),
+        MARKER_BASE( SCALING_FACTOR, std::move( aItem ) ),
         m_pathLength( 0 )
 {
     if( m_rcItem )
@@ -217,6 +217,12 @@ PCB_MARKER* PCB_MARKER::FromLegacyString( const wxString& aData )
             };
 
     wxArrayString props = wxSplit( aData, '|' );
+
+    // Every legacy marker has a settings key, position and at least two item fields.
+    // Reject truncated settings rather than indexing past wxArrayString below.
+    if( props.size() < 5 )
+        return nullptr;
+
     int           markerLayer = F_Cu;
     VECTOR2I      markerPos( (int) strtol( props[1].c_str(), nullptr, 10 ),
                              (int) strtol( props[2].c_str(), nullptr, 10 ) );
@@ -236,10 +242,12 @@ PCB_MARKER* PCB_MARKER::FromLegacyString( const wxString& aData )
     else if( drcItem->GetErrorCode() == DRCE_UNCONNECTED_ITEMS )
     {
         // Pre-9.0.4 versions didn't have KIIDs as last two properties to allow sorting stability
-        if( props.size() < 6 )
+        if( props.size() == 5 )
             drcItem->SetItems( KIID( props[3] ), KIID( props[4] ) );
-        else
+        else if( props.size() >= 7 )
             drcItem->SetItems( KIID( props[5] ), KIID( props[6] ) );
+        else
+            return nullptr;
     }
     else if( drcItem->GetErrorCode() == DRCE_STARVED_THERMAL )
     {
@@ -272,7 +280,10 @@ EDA_ITEM* PCB_MARKER::Clone() const
     // An RC_ITEM is shared between its marker and various tree views.  It cannot be shared between
     // two markers.
     if( m_rcItem )
-        res->m_rcItem = std::make_shared<RC_ITEM>( *m_rcItem );
+    {
+        res->m_rcItem = std::make_shared<DRC_ITEM>( *std::static_pointer_cast<DRC_ITEM>( m_rcItem ) );
+        res->m_rcItem->SetParent( res );
+    }
 
     return res;
 }
@@ -347,6 +358,14 @@ std::shared_ptr<SHAPE> PCB_MARKER::GetEffectiveShape( PCB_LAYER_ID aLayer, FLASH
 {
     // Markers do not participate in the board geometry space, and therefore have no effective shape.
     return std::make_shared<SHAPE_NULL>();
+}
+
+
+double PCB_MARKER::GetCoverageArea( int aTextMargin ) const
+{
+    SHAPE_LINE_CHAIN markerShape;
+    ShapeToPolygon( markerShape );
+    return markerShape.Area();
 }
 
 

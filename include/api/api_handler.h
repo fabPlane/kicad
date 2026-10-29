@@ -222,6 +222,7 @@ protected:
     std::vector<std::string> m_registrationOrder;
 
     bool m_notifyNetSettings = false;
+
     static const wxString m_defaultCommitMessage;
 
     /// The server this handler is registered with (non-owning); see attachServer

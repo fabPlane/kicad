@@ -258,3 +258,20 @@ void KIPLATFORM::APP::AddDynamicLibrarySearchPath( const wxString& aPath )
 {
     SetDllDirectory( aPath.c_str() );
 }
+
+
+bool KIPLATFORM::APP::SetCurrentThreadPriority( bool aRaise )
+{
+    return SetThreadPriority( GetCurrentThread(),
+                              aRaise ? THREAD_PRIORITY_ABOVE_NORMAL : THREAD_PRIORITY_BELOW_NORMAL )
+           != 0;
+}
+
+
+void KIPLATFORM::APP::TerminateWithCode( int aExitCode )
+{
+    TerminateProcess( GetCurrentProcess(), static_cast<UINT>( aExitCode ) );
+
+    // Not reached unless the call is refused
+    ExitProcess( static_cast<UINT>( aExitCode ) );
+}

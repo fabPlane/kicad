@@ -58,7 +58,7 @@ class ZONE;
 class PCB_TEXT;
 class PCB_TEXTBOX;
 class PCB_TABLE;
-class PCB_DRILL_CHART;
+class PCB_GENERATED_TABLE;
 class PCB_DRILL_MAP;
 class PCB_BARCODE;
 class EDA_TEXT;
@@ -219,7 +219,11 @@ class PCB_IO_KICAD_SEXPR;   // forward decl
 //#define SEXPR_BOARD_FILE_VERSION    20260828  // Exclude-from-simulation footprint attribute
 //#define SEXPR_BOARD_FILE_VERSION    20260830  // Microvia stack generator (via_stack)
 //#define SEXPR_BOARD_FILE_VERSION    20260831  // Custom user properties
-#define SEXPR_BOARD_FILE_VERSION      20260901  // Drill charts and maps
+//#define SEXPR_BOARD_FILE_VERSION    20260901  // Drill charts and maps
+//#define SEXPR_BOARD_FILE_VERSION    20260930  // UUID for extruded 3D body
+//#define SEXPR_BOARD_FILE_VERSION    20261017  // Footprint overall height
+//#define SEXPR_BOARD_FILE_VERSION    20261018  // Linked placement rule areas
+#define SEXPR_BOARD_FILE_VERSION      20261025  // Reference image rotation and opacity
 
 #define BOARD_FILE_HOST_VERSION       20200825  ///< Earlier files than this include the host tag
 #define LEGACY_ARC_FORMATTING         20210925  ///< These were the last to use old arc formatting
@@ -250,7 +254,7 @@ class PCB_IO_KICAD_SEXPR;   // forward decl
  *
  * The new footprint library design is a file path of individual footprint files that contain
  * a single footprint per file.  This class is a helper only for the footprint portion of the
- * PLUGIN API, and only for the #PCB_PLUGIN plugin.  It is private to this implementation file so
+ * PLUGIN API, and only for the #PCB_IO plugin.  It is private to this implementation file so
  * it is not placed into a header.
  */
 class FP_CACHE_ENTRY
@@ -336,7 +340,7 @@ public:
 
 
 /**
- * A #PLUGIN derivation for saving and loading Pcbnew s-expression formatted files.
+ * A #PCB_IO derivation for saving and loading Pcbnew s-expression formatted files.
  *
  * @note This class is not thread safe, but it is re-entrant multiple times in sequence.
  */
@@ -373,10 +377,12 @@ public:
     void SaveBoard( const wxString& aFileName, BOARD& aBoard,
                     const std::map<std::string, UTF8>* aProperties = nullptr ) override;
 
-    /** Serialize a BOARD to an OUTPUTFORMATTER without file I/O or Prettify.
-     *  Handles init(), EmbedFonts/ClearEmbeddedFonts, header, Format(), and footer.
-     *  The caller owns the formatter and is responsible for flushing/closing it.
-     *  Skips GroupsSanityCheck (no UI interaction allowed from timer callbacks). */
+    /**
+     * Serialize a #BOARD to an #OUTPUTFORMATTER without file I/O or Prettify.
+     *
+     * Handles init(), EmbedFonts/ClearEmbeddedFonts, header, Format(), and footer.
+     * The caller owns the formatter and is responsible for flushing/closing it.
+     * Skips GroupsSanityCheck (no UI interaction allowed from timer callbacks). */
     void FormatBoardToFormatter( OUTPUTFORMATTER* aOut, BOARD* aBoard,
                                  const std::map<std::string, UTF8>* aProperties = nullptr );
 
@@ -508,7 +514,13 @@ private:
     void format( const PCB_TEXTBOX* aTextBox ) const;
 
     void format( const PCB_TABLE* aTable ) const;
-    void format( const PCB_DRILL_CHART* aChart ) const;
+    void format( const PCB_GENERATED_TABLE* aTable ) const;
+
+    /**
+     * What only one kind of generated table carries, written after the shared settings.
+     */
+    void formatGeneratedTableExtras( const PCB_GENERATED_TABLE* aTable ) const;
+
     void format( const PCB_DRILL_MAP* aMap ) const;
 
     /**

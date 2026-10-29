@@ -270,6 +270,20 @@ extern KICOMMON_API const wxChar* const traceGalProfile;
 extern KICOMMON_API const wxChar* const traceGalContext;
 
 /**
+ * Flag to enable debug output of GAL cached group creation and drawing.
+ *
+ * Use "KICAD_GAL_GROUPS" to enable.
+ */
+extern KICOMMON_API const wxChar* const traceGalGroups;
+
+/**
+ * Flag to enable debug output of the RHI rendering backend.
+ *
+ * Use "KICAD_RHI" to enable.
+ */
+extern KICOMMON_API const wxChar* const traceRhi;
+
+/**
  * Flag to enable KiCad2Step debug tracing.
  *
  * Use "KICAD2STEP" to enable.
@@ -310,6 +324,13 @@ extern KICOMMON_API const wxChar* const traceEagleIo;
  * Use "KICAD_DIPTRACE_IO" to enable.
  */
 extern KICOMMON_API const wxChar* const traceDiptraceIo;
+
+/*
+ * Flag to enable Easy-PC / DesignSpark PCB I/O debug tracing.
+ *
+ * Use "KICAD_EASYPC_IO" to enable.
+ */
+extern KICOMMON_API const wxChar* const traceEasyPc;
 
 /*
  * Flag to enable CADSTAR I/O debug tracing.
@@ -407,6 +428,13 @@ extern KICOMMON_API const wxChar* const traceLibWatch;
  * use "KICAD_LIBRARIES" to enable.
  */
 extern KICOMMON_API const wxChar* const traceLibraries;
+
+/**
+ * Flag to enable database library tracing.
+ *
+ * Use "KICAD_DATABASE" to enable.
+ */
+extern KICOMMON_API const wxChar* const traceDatabase;
 
 /**
  * Flag to watch how schematic move tool actions are handled.

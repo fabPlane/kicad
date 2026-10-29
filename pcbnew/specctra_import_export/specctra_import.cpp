@@ -337,8 +337,7 @@ PCB_VIA* SPECCTRA_DB::makeVIA( WIRE_VIA* aVia, PADSTACK* aPadstack, const POINT&
 // no UI code in this function, throw exception to report problems to the
 // UI handler: void PCB_EDIT_FRAME::ImportSpecctraSession( wxCommandEvent& event )
 
-void SPECCTRA_DB::FromSESSION( BOARD* aBoard, COMMIT& aCommit, bool aReplaceTracks,
-                               std::vector<wxString>* aWarnings )
+void SPECCTRA_DB::FromSESSION( BOARD* aBoard, COMMIT& aCommit, bool aReplaceTracks )
 {
     m_sessionBoard = aBoard;      // not owned here
 
@@ -369,7 +368,7 @@ void SPECCTRA_DB::FromSESSION( BOARD* aBoard, COMMIT& aCommit, bool aReplaceTrac
     // A single unresolvable place, wire, or via (e.g. a uniquified fiducial id or an unknown layer
     // from a foreign router) must not sink the whole session, so skipped items are counted and
     // reported once at the end.
-    int skipped = 0;
+    m_skippedCount = 0;
 
     if( m_session->placement )
     {
@@ -387,7 +386,7 @@ void SPECCTRA_DB::FromSESSION( BOARD* aBoard, COMMIT& aCommit, bool aReplaceTrac
 
                 if( !footprint )
                 {
-                    ++skipped;
+                    ++m_skippedCount;
                     continue;
                 }
 
@@ -444,7 +443,7 @@ void SPECCTRA_DB::FromSESSION( BOARD* aBoard, COMMIT& aCommit, bool aReplaceTrac
     // Item-local failures (unknown layer id, missing padstack) throw from the make* helpers; run
     // each item through this guard so one bad wire or via is dropped instead of aborting.
     auto skipOnError =
-            [&skipped]( auto&& aBuild )
+            [this]( auto&& aBuild )
             {
                 try
                 {
@@ -452,7 +451,7 @@ void SPECCTRA_DB::FromSESSION( BOARD* aBoard, COMMIT& aCommit, bool aReplaceTrac
                 }
                 catch( const IO_ERROR& )
                 {
-                    ++skipped;
+                    ++m_skippedCount;
                 }
             };
 
@@ -551,40 +550,44 @@ void SPECCTRA_DB::FromSESSION( BOARD* aBoard, COMMIT& aCommit, bool aReplaceTrac
         }
     }
 
-    if( skipped > 0 )
+    if( m_skippedCount > 0 )
     {
-        wxString msg = wxString::Format( _( "%d session item(s) were skipped due to unresolved "
-                                            "reference, layer, or padstack." ), skipped );
-
-        if( aWarnings )
-            aWarnings->push_back( msg );
-        else
-            wxLogWarning( msg );
+        ReportWarning( m_reporter, wxString::Format( _( "%d session item(s) were skipped due to unresolved "
+                                                        "reference, layer, or padstack." ),
+                                                     m_skippedCount ) );
     }
 }
 
 
 bool ImportSpecctraSession( BOARD* aBoard, const wxString& fullFileName, COMMIT& aCommit,
-                            bool aReplaceTracks, std::vector<wxString>* aWarnings )
+                            REPORTER* aReporter, int* aSkippedCount, bool aReplaceTracks )
 {
     SPECCTRA_DB db;
     LOCALE_IO   toggle;
 
+    db.SetReporter( aReporter );
     db.LoadSESSION( fullFileName );
-    db.FromSESSION( aBoard, aCommit, aReplaceTracks, aWarnings );
+    db.FromSESSION( aBoard, aCommit, aReplaceTracks );
+
+    if( aSkippedCount )
+        *aSkippedCount = db.GetSkippedCount();
 
     return true;
 }
 
 
-bool ImportSpecctraSession( BOARD* aBoard, LINE_READER& aReader, COMMIT& aCommit, bool aReplaceTracks,
-                            std::vector<wxString>* aWarnings )
+bool ImportSpecctraSession( BOARD* aBoard, LINE_READER& aReader, COMMIT& aCommit,
+                            REPORTER* aReporter, int* aSkippedCount, bool aReplaceTracks )
 {
     SPECCTRA_DB db;
     LOCALE_IO   toggle;
 
+    db.SetReporter( aReporter );
     db.LoadSESSION( &aReader );
-    db.FromSESSION( aBoard, aCommit, aReplaceTracks, aWarnings );
+    db.FromSESSION( aBoard, aCommit, aReplaceTracks );
+
+    if( aSkippedCount )
+        *aSkippedCount = db.GetSkippedCount();
 
     return true;
 }

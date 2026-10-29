@@ -19,8 +19,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#ifndef _SCH_REFERENCE_LIST_H_
-#define _SCH_REFERENCE_LIST_H_
+#pragma once
 
 #include <map>
 
@@ -153,7 +152,8 @@ public:
      *
      * @return true if this reference hasn't been split yet.
      */
-    bool IsSplitNeeded();
+    bool IsSplitNeeded() const;
+    bool IsSplit() const { return !IsSplitNeeded(); }
 
     void SetRef( const wxString& aReference ) { m_ref = aReference; }
     wxString GetRef() const { return m_ref; }
@@ -162,17 +162,42 @@ public:
     const char* GetRefStr() const { return m_ref.c_str(); }
 
     /// Return reference name with unit altogether.
-    wxString GetFullRef( bool aIncludeUnit = true ) const
+    wxString GetFullRef() const
     {
-        wxString refNum = m_numRefStr;
+        wxString ref = GetRef();
 
-        if( refNum.IsEmpty() )
-            refNum << m_numRef;
+        if( IsSplit() )
+        {
+            if( !m_numRefStr.IsEmpty() )
+                ref += m_numRefStr;
+            else
+                ref << m_numRef;
+        }
+
+        if( GetSymbol()->GetUnitCount() > 1 )
+            ref += GetSymbol()->SubReference( GetUnit() );
+
+        return ref;
+    }
+
+    /// Return reference name in canonical format, optionally with unit.
+    /// (Canonical form will return "R1" even when the user entered "R001".)
+    wxString GetCanonicalRef( bool aIncludeUnit ) const
+    {
+        wxString ref = GetRef();
+
+        if( IsSplit() )
+        {
+            if( m_numRef >= 0 )
+                ref << m_numRef;
+            else
+                ref += m_numRefStr;
+        }
 
         if( aIncludeUnit && GetSymbol()->GetUnitCount() > 1 )
-            return GetRef() + refNum + GetSymbol()->SubReference( GetUnit() );
-        else
-            return GetRef() + refNum;
+            ref += GetSymbol()->SubReference( GetUnit() );
+
+        return ref;
     }
 
     wxString GetRefNumber() const
@@ -185,18 +210,33 @@ public:
 
     int CompareValue( const SCH_REFERENCE& item ) const
     {
+        // Sort based on natural sort, but don't consider naturally-equivalent values
+        // to be equal.  Run them through a second, non-natural compare.
+
+        int natural = StrNumCmp( m_value, item.m_value, false );
+
+        if( natural != 0 )
+            return natural;
+
         return m_value.Cmp( item.m_value );
     }
 
     int CompareRef( const SCH_REFERENCE& item ) const
     {
-        return m_ref.CmpNoCase( item.m_ref );
+        // Sort based on natural sort, but don't consider naturally-equivalent values
+        // to be equal.  Run them through a second, non-natural compare.
+
+        int natural = StrNumCmp( m_ref, item.m_ref, false );
+
+        if( natural != 0 )
+            return natural;
+
+        return m_ref.Cmp( item.m_ref );
     }
 
-    int CompareLibName( const SCH_REFERENCE& item ) const
+    int CompareLibId( const SCH_REFERENCE& item ) const
     {
-        return m_rootSymbol->GetLibId().GetLibItemName().compare(
-            item.m_rootSymbol->GetLibId().GetLibItemName() );
+        return GetSymbol()->GetLibId().compare( item.GetSymbol()->GetLibId() );
     }
 
     /**
@@ -379,12 +419,10 @@ public:
      * @param aSortOption Define the annotation order.  See #ANNOTATE_ORDER_T.
      * @param aAlgoOption Define the annotation style.  See #ANNOTATE_ALGO_T.
      * @param aStartNumber The start number for non-sheet-based annotation styles.
-     * @param aAdditionalReferences Additional references to check for duplicates
-     * @param aStartAtCurrent Use m_numRef for each reference as the start number (overrides
-     *        aStartNumber)
-     * @param aHierarchy Optional sheet path hierarchy for resetting the references'
-     *        sheet numbers based on their sheet's place in the hierarchy. Set
-     *        nullptr if not desired.
+     * @param aAdditionalRefs Additional references to check for duplicates,
+     * @param aStartAtCurrent Use m_numRef for each reference as the start number (overrides aStartNumber).
+     * @param aHierarchy Optional sheet path hierarchy for resetting the references' sheet numbers
+     *                   based on their sheet's place in the hierarchy. Set nullptr if not desired.
      */
     void ReannotateByOptions( ANNOTATE_ORDER_T             aSortOption,
                               ANNOTATE_ALGO_T              aAlgoOption,
@@ -411,12 +449,10 @@ public:
      * @param aSortOption Define the annotation order.  See #ANNOTATE_ORDER_T.
      * @param aAlgoOption Define the annotation style.  See #ANNOTATE_ALGO_T.
      * @param aStartNumber The start number for non-sheet-based annotation styles.
-     * @param appendUndo True if the annotation operation should be added to an existing undo,
-     *                   false if it should be separately undo-able.
      * @param aLockedUnitMap A SCH_MULTI_UNIT_REFERENCE_MAP of reference designator wxStrings
      *      to SCH_REFERENCE_LISTs. May be an empty map. If not empty, any multi-unit parts
      *      found in this map will be annotated as a group rather than individually.
-     * @param aAdditionalReferences Additional references to check for duplicates
+     * @param aAdditionalRefs Additional references to check for duplicates
      * @param aStartAtCurrent Use m_numRef for each reference as the start number (overrides
      *        aStartNumber)
      */
@@ -581,7 +617,7 @@ public:
      * Return the first unused reference number from the properties given in aRef, ensuring
      * all of the units in aRequiredUnits are also unused.
      *
-     * @param aIndex The index of the reference item used for the search pattern.
+     * @param aRef is the reference item used for the search pattern.
      * @param aMinValue The minimum value for the current search.
      * @param aRequiredUnits List of units to ensure are free
      */
@@ -594,15 +630,8 @@ public:
     void Show( const char* aPrefix = "" );
 #endif
 
-    std::shared_ptr<REFDES_TRACKER> GetRefDesTracker() const
-    {
-        return m_refDesTracker;
-    }
-
-    void SetRefDesTracker( std::shared_ptr<REFDES_TRACKER> aTracker )
-    {
-        m_refDesTracker = aTracker;
-    }
+    std::shared_ptr<REFDES_TRACKER> GetRefDesTracker() const { return m_refDesTracker; }
+    void SetRefDesTracker( std::shared_ptr<REFDES_TRACKER> aTracker ) { m_refDesTracker = aTracker; }
 
     friend class BACK_ANNOTATION;
 
@@ -637,9 +666,7 @@ private:
     // Used for sorting static sortByTimeStamp function
     friend class BACK_ANNOTATE;
 
-    std::vector<SCH_REFERENCE> m_flatList;
-
-    std::shared_ptr<REFDES_TRACKER> m_refDesTracker; ///< A list of previously used reference designators.
+private:
+    std::vector<SCH_REFERENCE>      m_flatList;
+    std::shared_ptr<REFDES_TRACKER> m_refDesTracker;   ///< A list of previously used reference designators.
 };
-
-#endif    // _SCH_REFERENCE_LIST_H_

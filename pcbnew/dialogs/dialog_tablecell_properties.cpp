@@ -17,8 +17,11 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include "dialog_tablecell_properties.h"
+
 #include <wx/hyperlink.h>
 
+#include <bitmaps.h>
 #include <widgets/bitmap_button.h>
 #include <widgets/font_choice.h>
 #include <dialogs/html_message_box.h>
@@ -36,7 +39,7 @@
 #include <tool/tool_manager.h>
 #include <tools/pcb_actions.h>
 #include <scintilla_tricks.h>
-#include "dialog_tablecell_properties.h"
+
 
 DIALOG_TABLECELL_PROPERTIES::DIALOG_TABLECELL_PROPERTIES( PCB_BASE_EDIT_FRAME*        aFrame,
                                                           std::vector<PCB_TABLECELL*> aCells ) :
@@ -98,9 +101,9 @@ DIALOG_TABLECELL_PROPERTIES::DIALOG_TABLECELL_PROPERTIES( PCB_BASE_EDIT_FRAME*  
 
     m_table = static_cast<PCB_TABLE*>( m_cells[0]->GetParent() );
 
-    // A drill chart reports the board. Its text is generated, so only the formatting on this
-    // page is the user's to change
-    if( m_table->Type() == PCB_DRILL_CHART_T )
+    // A generated table reports the board. Its text is generated, so only the formatting on
+    // this page is the user's to change
+    if( m_table->IsGenerated() )
     {
         m_cellTextIsGenerated = true;
         m_cellText->SetReadOnly( true );
@@ -131,7 +134,7 @@ DIALOG_TABLECELL_PROPERTIES::DIALOG_TABLECELL_PROPERTIES( PCB_BASE_EDIT_FRAME*  
     m_italic->SetBitmap( KiBitmapBundle( BITMAPS::text_italic ) );
 
     m_autoTextThickness->SetIsCheckButton();
-    m_autoTextThickness->SetBitmap( KiBitmapBundle( BITMAPS::edit_cmp_symb_links ) );
+    m_autoTextThickness->SetBitmap( KiBitmapBundle( BITMAPS::link ) );
 
     SetupStandardButtons();
     Layout();

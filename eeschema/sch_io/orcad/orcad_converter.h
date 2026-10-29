@@ -26,6 +26,7 @@
 #define ORCAD_CONVERTER_H_
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -43,6 +44,7 @@
 #include <eda_shape.h>
 #include <kiid.h>
 
+#include <sch_io/orcad/orcad_orient.h>
 #include <sch_io/orcad/orcad_records.h>
 
 class LIB_SYMBOL;
@@ -51,6 +53,7 @@ class EDA_TEXT;
 class PROGRESS_REPORTER;
 class REPORTER;
 class SCHEMATIC;
+class SCH_FIELD;
 class SCH_ITEM;
 class SCH_LABEL_BASE;
 class SCH_LABEL;
@@ -60,6 +63,7 @@ class SCH_SHEET_PIN;
 class SCH_SHEET_PATH;
 class SCH_SYMBOL;
 class SCH_TEXT;
+class SPIN_STYLE;
 class wxMemoryBuffer;
 
 
@@ -91,64 +95,41 @@ inline VECTOR2I OrcadDbuToIu( int aX, int aY )
 }
 
 
-/** OrCAD rotates about the bounding box; KiCad rotates about the anchor.
- * Offset selectors use 0 for zero, 1 for width, and 2 for height. */
-struct ORCAD_ORIENT_ENTRY
-{
-    int    angle;  ///< KiCad placement angle in degrees (0/90/180/270, CCW)
-    char   mirror; ///< 0 = none, 'x' or 'y' = KiCad mirror axis
-    int8_t txSel;  ///< X offset selector
-    int8_t tySel;  ///< Y offset selector
-    int8_t a;
-    int8_t b;
-    int8_t c;
-    int8_t d;
-};
+/** Map the point members of a primitive: points, arc start and arc end. The box corners are left alone. */
+void OrcadTransformPrimitivePoints( ORCAD_PRIMITIVE&                                        aPrim,
+                                    const std::function<ORCAD_POINT( const ORCAD_POINT& )>& aMap );
+
+/** Translate a primitive, box included. Group children are relative to the group and need no shift. */
+void OrcadOffsetPrimitive( ORCAD_PRIMITIVE& aPrim, int aDx, int aDy );
+
+/** Visit every non-group primitive in drawing order with the accumulated offset of its enclosing groups. */
+void OrcadForEachLeafPrimitive( const std::vector<ORCAD_PRIMITIVE>&                            aPrimitives,
+                                const std::function<void( const ORCAD_PRIMITIVE&, int, int )>& aVisit );
 
 
-/** Indexed by orientation bits: angle, mirror, offset selectors, then matrix coefficients. */
-inline constexpr ORCAD_ORIENT_ENTRY ORCAD_ORIENT_TABLE[8] = {
-    { 0, 0, 0, 0, 1, 0, 0, 1 },    { 90, 0, 0, 1, 0, 1, -1, 0 },    { 180, 0, 1, 2, -1, 0, 0, -1 },
-    { 270, 0, 2, 0, 0, -1, 1, 0 }, { 0, 'y', 1, 0, -1, 0, 0, 1 },   { 90, 'x', 0, 0, 0, 1, 1, 0 },
-    { 0, 'x', 0, 2, 1, 0, 0, -1 }, { 270, 'x', 2, 1, 0, -1, -1, 0 }
-};
-
-
-/** Compose the 3-bit orientation code from the rotation bits and mirror bit. */
-inline int OrcadOrientOf( int aRotation, bool aMirror )
-{
-    return ( aRotation & 3 ) | ( aMirror ? 0x4 : 0 );
-}
-
-
-inline int OrcadOrientDim( int aSelector, int aWidth, int aHeight )
-{
-    return aSelector == 1 ? aWidth : aSelector == 2 ? aHeight : 0;
-}
-
-
-/** Bbox re-anchoring offset for the given orientation and body size (DBU). */
-inline VECTOR2I OrcadOrientOffset( int aOrient, int aWidth, int aHeight )
+/** Undo the orientation matrix of OrcadTransformPoint. Its determinant is +/-1, so the division is exact. */
+inline ORCAD_POINT OrcadInverseOrient( int aOrient, int aX, int aY )
 {
     const ORCAD_ORIENT_ENTRY& e = ORCAD_ORIENT_TABLE[aOrient & 7];
-    return VECTOR2I( OrcadOrientDim( e.txSel, aWidth, aHeight ), OrcadOrientDim( e.tySel, aWidth, aHeight ) );
-}
+    int                       det = e.a * e.d - e.b * e.c;
 
-
-/** Parts use the instance anchor as the base. Power symbols, ports, and connectors use the box minimum. */
-inline VECTOR2I OrcadTransformPoint( int aOrient, int aWidth, int aHeight, int aBaseX, int aBaseY, int aPx, int aPy )
-{
-    const ORCAD_ORIENT_ENTRY& e = ORCAD_ORIENT_TABLE[aOrient & 7];
-    VECTOR2I                  t = OrcadOrientOffset( aOrient, aWidth, aHeight );
-
-    return VECTOR2I( aBaseX + t.x + e.a * aPx + e.b * aPy, aBaseY + t.y + e.c * aPx + e.d * aPy );
+    return { ( e.d * aX - e.b * aY ) / det, ( -e.c * aX + e.a * aY ) / det };
 }
 
 
 class ORCAD_CONVERTER
 {
 public:
-    /** aDesign is mutated and must outlive the converter. */
+    /**
+     * @param aDesign parsed design; held by reference and MUTATED during
+     *                conversion (page-content shift, placeholder symbol
+     *                insertion), so it must outlive the converter.
+     * @param aSchematic is KiCad schematic to load into.
+     * @param aReporter is an optional #REPORTER object to write status information.
+     * @param aProgressReporter is an optional progress dialog to show conversion progress.
+     *
+     * [orcad_converter_sheet.cpp]
+     */
     ORCAD_CONVERTER( ORCAD_DESIGN& aDesign, SCHEMATIC* aSchematic, REPORTER* aReporter,
                      PROGRESS_REPORTER* aProgressReporter = nullptr );
 
@@ -172,6 +153,7 @@ private:
     {
         std::string              letter; ///< unit discriminator, e.g. "A", "-16", "B:Convert"
         const ORCAD_SYMBOL_DEF*  symbol = nullptr;
+        const ORCAD_SYMBOL_DEF*  convert = nullptr; ///< DeMorgan view sharing this unit's pin map
         std::vector<std::string> pinNumbers; ///< device pin-number map for this unit
         std::vector<bool>        pinNumberVisible; ///< nonblank source package pin numbers
         std::vector<bool>        pinIgnore;  ///< package pins suppressed for this unit
@@ -206,6 +188,57 @@ private:
      * (lib name, unit number). */
     using PKG_KEY = std::tuple<std::string, std::string, int, std::string>;
 
+    /** Occurrence context of the page being converted. A reused child schematic converts once per scope. */
+    struct PAGE_SCOPE
+    {
+        const ORCAD_OCC_SCOPE*             occ = nullptr; ///< null when the page has no occurrence
+        std::string                        flatNetSuffix;
+        bool                               namedFlatNets = false;
+        bool                               generatedFlatNets = false;
+        std::map<std::string, std::string> unconnectedInterfaceNetNames;
+        std::map<std::string, std::string> interfaceNetAliases;
+        std::map<std::string, std::string> occurrenceNetAliases;
+        std::set<std::string>              connectorInterfaceNetAliases;
+        std::map<std::string, size_t>      electricalKeyCounts;
+    };
+
+    /** Lookups for the page and scope being converted, rebuilt by buildNetLookup(). */
+    struct PAGE_NET_INDEX
+    {
+        const ORCAD_RAW_PAGE*                                          page = nullptr;
+        std::map<std::pair<int, int>, std::vector<const ORCAD_WIRE*>> wireEndpoints;
+        std::map<const ORCAD_PIN_INST*, std::set<uint32_t>>           pinNets;
+        std::vector<VECTOR2I>                                          junctions;
+
+        /** Scope occurrence nets owned by a page net through a wire or part object id. */
+        std::map<uint32_t, std::set<const std::string*>> occurrenceNamesByNetId;
+
+        /** powerNet() depends on the scope, so the memo lives only as long as this index. */
+        mutable std::map<const ORCAD_GRAPHIC_INST*, std::string> powerNets;
+    };
+
+    /** Placements of a power symbol name and the power nets they resolved to. */
+    struct POWER_ALIAS_EVIDENCE
+    {
+        size_t                                                placements = 0;
+        std::map<std::string, std::pair<std::string, size_t>> targets;
+    };
+
+    /** Page counters and rules threaded through a folder hierarchy walk. The defaults are the folder rules. A
+     *  design whose every block opens a single-page child keeps the rules it was first imported with. */
+    struct FOLDER_WALK
+    {
+        int    pageIndex = 1;
+        size_t sourcePageIndex = 0;
+        size_t sourcePageCount = 0;
+        bool   numberSourcePages = true;    ///< fill title-block page numbers from the walk order
+        bool   occurrenceAliases = true;    ///< learn power and child occurrence aliases before placing pages
+        bool   interfaceAliases = false;    ///< alias a child's interface nets to the parent occurrence net
+        bool   nestedFlatSuffix = true;     ///< suffix by block path; else only in simple repeated leaf designs
+        bool   folderSheetNames = true;     ///< name an unreferenced block after its folder, else its page
+        bool   rootSharedFolderPage = true; ///< convert the root page as a shared folder page
+    };
+
     struct PLACED_PACKAGE_UNIT
     {
         SCH_SYMBOL*    symbol;
@@ -239,13 +272,23 @@ private:
 
     /** Return the design-wide spelling selected by prepareGlobalNetNames(). */
     std::string canonicalGlobalNetName( const std::string& aName ) const;
+
+    /** Case-folded canonicalGlobalNetName() for use as a map key. */
+    std::string canonicalGlobalNetKey( const std::string& aName ) const;
+
     std::string effectiveInterfaceNetName( const std::string& aName ) const;
+
+    void        enterScope( PAGE_SCOPE aScope );
+    std::string occurrenceBaseNetName( const std::string& aName ) const;
     std::string occurrenceElectricalNetName( uint32_t aOccurrenceId, const std::string& aName ) const;
     bool        isPowerNetName( const std::string& aName ) const;
     bool        isOffpageNetName( const std::string& aName ) const;
 
 
     void prepareSymbols();
+
+    /** One unit per package device; a Convert view becomes the unit's DeMorgan body. */
+    LIB_ENTRY buildPackageEntry( const ORCAD_PACKAGE& aPackage ) const;
 
     /** Use placed pin positions to keep uncached symbols connected. */
     ORCAD_SYMBOL_DEF synthesizeSymbol( const std::string&                               aPkgName,
@@ -283,14 +326,38 @@ private:
                        int aOffsetY = 0 );
 
 
-    void addSymbolPin( LIB_SYMBOL* aSymbol, const ORCAD_SYMBOL_PIN& aPin, const wxString& aNumber, int aUnit,
-                       bool aPower, const std::string& aNameOverride, bool aNameVisible, bool aShowPinNumbers,
-                       bool aNumberVisible, const BOX2I* aBodyBox, bool aHidden = false,
-                       bool aExplicitNet = false );
+    /** Per-pin choices kicadSymbolFor() makes before emitting a pin. */
+    struct PIN_EMIT
+    {
+        wxString    number;
+        int         unit = 1;
+        bool        power = false;
+        std::string nameOverride;
+        bool        nameVisible = false;
+        bool        showPinNumbers = false;
+        bool        numberVisible = true;
+        bool        hidden = false;
+        bool        explicitNet = false;
+    };
+
+    void addSymbolPin( LIB_SYMBOL* aSymbol, const ORCAD_SYMBOL_PIN& aPin, const BOX2I& aBodyBox, PIN_EMIT aEmit );
+
+    /** aBase, or aBase_pinsN for the first N >= 2 whose existing entry is absent or passes aReusable. */
+    std::string uniqueLibName( const std::string&                             aBase,
+                               const std::function<bool( const LIB_ENTRY& )>& aReusable ) const;
+
+    /** New placement of a library symbol, oriented by an OrCAD orientation code. */
+    SCH_SYMBOL* instantiateSymbol( const LIB_SYMBOL& aLibSymbol, const std::string& aLibName, int aUnit, int aOrient,
+                                   const VECTOR2I& aPos, const SCH_SHEET_PATH& aSheetPath ) const;
 
 
     void placeInstance( ORCAD_RAW_PAGE& aPage, const ORCAD_PLACED_INSTANCE& aInst, SCH_SCREEN* aScreen,
                         const SCH_SHEET_PATH& aSheetPath );
+
+    /** Record each CIS variant's installed state and property overrides as KiCad symbol variants.
+     *  aValue is the part value before a not-installed part shows "NI". */
+    void applyCisVariants( SCH_SYMBOL* aSymbol, const ORCAD_PLACED_INSTANCE& aInst,
+                           const SCH_SHEET_PATH& aSheetPath, const std::string& aValue );
 
     /** Use the occurrence reference when the instance has an unannotated template. */
     wxString resolveReference( const ORCAD_PLACED_INSTANCE& aInst ) const;
@@ -317,6 +384,13 @@ private:
 
     int displayFontId( const ORCAD_DISPLAY_PROP& aProp ) const;
     bool displayUsesTemplateFont( const ORCAD_DISPLAY_PROP& aProp ) const;
+
+    /** Capture's display-property origin sits on the font baseline; return the KiCad text origin. */
+    VECTOR2I displayPropPosition( const ORCAD_DISPLAY_PROP& aDisplay, const VECTOR2I& aAnchorIu ) const;
+
+    /** Style a field from a display property. aSymbolFlips compensates the parent symbol transform. */
+    void applyDisplayProp( SCH_FIELD& aField, const ORCAD_DISPLAY_PROP& aDisplay, const VECTOR2I& aAnchorIu,
+                           bool aSymbolFlips, bool aApplyVisibility = true ) const;
     int wireAliasFontId( const ORCAD_ALIAS& aAlias ) const;
     int textBaselineOffset( int aTextSize, int aFontIdx, bool aTemplateFont = true ) const;
 
@@ -350,7 +424,81 @@ private:
     void recordNetNameMap();
     void convertUnreferencedPages();
 
+    /** -- hierarchy [orcad_converter_sheet.cpp] ----------------------------------------- */
+
+    /** Collect the occurrence facts every hierarchy strategy reads. */
+    void prepareOccurrenceNets();
+
+    /** A scope for aOcc carrying the occurrence aliases known so far. */
+    PAGE_SCOPE occurrenceScope( const ORCAD_OCC_SCOPE& aOcc ) const;
+
+    /** No-connect block pins whose names are wired elsewhere become per-occurrence nets. */
+    std::map<std::string, std::string> unconnectedInterfaceNetNames( const ORCAD_DRAWN_INSTANCE& aBlock,
+                                                                     const std::string& aFlatNetSuffix ) const;
+
+    /** The child sheet for a hierarchical block, with its pins, appended to aParentSheet's screen. */
+    SCH_SHEET* createBlockSheet( SCH_SHEET* aParentSheet, const ORCAD_RAW_PAGE& aParentPage,
+                                 const ORCAD_DRAWN_INSTANCE& aBlock, const ORCAD_OCC_BLOCK& aOccurrence,
+                                 const wxString& aName, const std::string& aFilePageName, int aPageIndex );
+
+    /** Top-level sheets named by aNamesAndFiles. With aReuseRoot the first is the root sheet and the list
+     *  replaces the top level; otherwise the sheets are appended. Returns only the listed sheets. */
+    std::vector<SCH_SHEET*> createTopLevelSheets( const std::vector<std::pair<wxString, wxString>>& aNamesAndFiles,
+                                                  bool aReuseRoot, bool aOrdinalSheetUuids );
+
+    void recordPowerAlias( std::map<std::string, POWER_ALIAS_EVIDENCE>& aCandidates, const std::string& aSourceName,
+                           const std::string& aElectricalName ) const;
+
+    /** Rename a power symbol to the net most of its placements resolve to. */
+    void acceptPowerAliases( const std::map<std::string, POWER_ALIAS_EVIDENCE>& aCandidates );
+
+    /** One root page whose every block opens a single-page child. */
+    bool canBuildNativeHierarchy( const ORCAD_RAW_PAGE& aPage, const ORCAD_OCC_SCOPE& aScope ) const;
+
+    /** Every occurrence block is drawn exactly once on its parent folder's pages. */
+    bool canBuildFolderHierarchy( const std::vector<ORCAD_RAW_PAGE>& aPages, const ORCAD_OCC_SCOPE& aScope ) const;
+    void convertFolderHierarchy( const SCH_SHEET_PATH& aRootPath, bool aNative );
+    void addChildOccurrenceAliases( const ORCAD_RAW_PAGE& aParentPage, const ORCAD_OCC_SCOPE& aParentScope,
+                                    const ORCAD_DRAWN_INSTANCE& aDrawn, const ORCAD_OCC_SCOPE& aChildScope );
+    void collectFolderPowerAliases( std::map<std::string, POWER_ALIAS_EVIDENCE>& aCandidates,
+                                    std::vector<ORCAD_RAW_PAGE>& aPages, const ORCAD_OCC_SCOPE& aScope );
+    void placeFolder( FOLDER_WALK& aWalk, std::vector<ORCAD_RAW_PAGE>& aPages, const ORCAD_OCC_SCOPE& aScope,
+                      SCH_SHEET* aFolderSheet, const SCH_SHEET_PATH& aFolderPath,
+                      const std::string& aOccurrenceSuffix, bool aRepeatedFolder,
+                      const std::map<std::string, std::string>& aUnconnectedInterfaceNetNames,
+                      std::map<std::string, std::string>        aInterfaceNetAliases );
+
+    /** Every page, each child occurrence expanded, becomes a top-level sheet. */
+    void convertFlatPages( const SCH_SHEET_PATH& aRootPath );
+
+    /** Visit root pages, then child-folder pages, then unreferenced folder pages if asked. */
+    void forEachDesignPage( const std::function<void( const ORCAD_RAW_PAGE& )>& aVisit,
+                            bool aUnreferenced = false ) const;
+
+    /** aBase, or "aBase (N)" for the first N >= 2 not already used by a sibling sheet. */
+    wxString uniqueSheetName( const wxString& aBase );
+
+    /** Occurrence nets in aScopeNets that a block pin on aPage reaches by name or by wire object id.
+     *  aSourceKeys receives the pin's own name keys and those of the wires under it. */
+    std::set<const std::string*> pinOccurrenceTargets( const ORCAD_RAW_PAGE& aPage, const ORCAD_BLOCK_PIN& aPin,
+                                                       const std::map<uint32_t, std::string>& aScopeNets,
+                                                       bool aSkipGenerated,
+                                                       std::set<std::string>* aSourceKeys = nullptr ) const;
+
+    /** The hierarchy path ending at a top-level sheet, numbered aPageNumber. */
+    SCH_SHEET_PATH topLevelPath( SCH_SHEET* aSheet, size_t aPageNumber ) const;
+
     KIID deterministicUuid( const std::string& aRole, size_t aOrdinal ) const;
+
+    /** Name-based UUIDs for a symbol's raw pins, derived from aRole and each pin's number, name and position. */
+    void assignPinUuids( SCH_SYMBOL* aSymbol, const std::string& aRole ) const;
+
+    /** A new screen with the next deterministic screen UUID, recorded as created by this import. */
+    SCH_SCREEN* newScreen();
+
+    /** Give items created after page conversion, such as moved labels and cleanup junctions, UUIDs derived from
+     *  their type and position. Only screens this import created are touched. */
+    void assignRemainingUuids();
     void appendPageItem( SCH_SCREEN* aScreen, SCH_ITEM* aItem );
     void assignPageItemUuids( size_t aPageOrdinal );
 
@@ -370,14 +518,22 @@ private:
 
     void applyTitleBlock( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScreen );
 
-    /** Rebuild m_wireEndpoints for a page (both endpoints of every wire). */
+    /** Rebuild m_netIndex for a page in the current scope. */
     void buildNetLookup( const ORCAD_RAW_PAGE& aPage );
+
+    /** Page nets a placed pin joins through its net id, its wire object id or a wire under it. */
+    const std::set<uint32_t>& pinNetIds( const ORCAD_PIN_INST& aPin ) const;
 
     /** Prefer endpoint nets, then intersecting wires, then endpoint aliases. */
     std::string netAt( const ORCAD_RAW_PAGE& aPage, int aX, int aY ) const;
 
 
+    /** Memoized resolvePowerNet() for the indexed page. */
     std::string powerNet( const ORCAD_RAW_PAGE& aPage, const ORCAD_GRAPHIC_INST& aInst ) const;
+    std::string resolvePowerNet( const ORCAD_RAW_PAGE& aPage, const ORCAD_GRAPHIC_INST& aInst ) const;
+
+    /** The cached variant a page graphic uses: its Source Library first, then its placed bounds, else the first. */
+    const ORCAD_SYMBOL_DEF* graphicDefinition( const ORCAD_GRAPHIC_INST& aInst ) const;
 
     /** Use the transformed cache pin position, or the instance anchor if no pin is available. */
     VECTOR2I graphicPinPos( const ORCAD_GRAPHIC_INST& aInst ) const;
@@ -420,6 +576,14 @@ private:
 
     void placePorts( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScreen, bool aHierarchical );
 
+    /** Point an interface label at aPosDbu away from the wire that ends there. */
+    SPIN_STYLE spinAwayFromWire( const VECTOR2I& aPosDbu ) const;
+
+    /** Style a port or off-page label from its source graphic, draw its stored IREF text and add it.
+     *  Returns the Name display property, or nullptr. */
+    const ORCAD_DISPLAY_PROP* finishInterfaceLabel( const ORCAD_GRAPHIC_INST& aGraphic, SCH_LABEL_BASE* aLabel,
+                                                    const std::vector<SEG>& aSourceWires, SCH_SCREEN* aScreen );
+
 
     void placeGraphics( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScreen );
 
@@ -432,8 +596,7 @@ private:
 
     void placeDefinitionVectors( const ORCAD_SYMBOL_DEF& aDefinition, int aBaseX, int aBaseY, int aOrient,
                                  SCH_SCREEN* aScreen, double aTextScaleX = 1.0, double aTextScaleY = 1.0,
-                                 bool aUseGenericTextBaseline = false,
-                                 const std::string& aTextFaceOverride = {} );
+                                 bool aUseGenericTextBaseline = false );
 
     /** Closest point (DBU) on a wire segment to (aX, aY); exact for H/V wires. */
     static VECTOR2I snapToWire( int aX, int aY, const ORCAD_WIRE& aWire );
@@ -464,25 +627,22 @@ private:
     std::set<std::string>                          m_connectedBlockInterfaceNames;
     std::map<std::string, size_t>                  m_occurrenceNetNameScopeCounts;
     std::map<std::string, size_t>                  m_occurrenceNetNameMinDepth;
+    std::map<std::string, size_t>                  m_occurrenceFolderCounts;
+    bool                                           m_simpleRepeatedLeafDesign = false;
+
+    /** Occurrence net aliases shared by every scope, then those a parent block adds per child scope. */
+    std::map<std::string, std::string>                                                   m_baseOccurrenceNetAliases;
+    std::map<const std::map<uint32_t, std::string>*, std::map<std::string, std::string>> m_occurrenceAliasesByScope;
     int                                            m_powerCount;      ///< "#PWR%04d" counter
     int                                            m_fontBaselineDbu; ///< dominant text height; 0 = none
     size_t                                         m_pageOrdinal = 0;
     size_t                                         m_screenOrdinal = 1;
     SCH_SCREEN*                                    m_pageItemScreen = nullptr;
     std::vector<SCH_ITEM*>                         m_pageItems;
+    std::set<SCH_SCREEN*>                          m_importedScreens;
+    std::set<const SCH_ITEM*>                      m_preExistingItems; ///< already on the root screen
 
-    /** Per-page occurrence references distinguish repeated child schematics. Null means no occurrence tree. */
-    const std::map<uint32_t, std::string>*                    m_currentOccRefs = nullptr;
-    const std::map<uint32_t, std::string>*                    m_currentOccUnitRefs = nullptr;
-    const std::map<uint32_t, std::map<std::string, std::string>>* m_currentOccProps = nullptr;
-    const std::map<uint32_t, std::string>*                    m_currentOccNetNames = nullptr;
-    std::string                                               m_currentFlatNetSuffix;
-    bool                                                      m_scopeNamedFlatNets = false;
-    bool                                                      m_scopeGeneratedFlatNets = false;
-    std::map<std::string, std::string>                         m_currentUnconnectedInterfaceNetNames;
-    std::map<std::string, std::string>                         m_currentInterfaceNetAliases;
-    std::map<std::string, std::string>                         m_currentOccurrenceNetAliases;
-    std::set<std::string>                                      m_currentConnectorInterfaceNetAliases;
+    PAGE_SCOPE                                                m_scope;
     std::set<const ORCAD_PIN_INST*>                            m_currentImplicitPowerPins;
     std::map<std::string, std::map<std::string, std::string>> m_hierBusNamesByScreen;
 
@@ -505,7 +665,7 @@ private:
 
     std::vector<INTERFACE_LABEL_SOURCE> m_interfaceLabelSources;
     std::vector<NET_LABEL_INTENT> m_netLabelIntents;
-    std::map<SCH_LABEL_BASE*, std::pair<SCH_SCREEN*, uint32_t>> m_labelSourceNets;
+    std::vector<std::pair<SCH_LABEL_BASE*, std::pair<SCH_SCREEN*, uint32_t>>> m_labelSourceNets;
     std::map<SCH_SCREEN*, const ORCAD_RAW_PAGE*> m_sourcePages;
     std::map<std::pair<SCH_SCREEN*, uint32_t>, std::vector<SCH_ITEM*>> m_sourceNetItems;
     std::map<std::pair<SCH_SCREEN*, uint32_t>, std::set<std::string>> m_sourceNetNames;
@@ -526,8 +686,7 @@ private:
     /** Lower-cased sheet names already emitted, to keep sibling sheet names unique. */
     std::set<wxString> m_usedSheetNames;
 
-    /** Per-page wire lookup: endpoint -> wires ending there.  Rebuilt by buildNetLookup(). */
-    std::map<std::pair<int, int>, std::vector<const ORCAD_WIRE*>> m_wireEndpoints;
+    PAGE_NET_INDEX m_netIndex;
 };
 
 #endif // ORCAD_CONVERTER_H_

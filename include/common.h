@@ -78,10 +78,14 @@ KICOMMON_API wxString JoinExtensions( const std::vector<std::string>& aExts );
 /**
  * Replace any environment variable & text variable references with their values.
  *
- * @param aString a string containing (perhaps) references to env var
+ * @param aString a string containing (perhaps) references to env var.
+ * @param aProject the project to get variable substitutions from.
+ * @param aAllowEscapes false in a URI, where a backslash can only be a separator.
+ *
  * @return the expanded environment variable.
  */
-KICOMMON_API const wxString ExpandEnvVarSubstitutions( const wxString& aString, const PROJECT* aProject );
+KICOMMON_API const wxString ExpandEnvVarSubstitutions( const wxString& aString, const PROJECT* aProject,
+                                                       bool aAllowEscapes = true );
 
 enum RESOLUTION_CONTEXT
 {
@@ -91,7 +95,8 @@ enum RESOLUTION_CONTEXT
     FOR_ERC_DRC,
     INTERNAL,       // Importantly, keeps the escape on literal variable references (such as "\${foo}")
     RESOLVED,
-    RAW_VALUE
+    RAW_VALUE,
+    FOR_URI // A backslash is a path separator here, so no escapes are recognized
 };
 
 KICOMMON_API void FinalizeTextVarExpansion( wxString& aText, RESOLUTION_CONTEXT aContext );
@@ -118,7 +123,7 @@ KICOMMON_API wxString NormalizeFilePathForTextVars( const wxString& aPath );
  * resolving. Nested references are captured at every nesting level.
  *
  * Used by the reactive dependency tracker to register edges on SetText without
- * needing a resolver context. Escape sequences (`\${...}`) are skipped. `@{...}`
+ * needing a resolver context. Escape sequences (`\${...}`) are skipped. `\@{...}`
  * math expressions are walked so that nested `${...}` inside them is captured.
  */
 KICOMMON_API std::vector<TEXT_VAR_REF_KEY> ExtractTextVarReferences( const wxString& aSource );
@@ -126,11 +131,11 @@ KICOMMON_API std::vector<TEXT_VAR_REF_KEY> ExtractTextVarReferences( const wxStr
 /**
  * Multi-pass text variable expansion and math expression evaluation.
  *
- * Performs recursive resolution of both ${...} variable references and @{...} math expressions,
+ * Performs recursive resolution of both ${...} variable references and \@{...} math expressions,
  * then cleans up escape sequences (\${...} and \@{...}) to display literals.
  *
  * This helper encapsulates the common pattern used across schematic text components:
- * - While text contains ${...} or @{...} and depth < max:
+ * - While text contains ${...} or \@{...} and depth < max:
  *   - Expand variables via ExpandTextVars()
  *   - Evaluate math expressions via EXPRESSION_EVALUATOR
  * - Convert escape markers back to literals
@@ -168,6 +173,27 @@ KICOMMON_API wxString DescribeRef( const wxString& aRef );
  */
 KICOMMON_API const wxString ResolveUriByEnvVars( const wxString& aUri, const PROJECT* aProject );
 
+/**
+ * Expand text variables, environment variables and a leading '~' in a user-entered file path.
+ *
+ * The result may still be relative. Only "~" and "~/" are recognized, "~user" is left alone.
+ *
+ * @param aPath is the path as typed by the user or stored in a settings file.
+ * @param aProject is used to resolve project variables, may be null.
+ * @param aTextResolver resolves text variables in place of the project, may be null.
+ */
+KICOMMON_API wxString ExpandPathVariables( const wxString& aPath, const PROJECT* aProject,
+                                           const std::function<bool( wxString* )>* aTextResolver = nullptr );
+
+/**
+ * Expand a user-entered file path as ExpandPathVariables() does, then anchor a relative result at
+ * the project directory so it does not depend on the working directory.
+ *
+ * A path that still begins with an unresolved variable is returned as is.
+ */
+KICOMMON_API wxString ResolveProjectPath( const wxString& aPath, const PROJECT* aProject,
+                                          const std::function<bool( wxString* )>* aTextResolver = nullptr );
+
 
 /**
  * Checks if the operating system is explicitly unsupported and displays a disclaimer message box
@@ -175,4 +201,3 @@ KICOMMON_API const wxString ResolveUriByEnvVars( const wxString& aUri, const PRO
  * @return true if the operating system is unsupported
  */
 KICOMMON_API bool WarnUserIfOperatingSystemUnsupported();
-

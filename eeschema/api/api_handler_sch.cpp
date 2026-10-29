@@ -24,6 +24,7 @@
 #include <api/api_enums.h>
 #include <api/api_sch_utils.h>
 #include <api/api_utils.h>
+#include <api/api_server.h>
 #include <api/cross_probe_client.h>
 #include <api/sch_context.h>
 #include <api/api_server.h>
@@ -58,6 +59,7 @@
 #include <sch_edit_frame.h>
 #include <io/kicad/kicad_io_utils.h>
 #include <ki_error.h>
+#include <pgm_base.h>
 #include <richio.h>
 #include <sch_io/kicad_sexpr/sch_io_kicad_sexpr.h>
 
@@ -147,6 +149,7 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
     registerHandler<SaveCopyOfDocument, google::protobuf::Empty>(
             &API_HANDLER_SCH::handleSaveCopyOfDocument );
     registerHandler<RevertDocument, google::protobuf::Empty>( &API_HANDLER_SCH::handleRevertDocument );
+    registerHandler<SaveDocumentAs, google::protobuf::Empty>( &API_HANDLER_SCH::handleSaveDocumentAs );
 
     registerHandler<commands::SaveSelectionToString, commands::SavedSelectionResponse>(
             &API_HANDLER_SCH::handleSaveSelectionToString, HANDLER_MODE::GUI_ONLY );
@@ -372,13 +375,19 @@ API_HANDLER_SCH::validateDocumentInternal( const DocumentSpecifier& aDocument ) 
 
 HANDLER_RESULT<google::protobuf::Empty> API_HANDLER_SCH::handleSaveDocument( const HANDLER_CONTEXT<SaveDocument>& aCtx )
 {
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
 
-    HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() );
-
-    if( !documentValidation )
-        return tl::unexpected( documentValidation.error() );
+    if( project().IsNullProject() || schematic()->GetFileName().IsEmpty() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "the schematic is untitled; use SaveDocumentAs to save it to a new file" );
+        return tl::unexpected( e );
+    }
 
     if( !context()->SaveSchematic() )
     {
@@ -394,8 +403,18 @@ HANDLER_RESULT<google::protobuf::Empty> API_HANDLER_SCH::handleSaveDocument( con
 
 
 HANDLER_RESULT<google::protobuf::Empty>
-API_HANDLER_SCH::handleSaveCopyOfDocument( const HANDLER_CONTEXT<SaveCopyOfDocument>& aCtx )
+API_HANDLER_SCH::handleSaveDocumentAs( const HANDLER_CONTEXT<SaveDocumentAs>& aCtx )
 {
+    // In GUI mode a project change may require closing other editor frames, which the API is
+    // not allowed to do; headless mode has no other frames, so it is safe there
+    if( Pgm().IsGUI() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_UNIMPLEMENTED );
+        e.set_error_message( "SaveDocumentAs is not available in GUI mode" );
+        return tl::unexpected( e );
+    }
+
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
 
@@ -403,6 +422,50 @@ API_HANDLER_SCH::handleSaveCopyOfDocument( const HANDLER_CONTEXT<SaveCopyOfDocum
 
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
+
+    wxString pathStr = wxString::FromUTF8( aCtx.Request.path() );
+
+    if( pathStr.IsEmpty() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "path is required" );
+        return tl::unexpected( e );
+    }
+
+    wxFileName oldSchematicFile( m_context->GetCurrentFileName() );
+
+    if( !context()->SaveSchematicAs( pathStr ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "failed to save schematic to '{}'", pathStr.ToStdString() ) );
+        return tl::unexpected( e );
+    }
+
+    if( KICAD_API_SERVER* server = Server() )
+    {
+        wxFileName newSchematicFile( pathStr );
+        newSchematicFile.SetExt( FILEEXT::KiCadSchematicFileExtension );
+
+        server->NotifyDocumentRenamed( thisDocumentType(), oldSchematicFile.GetFullPath(),
+                                       newSchematicFile.GetFullPath() );
+    }
+
+    return google::protobuf::Empty();
+}
+
+
+HANDLER_RESULT<google::protobuf::Empty>
+API_HANDLER_SCH::handleSaveCopyOfDocument( const HANDLER_CONTEXT<SaveCopyOfDocument>& aCtx )
+{
+    HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() );
+
+    if( !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     wxFileName schematicPath( project().AbsolutePath( wxString::FromUTF8( aCtx.Request.path() ) ) );
 
@@ -575,7 +638,7 @@ HANDLER_RESULT<ErcResultsResponse> API_HANDLER_SCH::handleRunSchematicJobErc(
     // An asynchronous job runs on the registry's worker thread and shares this document's
     // PROJECT, its symbol library adapter and the KiCad thread pool with the checker, which then
     // rebuilds the schematic's markers underneath it.  Let the queue drain first, the same way a
-    // synchronous job and IFACE::closeCurrentDocument do.
+    // synchronous job and IFACE::closeSchematic do.
     API_JOB_REGISTRY::Instance().WaitForIdle();
 
     SCHEMATIC* sch = schematic();
@@ -1209,14 +1272,14 @@ void API_HANDLER_SCH::filterValidSchTypes( std::set<KICAD_T>& aTypeList )
 
 HANDLER_RESULT<GetItemsResponse> API_HANDLER_SCH::handleGetItems( const HANDLER_CONTEXT<GetItems>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     if( HANDLER_RESULT<std::optional<KIID>> valid = validateItemHeaderDocument( aCtx.Request.header() );
         !valid.has_value() )
     {
         return tl::unexpected( valid.error() );
     }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     std::vector<KICAD_T> requestedTypes = parseRequestedItemTypes( aCtx.Request.types() );
 
@@ -1360,9 +1423,6 @@ std::map<KICAD_T, uint32_t> API_HANDLER_SCH::countItems( const DocumentSpecifier
 
 HANDLER_RESULT<GetItemsResponse> API_HANDLER_SCH::handleGetItemsById( const HANDLER_CONTEXT<GetItemsById>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     // validateItemHeaderDocument already answers AS_UNHANDLED for another editor's
     // document type; anything else it reports is a real error for this client
     if( HANDLER_RESULT<std::optional<KIID>> header = validateItemHeaderDocument( aCtx.Request.header() );
@@ -1370,6 +1430,9 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_SCH::handleGetItemsById( const HAND
     {
         return tl::unexpected( header.error() );
     }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     SCH_SHEET_LIST hierarchy = schematic()->Hierarchy();
     std::optional<SCH_SHEET_PATH> pathFilter;
@@ -1486,9 +1549,6 @@ API_HANDLER_SCH::handleClearSelection( const HANDLER_CONTEXT<ClearSelection>& aC
     if( std::optional<ApiResponseStatus> headless = checkForHeadless( "ClearSelection" ) )
         return tl::unexpected( *headless );
 
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     // validateItemHeaderDocument already answers AS_UNHANDLED for another editor's
     // document type; anything else it reports is a real error for this client
     if( HANDLER_RESULT<std::optional<KIID>> header = validateItemHeaderDocument( aCtx.Request.header() );
@@ -1496,6 +1556,9 @@ API_HANDLER_SCH::handleClearSelection( const HANDLER_CONTEXT<ClearSelection>& aC
     {
         return tl::unexpected( header.error() );
     }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     m_context->GetToolManager()->RunAction( ACTIONS::selectionClear );
     frame()->Refresh();
@@ -1510,9 +1573,6 @@ API_HANDLER_SCH::handleAddToSelection( const HANDLER_CONTEXT<AddToSelection>& aC
     if( std::optional<ApiResponseStatus> headless = checkForHeadless( "AddToSelection" ) )
         return tl::unexpected( *headless );
 
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     // validateItemHeaderDocument already answers AS_UNHANDLED for another editor's
     // document type; anything else it reports is a real error for this client
     if( HANDLER_RESULT<std::optional<KIID>> header = validateItemHeaderDocument( aCtx.Request.header() );
@@ -1520,6 +1580,9 @@ API_HANDLER_SCH::handleAddToSelection( const HANDLER_CONTEXT<AddToSelection>& aC
     {
         return tl::unexpected( header.error() );
     }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     SCH_SELECTION_TOOL* tool = m_context->GetToolManager()->GetTool<SCH_SELECTION_TOOL>();
     SCH_SHEET_PATH current = m_context->GetCurrentSheet().value_or( SCH_SHEET_PATH() );
@@ -1560,9 +1623,6 @@ API_HANDLER_SCH::handleRemoveFromSelection( const HANDLER_CONTEXT<RemoveFromSele
     if( std::optional<ApiResponseStatus> headless = checkForHeadless( "RemoveFromSelection" ) )
         return tl::unexpected( *headless );
 
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     // validateItemHeaderDocument already answers AS_UNHANDLED for another editor's
     // document type; anything else it reports is a real error for this client
     if( HANDLER_RESULT<std::optional<KIID>> header = validateItemHeaderDocument( aCtx.Request.header() );
@@ -1570,6 +1630,9 @@ API_HANDLER_SCH::handleRemoveFromSelection( const HANDLER_CONTEXT<RemoveFromSele
     {
         return tl::unexpected( header.error() );
     }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     SCH_SELECTION_TOOL* tool = m_context->GetToolManager()->GetTool<SCH_SELECTION_TOOL>();
     SCH_SHEET_PATH current = m_context->GetCurrentSheet().value_or( SCH_SHEET_PATH() );
@@ -1715,7 +1778,7 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
 {
     ApiResponseStatus e;
 
-    auto containerResult = validateItemHeaderDocument( aHeader );
+    HANDLER_RESULT<std::optional<KIID>> containerResult = validateItemHeaderDocument( aHeader );
 
     if( !containerResult && containerResult.error().status() == ApiStatusCode::AS_UNHANDLED )
     {
@@ -1730,12 +1793,13 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
     }
 
     SCH_SHEET_LIST hierarchy = schematic()->Hierarchy();
-    SCH_SCREEN* targetScreen = schematic()->GetCurrentScreen();
+    SCH_SCREEN*    targetScreen = schematic()->GetCurrentScreen();
     SCH_SHEET_PATH targetPath = m_context->GetCurrentSheet().value_or( *hierarchy.begin() );
 
     if( aHeader.document().has_sheet_path() )
     {
         KIID_PATH kp = UnpackSheetPath( aHeader.document().sheet_path() );
+
         if( std::optional<SCH_SHEET_PATH> path = hierarchy.GetSheetPathByKIIDPath( kp ) )
         {
             targetPath = *path;
@@ -1744,9 +1808,9 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
     }
 
     SCH_COMMIT* commit = static_cast<SCH_COMMIT*>( getCurrentCommit( aClientName ) );
-    bool connectivityChanged = false;   // an in-place symbol update invalidated the net graph
-
-    EDA_ITEM* container = targetScreen;
+    int         commitCheckpoint = commit->Checkpoint();
+    bool        connectivityChanged = false;   // an in-place symbol update invalidated the net graph
+    EDA_ITEM*   container = targetScreen;
 
     if( containerResult->has_value() )
     {
@@ -1770,8 +1834,7 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
         if( !type )
         {
             status.set_code( ItemStatusCode::ISC_INVALID_TYPE );
-            status.set_error_message( fmt::format( "Could not decode a valid type from {}",
-                                                   anyItem.type_url() ) );
+            status.set_error_message( fmt::format( "Could not decode a valid type from {}", anyItem.type_url() ) );
             aItemHandler( status, anyItem );
             continue;
         }
@@ -1793,7 +1856,7 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
         // Retained past the unpack: the placement data they carry is applied once the item is
         // in the schematic.
         kiapi::schematic::types::SchematicSymbolInstance symbolProto;
-        kiapi::schematic::types::SheetSymbol            sheetProto;
+        kiapi::schematic::types::SheetSymbol             sheetProto;
 
         if( *type == SCH_SYMBOL_T )
         {
@@ -1830,9 +1893,10 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
 
         if( !unpacked )
         {
+            commit->RevertToCheckpoint( commitCheckpoint );
+
             e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-            e.set_error_message( fmt::format( "could not unpack {} from request",
-                                              item->GetClass().ToStdString() ) );
+            e.set_error_message( fmt::format( "could not unpack {} from request", item->GetClass().ToStdString() ) );
             return tl::unexpected( e );
         }
 
@@ -1988,8 +2052,10 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
         status.set_code( ItemStatusCode::ISC_OK );
         google::protobuf::Any newItem;
 
-        if( aCreate && !item.get() )
+        if( aCreate && !item )
         {
+            commit->RevertToCheckpoint( commitCheckpoint );
+
             e.set_status( ApiStatusCode::AS_BAD_REQUEST );
             e.set_error_message( "could not add the requested item to its parent container" );
             return tl::unexpected( e );
@@ -2022,7 +2088,11 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
                 SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( createdItem );
                 kiapi::schematic::types::SchematicSymbolInstance packed;
 
-                ApplySymbolInstance( symbol, symbolProto, targetPath, schematic() );
+                if( !ApplySymbolInstance( &status, symbol, symbolProto, targetPath, schematic() ) )
+                {
+                    aItemHandler( status, anyItem );
+                    continue;
+                }
 
                 if( PackSymbol( &packed, symbol, targetPath ) )
                     newItem.PackFrom( packed );
@@ -2035,7 +2105,11 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
                 if( sheetProto.page_number().empty() )
                     sheetProto.set_page_number( hierarchy.GetNextPageNumber().ToUTF8() );
 
-                ApplySheetInstance( sheet, sheetProto, targetPath, schematic() );
+                if( !ApplySheetInstance( &status, sheet, sheetProto, targetPath, schematic() ) )
+                {
+                    aItemHandler( status, anyItem );
+                    continue;
+                }
 
                 if( PackSheet( &packed, sheet, targetPath ) )
                     newItem.PackFrom( packed );
@@ -2082,7 +2156,11 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
                 for( const SCH_SYMBOL_INSTANCE& placement : symbolPlacements )
                     symbol->AddHierarchicalReference( placement );
 
-                ApplySymbolInstance( symbol, symbolProto, existingPath, schematic() );
+                if( !ApplySymbolInstance( &status, symbol, symbolProto, existingPath, schematic() ) )
+                {
+                    aItemHandler( status, anyItem );
+                    continue;
+                }
 
                 if( PackSymbol( &packed, symbol, existingPath ) )
                     newItem.PackFrom( packed );
@@ -2095,7 +2173,11 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
                 for( const SCH_SHEET_INSTANCE& placement : sheetPlacements )
                     sheet->AddInstance( placement );
 
-                ApplySheetInstance( sheet, sheetProto, existingPath, schematic() );
+                if( !ApplySheetInstance( &status, sheet, sheetProto, existingPath, schematic() ) )
+                {
+                    aItemHandler( status, anyItem );
+                    continue;
+                }
 
                 if( PackSheet( &packed, sheet, existingPath ) )
                     newItem.PackFrom( packed );
@@ -2308,13 +2390,13 @@ applySchematicPlotSettings( const schematic::jobs::SchematicPlotSettings& aSetti
 HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExportSvg(
         const HANDLER_CONTEXT<kiapi::schematic::jobs::RunSchematicJobExportSvg>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.job_settings().document() );
 
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     auto plotJob = std::make_unique<JOB_EXPORT_SCH_PLOT_SVG>( aCtx.Request.plot_settings().sheet_mode()
                                                               != schematic::jobs::SJSM_SINGLE_SHEET );
@@ -2336,13 +2418,13 @@ HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExpo
 HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExportDxf(
         const HANDLER_CONTEXT<kiapi::schematic::jobs::RunSchematicJobExportDxf>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.job_settings().document() );
 
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     auto plotJob = std::make_unique<JOB_EXPORT_SCH_PLOT_DXF>( aCtx.Request.plot_settings().sheet_mode()
                                                               != schematic::jobs::SJSM_SINGLE_SHEET );
@@ -2365,13 +2447,13 @@ HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExpo
 HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExportPdf(
         const HANDLER_CONTEXT<kiapi::schematic::jobs::RunSchematicJobExportPdf>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.job_settings().document() );
 
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     auto plotJob = std::make_unique<JOB_EXPORT_SCH_PLOT_PDF>( false );
     plotJob->m_filename = m_context->GetCurrentFileName();
@@ -2396,13 +2478,13 @@ HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExpo
 HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExportPs(
         const HANDLER_CONTEXT<kiapi::schematic::jobs::RunSchematicJobExportPs>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.job_settings().document() );
 
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     auto plotJob = std::make_unique<JOB_EXPORT_SCH_PLOT_PS>( aCtx.Request.plot_settings().sheet_mode()
                                                              != schematic::jobs::SJSM_SINGLE_SHEET );
@@ -2424,11 +2506,11 @@ HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExpo
 HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExportPng(
         const HANDLER_CONTEXT<schematic::jobs::RunSchematicJobExportPng>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     if( HANDLER_RESULT<bool> validation = validateDocument( aCtx.Request.job_settings().document() ); !validation )
         return tl::unexpected( validation.error() );
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     const schematic::jobs::SchematicJobSheetMode sheetMode = aCtx.Request.plot_settings().sheet_mode();
 
@@ -2470,13 +2552,13 @@ HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExpo
 HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExportNetlist(
         const HANDLER_CONTEXT<kiapi::schematic::jobs::RunSchematicJobExportNetlist>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.job_settings().document() );
 
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     if( aCtx.Request.format() == kiapi::schematic::jobs::SchematicNetlistFormat::SNF_UNKNOWN )
     {
@@ -2505,13 +2587,13 @@ HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExpo
 HANDLER_RESULT<types::RunJobResponse> API_HANDLER_SCH::handleRunSchematicJobExportBOM(
         const HANDLER_CONTEXT<kiapi::schematic::jobs::RunSchematicJobExportBOM>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.job_settings().document() );
 
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     std::unique_ptr<JOB_EXPORT_BOM> bomJobPtr = std::make_unique<JOB_EXPORT_BOM>();
     JOB_EXPORT_BOM&                 bomJob = *bomJobPtr;
@@ -2688,9 +2770,6 @@ HANDLER_RESULT<kiapi::schematic::commands::SchematicHierarchyResponse> API_HANDL
 HANDLER_RESULT<kiapi::schematic::commands::SchematicNetlistResponse>
 API_HANDLER_SCH::handleGetSchematicNetlist( const HANDLER_CONTEXT<kiapi::schematic::commands::GetSchematicNetlist>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     const bool engine = ADVANCED_CFG::GetCfg().m_ConnectivityEngine;
 
     // The engine rebuilds before answering, which an interactive tool must not observe
@@ -2706,6 +2785,9 @@ API_HANDLER_SCH::handleGetSchematicNetlist( const HANDLER_CONTEXT<kiapi::schemat
 
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     std::vector<KICAD_T> types = parseRequestedItemTypes( aCtx.Request.types() );
     const bool filterByType = aCtx.Request.types_size() > 0;
@@ -2924,7 +3006,7 @@ bool findSymbolsAndPins( const SCH_SHEET_LIST& aSchematicSheetList, const SCH_SH
 
             for( SCH_PIN* pin : pinsOnSheet )
             {
-                int pinUnit = pin->GetLibPin() ? pin->GetLibPin()->GetUnit() : 0;
+                int pinUnit = pin->GetLibPin() ? pin->GetLibPin()->GetUnit() : ALL_UNITS;
 
                 if( pinUnit > 0 && pinUnit != schRef.GetUnit() )
                     continue;
@@ -3387,29 +3469,13 @@ API_HANDLER_SCH::handleExpandTextVariables( const HANDLER_CONTEXT<ExpandTextVari
 }
 
 
-// Variant names are stored and compared exactly, but SCHEMATIC::HasVariant matches case-insensitively
-static std::optional<wxString> findVariantNoCase( const SCHEMATIC* aSchematic, const wxString& aName )
-{
-    for( const wxString& variantName : aSchematic->GetVariantNames() )
-    {
-        if( variantName.CmpNoCase( aName ) == 0 )
-            return variantName;
-    }
-
-    return std::nullopt;
-}
-
-
 HANDLER_RESULT<VariantsResponse> API_HANDLER_SCH::handleGetVariants( const HANDLER_CONTEXT<GetVariants>& aCtx )
 {
-    if( aCtx.Request.document().type() != DocumentType::DOCTYPE_SCHEMATIC )
-        return tl::unexpected( MakeResponseStatus( AS_UNHANDLED ) );
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
 
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
-
-    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
-        return tl::unexpected( documentValidation.error() );
 
     VariantsResponse response;
 
@@ -3428,14 +3494,11 @@ HANDLER_RESULT<VariantsResponse> API_HANDLER_SCH::handleGetVariants( const HANDL
 
 HANDLER_RESULT<Empty> API_HANDLER_SCH::handleAddVariant( const HANDLER_CONTEXT<AddVariant>& aCtx )
 {
-    if( aCtx.Request.document().type() != DocumentType::DOCTYPE_SCHEMATIC )
-        return tl::unexpected( MakeResponseStatus( AS_UNHANDLED ) );
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
 
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
-
-    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
-        return tl::unexpected( documentValidation.error() );
 
     SCHEMATIC* schematic = this->schematic();
     wxString   name = wxString::FromUTF8( aCtx.Request.name() );
@@ -3450,7 +3513,7 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleAddVariant( const HANDLER_CONTEXT<A
 
     VARIANT_PROXY_UNDO_ITEM* undoItem = m_frame ? new VARIANT_PROXY_UNDO_ITEM( schematic ) : nullptr;
 
-    if( std::optional<wxString> canonical = findVariantNoCase( schematic, name ) )
+    if( std::optional<wxString> canonical = FindVariantNoCase( schematic, name ) )
         name = *canonical;
 
     schematic->AddVariant( name );
@@ -3480,14 +3543,11 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleAddVariant( const HANDLER_CONTEXT<A
 
 HANDLER_RESULT<Empty> API_HANDLER_SCH::handleDeleteVariant( const HANDLER_CONTEXT<DeleteVariant>& aCtx )
 {
-    if( aCtx.Request.document().type() != DocumentType::DOCTYPE_SCHEMATIC )
-        return tl::unexpected( MakeResponseStatus( AS_UNHANDLED ) );
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
 
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
-
-    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
-        return tl::unexpected( documentValidation.error() );
 
     SCHEMATIC* schematic = this->schematic();
     wxString   name = wxString::FromUTF8( aCtx.Request.name() );
@@ -3512,7 +3572,7 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleDeleteVariant( const HANDLER_CONTEX
     SCH_COMMIT               commit( m_frame ? frame()->GetToolManager() : toolManager() );
     bool                     pushedCommit = false;
 
-    if( std::optional<wxString> canonical = findVariantNoCase( schematic, name ) )
+    if( std::optional<wxString> canonical = FindVariantNoCase( schematic, name ) )
         name = *canonical;
 
     schematic->DeleteVariant( name, &commit );
@@ -3550,14 +3610,11 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleDeleteVariant( const HANDLER_CONTEX
 
 HANDLER_RESULT<Empty> API_HANDLER_SCH::handleRenameVariant( const HANDLER_CONTEXT<RenameVariant>& aCtx )
 {
-    if( aCtx.Request.document().type() != DocumentType::DOCTYPE_SCHEMATIC )
-        return tl::unexpected( MakeResponseStatus( AS_UNHANDLED ) );
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
 
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
-
-    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
-        return tl::unexpected( documentValidation.error() );
 
     SCHEMATIC* schematic = this->schematic();
     wxString   oldName = wxString::FromUTF8( aCtx.Request.old_name() );
@@ -3595,11 +3652,13 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleRenameVariant( const HANDLER_CONTEX
         return tl::unexpected( e );
     }
 
+    bool isCurrent = frame() ? frame()->Schematic().GetCurrentVariant().CmpNoCase( oldName ) == 0 : false;
+
     VARIANT_PROXY_UNDO_ITEM* undoItem = m_frame ? new VARIANT_PROXY_UNDO_ITEM( schematic ) : nullptr;
     SCH_COMMIT               commit( m_frame ? frame()->GetToolManager() : toolManager() );
     bool                     pushedCommit = false;
 
-    if( std::optional<wxString> canonicalOld = findVariantNoCase( schematic, oldName ) )
+    if( std::optional<wxString> canonicalOld = FindVariantNoCase( schematic, oldName ) )
         oldName = *canonicalOld;
 
     schematic->RenameVariant( oldName, newName, &commit );
@@ -3621,7 +3680,15 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleRenameVariant( const HANDLER_CONTEX
         undoCmd->SetDescription( _( "Rename Variant" ) );
         frame()->PushCommandToUndoList( undoCmd );
 
+        // This will zero out the selection if it happened to point to the old name
         frame()->UpdateVariantSelectionCtrl( frame()->Schematic().GetVariantNamesForUI() );
+
+        if( isCurrent )
+        {
+            // This will reset the variant-selection-ctrl's selection, but only if the
+            // names have already been updated to include the new name
+            frame()->SetCurrentVariant( newName );
+        }
     }
 
     bumpRevision();
@@ -3633,14 +3700,11 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleRenameVariant( const HANDLER_CONTEX
 
 HANDLER_RESULT<Empty> API_HANDLER_SCH::handleCopyVariant( const HANDLER_CONTEXT<CopyVariant>& aCtx )
 {
-    if( aCtx.Request.document().type() != DocumentType::DOCTYPE_SCHEMATIC )
-        return tl::unexpected( MakeResponseStatus( AS_UNHANDLED ) );
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
 
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
-
-    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
-        return tl::unexpected( documentValidation.error() );
 
     SCHEMATIC* schematic = this->schematic();
     wxString   oldName = wxString::FromUTF8( aCtx.Request.old_name() );
@@ -3682,7 +3746,7 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleCopyVariant( const HANDLER_CONTEXT<
     SCH_COMMIT               commit( m_frame ? frame()->GetToolManager() : toolManager() );
     bool                     pushedCommit = false;
 
-    if( std::optional<wxString> canonicalOld = findVariantNoCase( schematic, oldName ) )
+    if( std::optional<wxString> canonicalOld = FindVariantNoCase( schematic, oldName ) )
         oldName = *canonicalOld;
 
     schematic->CopyVariant( oldName, newName, &commit );
@@ -3719,14 +3783,11 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleCopyVariant( const HANDLER_CONTEXT<
 
 HANDLER_RESULT<Empty> API_HANDLER_SCH::handleSetVariantDescription( const HANDLER_CONTEXT<SetVariantDescription>& aCtx )
 {
-    if( aCtx.Request.document().type() != DocumentType::DOCTYPE_SCHEMATIC )
-        return tl::unexpected( MakeResponseStatus( AS_UNHANDLED ) );
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
 
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
-
-    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
-        return tl::unexpected( documentValidation.error() );
 
     SCHEMATIC* schematic = this->schematic();
     wxString   name = wxString::FromUTF8( aCtx.Request.name() );
@@ -3741,7 +3802,7 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleSetVariantDescription( const HANDLE
 
     VARIANT_PROXY_UNDO_ITEM* undoItem = m_frame ? new VARIANT_PROXY_UNDO_ITEM( schematic ) : nullptr;
 
-    if( std::optional<wxString> canonical = findVariantNoCase( schematic, name ) )
+    if( std::optional<wxString> canonical = FindVariantNoCase( schematic, name ) )
         name = *canonical;
 
     schematic->SetVariantDescription( name, wxString::FromUTF8( aCtx.Request.description() ) );
@@ -3764,14 +3825,11 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleSetVariantDescription( const HANDLE
 
 HANDLER_RESULT<Empty> API_HANDLER_SCH::handleSetCurrentVariant( const HANDLER_CONTEXT<SetCurrentVariant>& aCtx )
 {
-    if( aCtx.Request.document().type() != DocumentType::DOCTYPE_SCHEMATIC )
-        return tl::unexpected( MakeResponseStatus( AS_UNHANDLED ) );
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
 
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
-
-    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
-        return tl::unexpected( documentValidation.error() );
 
     SCHEMATIC* schematic = this->schematic();
 
@@ -3788,7 +3846,7 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleSetCurrentVariant( const HANDLER_CO
 
     wxString name = aCtx.Request.has_name() ? wxString::FromUTF8( aCtx.Request.name() ) : wxString();
 
-    if( std::optional<wxString> canonical = findVariantNoCase( schematic, name ) )
+    if( std::optional<wxString> canonical = FindVariantNoCase( schematic, name ) )
         name = *canonical;
 
     if( m_frame )
@@ -3806,9 +3864,6 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleSetCurrentVariant( const HANDLER_CO
 HANDLER_RESULT<CurrentVariantResponse>
 API_HANDLER_SCH::handleGetCurrentVariant( const HANDLER_CONTEXT<GetCurrentVariant>& aCtx )
 {
-    if( aCtx.Request.document().type() != DocumentType::DOCTYPE_SCHEMATIC )
-        return tl::unexpected( MakeResponseStatus( AS_UNHANDLED ) );
-
     if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
         return tl::unexpected( documentValidation.error() );
 
@@ -5022,15 +5077,15 @@ wxString API_HANDLER_SCH::attachSheetFile( SCH_SHEET* aSheet, const SCH_SHEET_PA
 HANDLER_RESULT<PlaceFromLibraryResponse> API_HANDLER_SCH::handlePlaceSymbolFromLibrary(
         const HANDLER_CONTEXT<schematic::commands::PlaceSymbolFromLibrary>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     if( !validateItemHeaderDocument( aCtx.Request.header() ) )
     {
         ApiResponseStatus e;
         e.set_status( ApiStatusCode::AS_UNHANDLED );
         return tl::unexpected( e );
     }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     LIB_ID libId = UnpackLibId( aCtx.Request.lib_id() );
 
@@ -5103,7 +5158,7 @@ HANDLER_RESULT<PlaceFromLibraryResponse> API_HANDLER_SCH::handlePlaceSymbolFromL
     {
         SCH_REFERENCE      newReference( symbol.get(), targetPath );
         SCH_REFERENCE_LIST existingRefs;
-        hierarchy.GetSymbols( existingRefs, SYMBOL_FILTER_ALL );
+        hierarchy.GetSymbols( existingRefs, SYMBOL_FILTER_NON_POWER );
 
         bool annotate = newReference.AlwaysAnnotate();
 

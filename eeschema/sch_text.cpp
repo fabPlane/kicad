@@ -246,7 +246,7 @@ void SCH_TEXT::Rotate( const VECTOR2I& aCenter, bool aRotateCCW )
     RotatePoint( pt, aCenter, aRotateCCW ? ANGLE_90 : ANGLE_270 );
     VECTOR2I offset = pt - GetTextPos();
 
-    Rotate90( false );
+    Rotate90( !aRotateCCW );
 
     SetTextPos( GetTextPos() + offset );
 }
@@ -276,6 +276,8 @@ void SCH_TEXT::swapData( SCH_ITEM* aItem )
 {
     SCH_TEXT* item = static_cast<SCH_TEXT*>( aItem );
 
+    std::swap( m_excludedFromSim, item->m_excludedFromSim );
+
     SwapText( *item );
     SwapAttributes( *item );
 }
@@ -298,7 +300,7 @@ bool SCH_TEXT::operator<( const SCH_ITEM& aItem ) const
         return GetPosition().y < other->GetPosition().y;
 
     if( GetExcludedFromSim() != other->GetExcludedFromSim() )
-        return GetExcludedFromSim() - other->GetExcludedFromSim();
+        return GetExcludedFromSim();
 
     return GetText() < other->GetText();
 }
@@ -566,7 +568,7 @@ void SCH_TEXT::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS& a
             attrs.m_Angle = ANGLE_VERTICAL;
 
         bool origHoriz = ( GetTextAngle() == ANGLE_HORIZONTAL );
-        bool screenHoriz = ( attrs.m_Angle == ANGLE_HORIZONTAL );
+        bool screenHoriz = ( attrs.m_Angle.GetAngle() == ANGLE_HORIZONTAL );
 
         // Check if the text reading direction is reversed by the transform
         // Flip H alignment when reversed

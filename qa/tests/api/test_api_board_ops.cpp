@@ -636,7 +636,7 @@ BOOST_FIXTURE_TEST_CASE( BoardOpsImportSpecctraSession, API_SERVER_E2E_FIXTURE )
         *request.mutable_board() = board;
         BOOST_CHECK_EQUAL( SendStatus( Client(), request ), kiapi::common::AS_BAD_REQUEST );
 
-        request.set_path( "/nonexistent/routed.ses" );
+        request.set_session_path( "/nonexistent/routed.ses" );
         BOOST_CHECK_EQUAL( SendStatus( Client(), request ), kiapi::common::AS_BAD_REQUEST );
     }
 
@@ -656,6 +656,7 @@ BOOST_FIXTURE_TEST_CASE( BoardOpsImportSpecctraSession, API_SERVER_E2E_FIXTURE )
         ImportSpecctraSession request;
         *request.mutable_board() = board;
         request.set_contents( KITCHEN_SINK_SESSION );
+        request.set_replace_existing_tracks( false );
 
         ImportSpecctraSessionResponse response;
         BOOST_REQUIRE_MESSAGE( Send( Client(), request, &response, &error ), error );
@@ -667,6 +668,8 @@ BOOST_FIXTURE_TEST_CASE( BoardOpsImportSpecctraSession, API_SERVER_E2E_FIXTURE )
         BOOST_CHECK_EQUAL( response.footprints_moved(), 0 );
         BOOST_REQUIRE_EQUAL( response.warnings_size(), 1 );
         BOOST_CHECK( response.warnings( 0 ).find( "1 session item" ) != std::string::npos );
+        BOOST_CHECK_EQUAL( response.skipped_count(), 1u );
+        BOOST_CHECK( response.report().find( "1 session item" ) != std::string::npos );
 
         BOOST_CHECK_EQUAL( CountItems( Client(), board, kiapi::common::types::KOT_PCB_TRACE ), tracksBefore + 3 );
         BOOST_CHECK_EQUAL( CountItems( Client(), board, kiapi::common::types::KOT_PCB_VIA ), viasBefore + 1 );
@@ -695,8 +698,8 @@ BOOST_FIXTURE_TEST_CASE( BoardOpsImportSpecctraSession, API_SERVER_E2E_FIXTURE )
 
         ImportSpecctraSession request;
         *request.mutable_board() = board;
-        request.set_path( sessionPath.ToUTF8().data() );
-        request.set_replace_existing_tracks( true );
+        // Unset replace_existing_tracks is the editor's behavior: replace
+        request.set_session_path( sessionPath.ToUTF8().data() );
 
         ImportSpecctraSessionResponse response;
         BOOST_REQUIRE_MESSAGE( Send( Client(), request, &response, &error ), error );

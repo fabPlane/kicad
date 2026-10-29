@@ -145,6 +145,9 @@ void PCB_VIA_STACK::SetNetCode( int aNet )
 
 bool PCB_VIA_STACK::IsSpanValid( BOARD* aBoard, PCB_LAYER_ID aStart, PCB_LAYER_ID aEnd )
 {
+    if( !aBoard )
+        return false;
+
     LSET enabled = LSET::AllCuMask( aBoard->GetCopperLayerCount() );
 
     auto present = [&]( PCB_LAYER_ID aLayer )
@@ -181,8 +184,8 @@ void PCB_VIA_STACK::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection
     if( m_hops )
         m_hops->Mirror( aCentre, aFlipDirection );
 
-    m_startLayer = GetBoard()->FlipLayer( m_startLayer );
-    m_endLayer = GetBoard()->FlipLayer( m_endLayer );
+    m_startLayer = GetFlippedLayer( m_startLayer );
+    m_endLayer = GetFlippedLayer( m_endLayer );
 }
 
 
@@ -224,6 +227,17 @@ void PCB_VIA_STACK::addMember( BOARD* aBoard, BOARD_COMMIT* aCommit, BOARD_ITEM*
 }
 
 
+std::pair<int, int> PCB_VIA_STACK::GetNetclassViaSize( BOARD* aBoard, int aNetCode )
+{
+    BOARD_DESIGN_SETTINGS& bds = aBoard->GetDesignSettings();
+    NETINFO_ITEM*          net = aBoard->FindNet( aNetCode );
+    NETCLASS*              nc = net ? net->GetNetClass() : nullptr;
+
+    return { ( nc && nc->HasuViaDiameter() ) ? nc->GetuViaDiameter() : bds.GetCurrentViaSize(),
+             ( nc && nc->HasuViaDrill() ) ? nc->GetuViaDrill() : bds.GetCurrentViaDrill() };
+}
+
+
 std::vector<BOARD_ITEM*> PCB_VIA_STACK::BuildMembers( BOARD* aBoard, int aNetCode ) const
 {
     std::vector<BOARD_ITEM*> members;
@@ -248,11 +262,7 @@ std::vector<BOARD_ITEM*> PCB_VIA_STACK::BuildMembers( BOARD* aBoard, int aNetCod
 
     if( m_useNetclass )
     {
-        NETINFO_ITEM* net = aBoard->FindNet( aNetCode );
-        NETCLASS*     nc = net ? net->GetNetClass() : nullptr;
-
-        viaSize = ( nc && nc->HasuViaDiameter() ) ? nc->GetuViaDiameter() : bds.GetCurrentViaSize();
-        viaDrill = ( nc && nc->HasuViaDrill() ) ? nc->GetuViaDrill() : bds.GetCurrentViaDrill();
+        std::tie( viaSize, viaDrill ) = GetNetclassViaSize( aBoard, aNetCode );
     }
     else
     {
@@ -293,6 +303,10 @@ std::vector<BOARD_ITEM*> PCB_VIA_STACK::BuildMembers( BOARD* aBoard, int aNetCod
         via->SetDrill( viaDrill );
         via->SetPosition( hopPos( i ) );
 
+        // Net class sizes follow the via rules, which can depend on each hop's layers and position
+        if( m_useNetclass )
+            via->SetSizeFromRules( viaSize, viaDrill );
+
         // Only a hop reaching an outer layer has a face to cap.
         bool capped = m_capped && ( IsExternalCopperLayer( layers[i] ) || IsExternalCopperLayer( layers[i + 1] ) );
 
@@ -314,6 +328,8 @@ std::vector<BOARD_ITEM*> PCB_VIA_STACK::BuildMembers( BOARD* aBoard, int aNetCod
 
         int trackWidth = ( nc && nc->HasTrackWidth() ) ? nc->GetTrackWidth() : bds.GetCurrentTrackWidth();
 
+        DRC_ENGINE* drcEngine = bds.m_DRCEngine.get();
+
         for( int i = 0; i < nHops - 1; ++i )
         {
             VECTOR2I a = hopPos( i );
@@ -327,7 +343,24 @@ std::vector<BOARD_ITEM*> PCB_VIA_STACK::BuildMembers( BOARD* aBoard, int aNetCod
             trace->SetStart( a );
             trace->SetEnd( b );
             trace->SetLayer( layers[i + 1] );
-            trace->SetWidth( trackWidth );
+
+            // Width rules can depend on the layer and the net, as the router resolves them
+            DRC_CONSTRAINT width;
+
+            if( drcEngine )
+            {
+                // Rebuilds are freed on each drag step, so their pointers must not seed the geometry caches
+                trace->SetFlags( ROUTER_TRANSIENT );
+                width = drcEngine->EvalRules( TRACK_WIDTH_CONSTRAINT, trace, nullptr, layers[i + 1] );
+                trace->ClearFlags( ROUTER_TRANSIENT );
+            }
+
+            int layerWidth = trackWidth;
+
+            if( !width.IsNull() && width.GetSeverity() != RPT_SEVERITY_IGNORE )
+                layerWidth = width.GetValue().PinnedOpt();
+
+            trace->SetWidth( std::max( bds.m_TrackMinWidth, layerWidth ) );
 
             members.push_back( trace );
         }
@@ -446,8 +479,10 @@ void PCB_VIA_STACK::Regenerate( BOARD* aBoard, BOARD_COMMIT* aCommit )
         if( aCommit )
         {
             aCommit->Unmodify( item, nullptr );
-            aCommit->Remove( item );
-            RemoveItem( item );
+
+            // A member added by an earlier motion event in this commit is freed, not orphaned
+            if( !aCommit->RemoveOrDiscard( item ) )
+                RemoveItem( item );
         }
         else
         {
@@ -886,6 +921,7 @@ void PCB_VIA_STACK::ShowPropertiesDialog( PCB_BASE_EDIT_FRAME* aEditFrame )
     // Dialog edits a scratch copy so the undo snapshot below sees the pre-edit settings.
     PCB_VIA_STACK temp( GetBoard(), GetLayer() );
     temp.ApplyPreset( ToPreset() );
+    temp.SetNetCode( GetNetCode() );
 
     DIALOG_MICROVIA_STACK dlg( aEditFrame, &temp );
 
@@ -1211,170 +1247,181 @@ int DRAWING_TOOL::PlaceMicroviaStack( const TOOL_EVENT& aEvent )
 
     // DRC context, shared with the plain via tool so a stack is refused over foreign copper the
     // same way (unless "Allow DRC violations" is enabled in the router settings).
-    std::shared_ptr<DRC_ENGINE> drcEngine = board->GetDesignSettings().m_DRCEngine;
-    int                         drcEpsilon = board->GetDesignSettings().GetDRCEpsilon();
-    int                         worstClearance = ComputeWorstViaClearance( m_frame, drcEngine.get() );
-    bool                        allowDRCViolations = false;
+    DRC_ENGINE* drcEngine = board->GetDesignSettings().m_DRCEngine.get();
+    int         drcEpsilon = board->GetDesignSettings().GetDRCEpsilon();
+    int         worstClearance = ComputeWorstViaClearance( m_frame, drcEngine );
+    bool        allowDRCViolations = false;
 
     if( ROUTER_TOOL* router = m_toolMgr->GetTool<ROUTER_TOOL>() )
         allowDRCViolations = router->Router()->Settings().AllowDRCViolations();
 
-    auto updatePreview = [&]( const VECTOR2I& aCursor )
-    {
-        clearPreview();
-
-        if( staggered )
-        {
-            SHAPE_LINE_CHAIN chain;
-
-            for( const VECTOR2I& p : hops )
-                chain.Append( p, true );
-
-            chain.Append( aCursor, true );
-            settings.SetHops( chain );
-            settings.SetPosition( hops.empty() ? aCursor : hops.front() );
-
-            // Only preview the placed hops plus the one being steered, not the
-            // rest of the span extrapolated in a straight line.
-            int previewHops = std::min( (int) hops.size() + 1, nHops );
-            settings.SetEndLayer( spanLayers[previewHops] );
-        }
-        else
-        {
-            settings.SetPosition( aCursor );
-        }
-
-        previewItems = settings.BuildMembers( board, 0 );
-
-        for( BOARD_ITEM* item : previewItems )
-            preview.Add( item );
-
-        m_view->Update( &preview );
-    };
-
-    auto placeStack = [&]( const VECTOR2I& aCursor ) -> bool
-    {
-        BOARD_COMMIT    commit( m_frame );
-        PCB_VIA_STACK*  stack = static_cast<PCB_VIA_STACK*>( settings.Clone() );
-        GENERATOR_TOOL* genTool = m_toolMgr->GetTool<GENERATOR_TOOL>();
-
-        // Clone keeps the source uuid, each placed stack needs its own.
-        stack->SetUuidDirect( KIID() );
-        stack->SetParent( board );
-
-        // The preview may have truncated the span, place the full one.
-        stack->SetEndLayer( spanLayers.back() );
-
-        if( staggered )
-        {
-            SHAPE_LINE_CHAIN chain;
-
-            for( const VECTOR2I& p : hops )
-                chain.Append( p, true );
-
-            stack->SetHops( chain );
-            stack->SetPosition( hops.front() );
-        }
-        else
-        {
-            stack->ClearHops();
-            stack->SetPosition( aCursor );
-        }
-
-        // Inherit the net of whatever the first hop lands on.
-        stack->SetNetCode( PCB_VIA_STACK::FindNetAtPosition( board, stack->GetPosition(), spanSet ) );
-        stack->SetFlags( IS_NEW );
-
-        // Refuse placement over foreign copper, matching the plain via tool. Build the
-        // stack's vias off-board and check each before anything is committed.
-        std::vector<BOARD_ITEM*> candidates = stack->BuildMembers( board, stack->GetNetCode() );
-        bool                     violates = false;
-
-        for( BOARD_ITEM* item : candidates )
-        {
-            if( BOARD_CONNECTED_ITEM* copper = dynamic_cast<BOARD_CONNECTED_ITEM*>( item ) )
+    auto updatePreview =
+            [&]( const VECTOR2I& aCursor )
             {
-                if( CheckItemDRCViolation( copper, m_frame, drcEngine.get(), worstClearance, drcEpsilon ) )
+                clearPreview();
+
+                if( staggered )
                 {
-                    violates = true;
-                    break;
+                    SHAPE_LINE_CHAIN chain;
+
+                    for( const VECTOR2I& p : hops )
+                        chain.Append( p, true );
+
+                    chain.Append( aCursor, true );
+                    settings.SetHops( chain );
+                    settings.SetPosition( hops.empty() ? aCursor : hops.front() );
+
+                    // Only preview the placed hops plus the one being steered, not the
+                    // rest of the span extrapolated in a straight line.
+                    int previewHops = std::min( (int) hops.size() + 1, nHops );
+                    settings.SetEndLayer( spanLayers[previewHops] );
                 }
-            }
-        }
+                else
+                {
+                    settings.SetPosition( aCursor );
+                }
 
-        for( BOARD_ITEM* item : candidates )
-            delete item;
+                previewItems = settings.BuildMembers( board, 0 );
 
-        if( violates && !allowDRCViolations )
-        {
-            m_frame->ShowInfoBarError( _( "Microvia stack location violates DRC." ), true,
-                                       WX_INFOBAR::MESSAGE_TYPE::DRC_VIOLATION );
-            delete stack;
-            return false;
-        }
+                for( BOARD_ITEM* item : previewItems )
+                    preview.Add( item );
 
-        stack->EditStart( genTool, board, &commit );
-        stack->Update( genTool, board, &commit );
-        stack->EditFinish( genTool, board, &commit );
+                m_view->Update( &preview );
+            };
 
-        stack->ClearFlags( IS_NEW );
-
-        // Only the last hop reaches the end layer, and a staggered one is not at the cursor.
-        for( BOARD_ITEM* item : stack->GetBoardItems() )
-        {
-            PCB_VIA* via = dynamic_cast<PCB_VIA*>( item );
-
-            if( via && via->IsOnLayer( stack->GetEndLayer() ) )
+    auto placeStack =
+            [&]( const VECTOR2I& aCursor ) -> bool
             {
-                lastViaPos = via->GetPosition();
-                break;
-            }
-        }
+                BOARD_COMMIT    commit( m_frame );
+                PCB_VIA_STACK*  stack = static_cast<PCB_VIA_STACK*>( settings.Clone() );
+                GENERATOR_TOOL* genTool = m_toolMgr->GetTool<GENERATOR_TOOL>();
 
-        commit.Push( _( "Place Microvia Stack" ) );
-        return true;
-    };
+                // Clone keeps the source uuid, each placed stack needs its own.
+                stack->SetUuidDirect( KIID() );
+                stack->SetParent( board );
+
+                // The preview may have truncated the span, place the full one.
+                stack->SetEndLayer( spanLayers.back() );
+
+                if( staggered )
+                {
+                    SHAPE_LINE_CHAIN chain;
+
+                    for( const VECTOR2I& p : hops )
+                        chain.Append( p, true );
+
+                    stack->SetHops( chain );
+                    stack->SetPosition( hops.front() );
+                }
+                else
+                {
+                    stack->ClearHops();
+                    stack->SetPosition( aCursor );
+                }
+
+                // Inherit the net of whatever the first hop lands on.
+                stack->SetNetCode( PCB_VIA_STACK::FindNetAtPosition( board, stack->GetPosition(), spanSet ) );
+                stack->SetFlags( IS_NEW );
+
+                // Refuse placement over foreign copper, matching the plain via tool. Build the
+                // stack's vias off-board and check each before anything is committed.
+                std::vector<BOARD_ITEM*> candidates = stack->BuildMembers( board, stack->GetNetCode() );
+                bool                     violates = false;
+
+                for( BOARD_ITEM* item : candidates )
+                {
+                    if( BOARD_CONNECTED_ITEM* copper = dynamic_cast<BOARD_CONNECTED_ITEM*>( item ) )
+                    {
+                        // Candidates are freed below, so their pointers must not seed the rule caches
+                        copper->SetFlags( ROUTER_TRANSIENT );
+
+                        if( CheckItemDRCViolation( copper, m_frame, drcEngine, worstClearance, drcEpsilon ) )
+                        {
+                            violates = true;
+                            break;
+                        }
+                    }
+                }
+
+                for( BOARD_ITEM* item : candidates )
+                    delete item;
+
+                if( violates && !allowDRCViolations )
+                {
+                    m_frame->ShowInfoBarError( _( "Microvia stack location violates DRC." ), true,
+                                               WX_INFOBAR::MESSAGE_TYPE::DRC_VIOLATION );
+                    delete stack;
+                    return false;
+                }
+
+                stack->EditStart( genTool, board, &commit );
+                stack->Update( genTool, board, &commit );
+                stack->EditFinish( genTool, board, &commit );
+
+                stack->ClearFlags( IS_NEW );
+
+                // Only the last hop reaches the end layer, and a staggered one is not at the cursor.
+                for( BOARD_ITEM* item : stack->GetBoardItems() )
+                {
+                    PCB_VIA* via = dynamic_cast<PCB_VIA*>( item );
+
+                    if( via && via->IsOnLayer( stack->GetEndLayer() ) )
+                    {
+                        lastViaPos = via->GetPosition();
+                        break;
+                    }
+                }
+
+                commit.Push( _( "Place Microvia Stack" ) );
+                return true;
+            };
 
     // Snap the anchor onto nearby copper, using the plain via tool's routines so tracks,
     // arcs and pads all behave the same. A stack may land on any layer it spans, so the
     // probe carries the whole span rather than a single layer.
-    int snapViaDia = settings.GetViaSize() > 0 ? settings.GetViaSize() : board->GetDesignSettings().GetCurrentViaSize();
+    int snapViaDia = settings.GetViaSize() > 0 ? settings.GetViaSize()
+                                               : board->GetDesignSettings().GetCurrentViaSize();
 
     PCB_VIA probe( board );
     probe.SetViaType( VIATYPE::MICROVIA );
     probe.SetWidth( PADSTACK::ALL_LAYERS, snapViaDia );
     probe.SetLayerPair( settings.GetStartLayer(), settings.GetEndLayer() );
 
-    auto snapToCopper = [&]( const VECTOR2I& aCursor, bool aItemSnap ) -> VECTOR2I
-    {
-        MAGNETIC_SETTINGS* mag = m_frame->GetMagneticItemsSettings();
-
-        // The loop clears grid snap for the ResolveSnap base, re-enable it here so
-        // AlignToSegment actually aligns, matching VIA_PLACER::SnapItem.
-        grid.SetSnap( aItemSnap );
-
-        if( aItemSnap && mag )
-        {
-            if( mag->tracks != MAGNETIC_OPTIONS::NO_EFFECT )
+    auto snapToCopper =
+            [&]( const VECTOR2I& aCursor, bool aItemSnap ) -> VECTOR2I
             {
-                if( PCB_TRACK* track = FindSnapTrack( m_frame, &probe, aCursor, spanSet, ViaSnapRange( m_frame ) ) )
-                    return grid.AlignToSegment( aCursor, SEG( track->GetStart(), track->GetEnd() ) );
-            }
+                MAGNETIC_SETTINGS* mag = m_frame->GetMagneticItemsSettings();
 
-            if( mag->pads != MAGNETIC_OPTIONS::NO_EFFECT )
+                // The loop clears grid snap for the ResolveSnap base, re-enable it here so
+                // AlignToSegment actually aligns, matching VIA_PLACER::SnapItem.
+                grid.SetSnap( aItemSnap );
+
+                if( aItemSnap && mag )
+                {
+                    if( mag->tracks != MAGNETIC_OPTIONS::NO_EFFECT )
+                    {
+                        if( PCB_TRACK* track = FindSnapTrack( m_frame, &probe, aCursor, spanSet,
+                                                              ViaSnapRange( m_frame ) ) )
+                        {
+                            return grid.AlignToSegment( aCursor, SEG( track->GetStart(), track->GetEnd() ) );
+                        }
+                    }
+
+                    if( mag->pads != MAGNETIC_OPTIONS::NO_EFFECT )
+                    {
+                        if( PAD* pad = FindSnapPad( m_frame, &probe, aCursor, spanSet, ViaSnapRange( m_frame ) ) )
+                            return pad->GetPosition();
+                    }
+                }
+
+                return grid.ResolveSnap( aCursor, nullptr ).position;
+            };
+
+    auto setCursor =
+            [&]()
             {
-                if( PAD* pad = FindSnapPad( m_frame, &probe, aCursor, spanSet, ViaSnapRange( m_frame ) ) )
-                    return pad->GetPosition();
-            }
-        }
-
-        return grid.ResolveSnap( aCursor, nullptr ).position;
-    };
-
-    auto setCursor = [&]()
-    {
-        m_frame->GetCanvas()->SetCurrentCursor( KICURSOR::BULLSEYE );
-    };
+                m_frame->GetCanvas()->SetCurrentCursor( KICURSOR::BULLSEYE );
+            };
 
     m_controls->ShowCursor( true );
     m_controls->SetAutoPan( true );

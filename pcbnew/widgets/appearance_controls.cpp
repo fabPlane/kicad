@@ -35,6 +35,7 @@
 #include <pcb_painter.h>
 #include <pcbnew_settings.h>
 #include <footprint_editor_settings.h>
+#include <gal/graphics_abstraction_layer.h>
 #include <project.h>
 #include <project/project_local_settings.h>
 #include <settings/color_settings.h>
@@ -348,6 +349,7 @@ const APPEARANCE_CONTROLS::APPEARANCE_SETTING APPEARANCE_CONTROLS::s_objectSetti
     RR( _HKI( "Zones" ),                LAYER_ZONES,              _HKI( "Show copper zones" ),        true ),
     RR( _HKI( "Filled Shapes" ),        LAYER_FILLED_SHAPES,      _HKI( "Opacity of filled shapes" ), true,             false ),
     RR( _HKI( "Images" ),               LAYER_DRAW_BITMAPS,       _HKI( "Show user images" ),         true ),
+    RR( _HKI( "Outside Group" ),        LAYER_OUTSIDE_GROUP_OPACITY, _HKI( "Opacity of items outside the entered group" ), true, false ),
     RR(),
     RR( _HKI( "Footprints Front" ),     LAYER_FOOTPRINTS_FR,      _HKI( "Show footprints that are on board's front" ) ),
     RR( _HKI( "Footprints Back" ),      LAYER_FOOTPRINTS_BK,      _HKI( "Show footprints that are on board's back" ) ),
@@ -385,6 +387,7 @@ static std::set<int> s_allowedInFpEditor =
             LAYER_FP_REFERENCES,
             LAYER_FP_TEXT,
             LAYER_DRAW_BITMAPS,
+            LAYER_OUTSIDE_GROUP_OPACITY,
             LAYER_GRID,
             LAYER_POINTS,
             LAYER_VIA_STITCHING,
@@ -1366,17 +1369,35 @@ void APPEARANCE_CONTROLS::setVisibleLayers( const LSET& aLayers )
     }
     else if( BOARD* board = m_frame->GetBoard() )
     {
+        const LSET before = board->GetVisibleLayers();
+        const LSET changed = before ^ aLayers;
+
         board->SetVisibleLayers( aLayers );
+
+        // A retained scene tracks layer visibility itself, so only items on changed layers need
+        // repainting. Holes also depend on whether any physical layer is left.
+        const bool anyPhysicalBefore = ( before & LSET::PhysicalLayersMask() ).any();
+        const bool anyPhysicalAfter = ( aLayers & LSET::PhysicalLayersMask() ).any();
+        const bool narrow = view->GetGAL() && view->GetGAL()->HasRetainedScene()
+                            && anyPhysicalBefore == anyPhysicalAfter;
 
         // Note: KIGFX::REPAINT isn't enough for things that go from invisible to visible as
         // they won't be found in the view layer's itemset for repainting.
         view->UpdateAllItemsConditionally( KIGFX::ALL,
-                []( KIGFX::VIEW_ITEM* aItem ) -> bool
+                [&]( KIGFX::VIEW_ITEM* aItem ) -> bool
                 {
                     // Items rendered to composite layers (such as LAYER_PAD_TH) must be redrawn
                     // whether they're optionally flashed or not (as the layer being hidden/shown
                     // might be the last layer the item is visible on).
-                    return dynamic_cast<PCB_VIA*>( aItem ) || dynamic_cast<PAD*>( aItem );
+                    if( !aItem->IsBOARD_ITEM() )
+                        return false;
+
+                    const BOARD_ITEM* item = static_cast<const BOARD_ITEM*>( aItem );
+
+                    if( item->Type() != PCB_VIA_T && item->Type() != PCB_PAD_T )
+                        return false;
+
+                    return !narrow || ( item->GetLayerSet() & changed ).any();
                 } );
 
         m_frame->Update3DView( true, m_frame->GetPcbNewSettings()->m_Display.m_Live3DRefresh );
@@ -2506,7 +2527,8 @@ void APPEARANCE_CONTROLS::syncObjectSettings()
               && m_objectSettingsMap.count( LAYER_PADS )
               && m_objectSettingsMap.count( LAYER_ZONES )
               && m_objectSettingsMap.count( LAYER_DRAW_BITMAPS )
-              && m_objectSettingsMap.count( LAYER_FILLED_SHAPES ) );
+              && m_objectSettingsMap.count( LAYER_FILLED_SHAPES )
+              && m_objectSettingsMap.count( LAYER_OUTSIDE_GROUP_OPACITY ) );
 
     m_objectSettingsMap[LAYER_TRACKS]->ctl_opacity->SetValue( opts.m_TrackOpacity * 100 );
     m_objectSettingsMap[LAYER_VIAS]->ctl_opacity->SetValue( opts.m_ViaOpacity * 100 );
@@ -2514,6 +2536,7 @@ void APPEARANCE_CONTROLS::syncObjectSettings()
     m_objectSettingsMap[LAYER_ZONES]->ctl_opacity->SetValue( opts.m_ZoneOpacity * 100 );
     m_objectSettingsMap[LAYER_DRAW_BITMAPS]->ctl_opacity->SetValue( opts.m_ImageOpacity * 100 );
     m_objectSettingsMap[LAYER_FILLED_SHAPES]->ctl_opacity->SetValue( opts.m_FilledShapeOpacity * 100 );
+    m_objectSettingsMap[LAYER_OUTSIDE_GROUP_OPACITY]->ctl_opacity->SetValue( opts.m_OutsideGroupOpacity * 100 );
 }
 
 
@@ -3274,6 +3297,7 @@ void APPEARANCE_CONTROLS::onObjectOpacitySlider( int aLayer, float aOpacity )
     case static_cast<int>( LAYER_ZONES ):         options.m_ZoneOpacity        = aOpacity; break;
     case static_cast<int>( LAYER_DRAW_BITMAPS ):  options.m_ImageOpacity       = aOpacity; break;
     case static_cast<int>( LAYER_FILLED_SHAPES ): options.m_FilledShapeOpacity = aOpacity; break;
+    case static_cast<int>( LAYER_OUTSIDE_GROUP_OPACITY ): options.m_OutsideGroupOpacity = aOpacity; break;
     default: return;
     }
 

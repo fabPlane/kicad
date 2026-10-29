@@ -254,7 +254,7 @@ DIALOG_SYMBOL_FIELDS_TABLE::DIALOG_SYMBOL_FIELDS_TABLE( SCH_EDIT_FRAME* aParent,
     // Get all symbols from the list of schematic sheets
     m_parent->Schematic().Hierarchy().GetSymbols( m_symbolsList, SYMBOL_FILTER_NON_POWER );
 
-    if( auto conflicts = DetectFieldCaseConflicts( m_symbolsList ); !conflicts.empty() )
+    if( std::vector<FIELD_CASE_CONFLICT> conflicts = DetectFieldCaseConflicts( m_symbolsList ); !conflicts.empty() )
     {
         DIALOG_RESOLVE_FIELD_CASE_CONFLICTS resolver( this, m_parent, std::move( conflicts ) );
 
@@ -1110,15 +1110,13 @@ void DIALOG_SYMBOL_FIELDS_TABLE::onAddVariant( wxCommandEvent& aEvent )
     for( const wxString& variant : m_parent->Schematic().GetVariantNames() )
         ctrlContents.Add( variant );
 
-    ctrlContents.Sort( SortVariantNames );
+    ctrlContents.Sort( SortVariantNames );  // SortVariantNames ensures the default is always first
     m_variantListBox->Set( ctrlContents );
 
     wxString currentVariant = m_parent->Schematic().GetCurrentVariant();
-    int      newSelection = m_variantListBox->FindString(
-                currentVariant.IsEmpty() ? GetDefaultVariantName() : currentVariant );
 
-    if( newSelection != wxNOT_FOUND )
-        m_variantListBox->SetSelection( newSelection );
+    if( !m_variantListBox->SetStringSelection( currentVariant ) )
+        m_variantListBox->SetSelection( 0 );
 
     onVariantSelectionChange( aEvent );
 }
@@ -1144,23 +1142,20 @@ void DIALOG_SYMBOL_FIELDS_TABLE::onDeleteVariant( wxCommandEvent& aEvent )
 
     VARIANT_PROXY_UNDO_ITEM* undoItem = new VARIANT_PROXY_UNDO_ITEM( &m_parent->Schematic() );
     SCH_COMMIT               commit( m_parent );
-    PICKED_ITEMS_LIST*       undoCmd = nullptr;
+    bool                     append = false;
 
     m_parent->Schematic().DeleteVariant( variantName, &commit );
 
     if( !commit.Empty() )
     {
         commit.Push();
-        undoCmd = m_parent->PopCommandFromUndoList();
-    }
-    else
-    {
-        undoCmd = new PICKED_ITEMS_LIST();
+        append = true;
     }
 
-    undoCmd->PushItem( ITEM_PICKER( m_parent->GetScreen(), undoItem, UNDO_REDO::VARIANTS ) );
-    undoCmd->SetDescription( _( "Delete Variant" ) );
-    m_parent->PushCommandToUndoList( undoCmd );
+    PICKED_ITEMS_LIST undoCmd;
+    undoCmd.PushItem( ITEM_PICKER( m_parent->GetScreen(), undoItem, UNDO_REDO::VARIANTS ) );
+    undoCmd.SetDescription( _( "Delete Variant" ) );
+    m_parent->SaveCopyInUndoList( undoCmd, UNDO_REDO::VARIANTS, append );
 
     m_parent->OnModify();
 
@@ -1247,13 +1242,10 @@ void DIALOG_SYMBOL_FIELDS_TABLE::onRenameVariant( wxCommandEvent& aEvent )
     wxArrayString ctrlContents = m_variantListBox->GetStrings();
     ctrlContents.Remove( oldVariantName );
     ctrlContents.Add( newVariantName );
-    ctrlContents.Sort( SortVariantNames );
+    ctrlContents.Sort( SortVariantNames );  // SortVariantNames ensures the default is always first
     m_variantListBox->Set( ctrlContents );
 
-    int newSelection = m_variantListBox->FindString( newVariantName );
-
-    if( newSelection != wxNOT_FOUND )
-        m_variantListBox->SetSelection( newSelection );
+    m_variantListBox->SetStringSelection( newVariantName );
 
     updateVariantButtonStates();
     m_parent->UpdateVariantSelectionCtrl( m_parent->Schematic().GetVariantNamesForUI() );
@@ -1309,13 +1301,10 @@ void DIALOG_SYMBOL_FIELDS_TABLE::onCopyVariant( wxCommandEvent& aEvent )
 
     wxArrayString ctrlContents = m_variantListBox->GetStrings();
     ctrlContents.Add( newVariantName );
-    ctrlContents.Sort( SortVariantNames );
+    ctrlContents.Sort( SortVariantNames );  // SortVariantNames ensures the default is always first
     m_variantListBox->Set( ctrlContents );
 
-    int newSelection = m_variantListBox->FindString( newVariantName );
-
-    if( newSelection != wxNOT_FOUND )
-        m_variantListBox->SetSelection( newSelection );
+    m_variantListBox->SetStringSelection( newVariantName );
 
     onVariantSelectionChange( aEvent );
     m_parent->UpdateVariantSelectionCtrl( m_parent->Schematic().GetVariantNamesForUI() );

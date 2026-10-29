@@ -18,6 +18,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <bitmaps.h>
 #include <pgm_base.h>
 #include <refdes_tracker.h>
 #include <settings/settings_manager.h>
@@ -81,7 +82,7 @@ void PANEL_EESCHEMA_ANNOTATION_OPTIONS::loadEEschemaSettings( SCHEMATIC_SETTINGS
         }
     }
 
-    m_checkReuseRefdes->SetValue( aCfg->m_refDesTracker->GetReuseRefDes() );
+    m_checkReuseRefdes->SetValue( aCfg->m_refDesTracker ? aCfg->m_refDesTracker->GetReuseRefDes() : false );
 }
 
 

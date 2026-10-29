@@ -79,17 +79,14 @@ public:
     void CrossProbe( const PCB_MARKER* aMarker );
     void DestroyCheckerDialog();
 
+    int ShowFootprintUsers( const TOOL_EVENT& aEvent );
+
     int CleanupGraphics( const TOOL_EVENT& aEvent );
     int RepairFootprint( const TOOL_EVENT& aEvent );
 
     int NextTab( const TOOL_EVENT& aEvent );
     int PrevTab( const TOOL_EVENT& aEvent );
     int CloseTab( const TOOL_EVENT& aEvent );
-
-    /**
-     * Edit the properties used for new pad creation.
-     */
-    int DefaultPadProperties( const TOOL_EVENT& aEvent );
 
 private:
     ///< Set up handlers for various events.

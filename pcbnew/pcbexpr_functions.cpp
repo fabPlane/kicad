@@ -717,13 +717,13 @@ bool searchAreas( BOARD* aBoard, const wxString& aArg, PCBEXPR_CONTEXT* aCtx,
     {
         KIID target( aArg );
 
-        // Use the board's item-by-ID cache for O(1) lookup instead of O(n) iteration.
-        // The cache includes both board zones and zones inside footprints.
-        const auto& cache = aBoard->GetItemByIdCache();
-        auto        it = cache.find( target );
+        // Resolve through the board's item index: it re-binds stale entries and includes
+        // both board zones and zones inside footprints. In the normal path, it gives
+        // an O(1) lookup for the item by its UUID.
+        BOARD_ITEM* item = aBoard->ResolveItem( target, true );
 
-        if( it != cache.end() && it->second->Type() == PCB_ZONE_T )
-            return aFunc( static_cast<ZONE*>( it->second ) );
+        if( item && item->Type() == PCB_ZONE_T )
+            return aFunc( static_cast<ZONE*>( item ) );
 
         return false;
     }
@@ -793,6 +793,10 @@ public:
     {
         m_item->SetLayerSet( m_layers );
     }
+
+    // No copying or it can lead to double-restoring of the layer set.
+    SCOPED_LAYERSET( const SCOPED_LAYERSET& ) = delete;
+    SCOPED_LAYERSET& operator=( const SCOPED_LAYERSET& ) = delete;
 
     void Add( PCB_LAYER_ID aLayer )
     {
@@ -1761,34 +1765,9 @@ static void hasExactNetclassFunc( LIBEVAL::CONTEXT* aCtx, void* self )
                     return 0.0;
 
                 BOARD_CONNECTED_ITEM* bcItem = static_cast<BOARD_CONNECTED_ITEM*>( item );
-                BOARD*                board = bcItem->GetBoard();
-                wxString              netclassName;
+                NETCLASS*             netclass = bcItem->GetEffectiveNetClass();
 
-                if( board && ( item->GetFlags() & ROUTER_TRANSIENT ) == 0 )
-                {
-                    std::shared_lock<std::shared_mutex> readLock( board->m_CachesMutex );
-
-                    auto it = board->m_ItemNetclassCache.find( item );
-
-                    if( it != board->m_ItemNetclassCache.end() )
-                        netclassName = it->second;
-                }
-
-                if( netclassName.empty() )
-                {
-                    NETCLASS* netclass = bcItem->GetEffectiveNetClass();
-
-                    if( netclass )
-                        netclassName = netclass->GetName();
-
-                    if( board && !netclassName.empty() && ( item->GetFlags() & ROUTER_TRANSIENT ) == 0 )
-                    {
-                        std::unique_lock<std::shared_mutex> writeLock( board->m_CachesMutex );
-                        board->m_ItemNetclassCache[item] = netclassName;
-                    }
-                }
-
-                return ( netclassName == arg->AsString() ) ? 1.0 : 0.0;
+                return netclass && netclass->NameEquals( arg->AsString() ) ? 1.0 : 0.0;
             } );
 }
 

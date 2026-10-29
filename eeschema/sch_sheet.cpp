@@ -67,6 +67,7 @@ public:
     size_t BaseHash() const override { return TYPE_HASH( SCH_SHEET ); }
     size_t TypeHash() const override { return TYPE_HASH( wxString ); }
 
+private:
     void setter( void* obj, wxAny& v ) override
     {
         wxString value;
@@ -74,7 +75,7 @@ public:
         if( !v.GetAs( &value ) )
             return;
 
-        SCH_SHEET* sheet = reinterpret_cast<SCH_SHEET*>( obj );
+        SCH_SHEET* sheet = static_cast<SCH_SHEET*>( obj );
         SCH_FIELD* field = sheet->GetField( m_name );
 
         wxString              variantName;
@@ -87,20 +88,14 @@ public:
         }
 
         if( !field )
-        {
-            SCH_FIELD newField( sheet, FIELD_T::USER, m_name );
-            newField.SetText( value, sheetPath, variantName );
-            sheet->AddField( newField );
-        }
-        else
-        {
-            field->SetText( value, sheetPath, variantName );
-        }
+            field = sheet->AddField( SCH_FIELD( sheet, FIELD_T::SHEET_USER, m_name ) );
+
+        field->SetText( value, sheetPath, variantName );
     }
 
     wxAny getter( const void* obj ) const override
     {
-        const SCH_SHEET* sheet = reinterpret_cast<const SCH_SHEET*>( obj );
+        const SCH_SHEET* sheet = static_cast<const SCH_SHEET*>( obj );
         const SCH_FIELD* field = sheet->GetField( m_name );
 
         if( !field )
@@ -147,11 +142,8 @@ SCH_SHEET::SCH_SHEET( EDA_ITEM* aParent, const VECTOR2I& aPos, VECTOR2I aSize ) 
     m_backgroundColor = COLOR4D::UNSPECIFIED;
     m_fieldsAutoplaced = AUTOPLACE_AUTO;
 
-    m_fields.emplace_back( this, FIELD_T::SHEET_NAME,
-                           GetDefaultFieldName( FIELD_T::SHEET_NAME, TRANSLATED ) );
-
-    m_fields.emplace_back( this, FIELD_T::SHEET_FILENAME,
-                           GetDefaultFieldName( FIELD_T::SHEET_FILENAME, TRANSLATED ) );
+    m_fields.emplace_back( this, FIELD_T::SHEET_NAME, GetDefaultFieldName( FIELD_T::SHEET_NAME, TRANSLATED ) );
+    m_fields.emplace_back( this, FIELD_T::SHEET_FILENAME, GetDefaultFieldName( FIELD_T::SHEET_FILENAME, TRANSLATED ) );
 
     AutoplaceFields( nullptr, m_fieldsAutoplaced );
 }
@@ -201,7 +193,7 @@ void SCH_SHEET::Serialize( google::protobuf::Any& aContainer ) const
     }
 
     for( const SCH_SHEET_PIN* pin : GetPins() )
-        pin->Serialize( *sheet.add_pins(), schIUScale );
+        pin->Serialize( *sheet.add_pins() );
 
     kiapi::common::PackCustomProperties( sheet.mutable_custom_properties(), *this );
     aContainer.PackFrom( sheet );
@@ -235,7 +227,7 @@ bool SCH_SHEET::Deserialize( const google::protobuf::Any& aContainer )
 
     SetBorderWidth( UnpackDistance( sheet.border_stroke().width(), schIUScale ) );
     SetBorderColor( sheet.border_stroke().has_color() ? UnpackColor( sheet.border_stroke().color() )
-                                                       : COLOR4D::UNSPECIFIED );
+                                                      : COLOR4D::UNSPECIFIED );
 
     if( sheet.fill().fill_type() == GraphicFillType::GFT_UNFILLED || !sheet.fill().has_color() )
         SetBackgroundColor( COLOR4D::UNSPECIFIED );
@@ -248,10 +240,8 @@ bool SCH_SHEET::Deserialize( const google::protobuf::Any& aContainer )
     m_pins.clear();
 
     m_fields.clear();
-    m_fields.emplace_back( this, FIELD_T::SHEET_NAME,
-                           GetDefaultFieldName( FIELD_T::SHEET_NAME, TRANSLATED ) );
-    m_fields.emplace_back( this, FIELD_T::SHEET_FILENAME,
-                           GetDefaultFieldName( FIELD_T::SHEET_FILENAME, TRANSLATED ) );
+    m_fields.emplace_back( this, FIELD_T::SHEET_NAME, GetDefaultFieldName( FIELD_T::SHEET_NAME, TRANSLATED ) );
+    m_fields.emplace_back( this, FIELD_T::SHEET_FILENAME, GetDefaultFieldName( FIELD_T::SHEET_FILENAME, TRANSLATED ) );
 
     GetField( FIELD_T::SHEET_NAME )->Deserialize( sheet.name_field(), schIUScale );
     GetField( FIELD_T::SHEET_FILENAME )->Deserialize( sheet.filename_field(), schIUScale );
@@ -264,14 +254,15 @@ bool SCH_SHEET::Deserialize( const google::protobuf::Any& aContainer )
 
     for( const auto& pinProto : sheet.pins() )
     {
-        auto pin = std::make_unique<SCH_SHEET_PIN>( this );
+        std::unique_ptr<SCH_SHEET_PIN> pin = std::make_unique<SCH_SHEET_PIN>( this );
 
-        if( !pin->Deserialize( pinProto, schIUScale ) )
+        if( !pin->Deserialize( pinProto ) )
             return false;
 
         AddPin( pin.release() );
     }
 
+    kiapi::common::UnpackCustomProperties( sheet.custom_properties(), *this );
     return true;
 }
 
@@ -698,16 +689,10 @@ SCH_FIELD* SCH_SHEET::AddField( const SCH_FIELD& aField )
 }
 
 
-void SCH_SHEET::SetFieldText( const wxString& aFieldName, const wxString& aFieldText, const SCH_SHEET_PATH* aPath,
-                              const wxString& aVariantName )
+void SCH_SHEET::SetFieldText( SCH_FIELD* aField, const wxString& aFieldName, const wxString& aFieldText,
+                              const SCH_SHEET_PATH* aPath, const wxString& aVariantName )
 {
-    wxCHECK( !aFieldName.IsEmpty(), /* void */ );
-
-    SCH_FIELD* field = GetField( aFieldName );
-
-    wxCHECK( field, /* void */ );
-
-    switch( field->GetId() )
+    switch( aField->GetId() )
     {
     case FIELD_T::SHEET_FILENAME:
     {
@@ -719,17 +704,17 @@ void SCH_SHEET::SetFieldText( const wxString& aFieldName, const wxString& aField
     }
 
     case FIELD_T::SHEET_NAME:
-        field->SetText( aFieldText );
+        aField->SetText( aFieldText );
         break;
 
     default:
     {
-        wxString defaultText = field->GetText( aPath );
+        wxString defaultText = aField->GetText( aPath );
 
         if( aVariantName.IsEmpty() )
         {
             if( aFieldText != defaultText )
-                field->SetText( aFieldText );
+                aField->SetText( aFieldText );
         }
         else
         {
@@ -773,40 +758,62 @@ void SCH_SHEET::SetFieldText( const wxString& aFieldName, const wxString& aField
 }
 
 
-wxString SCH_SHEET::GetFieldText( const wxString& aFieldName, const SCH_SHEET_PATH* aPath,
+void SCH_SHEET::SetFieldText( const wxString& aFieldName, const wxString& aFieldText, const SCH_SHEET_PATH* aPath,
+                              const wxString& aVariantName )
+{
+    wxCHECK_MSG( !aFieldName.IsEmpty(), /* void */, wxT( "Can't set text on a field with no name!" ) );
+
+    SCH_FIELD* field = GetField( aFieldName );
+
+    wxCHECK_MSG( field, /* void */, wxT( "Can't set text on a field not yet added to the sheet!" ) );
+
+    SetFieldText( field, aFieldName, aFieldText, aPath, aVariantName );
+}
+
+
+wxString SCH_SHEET::GetFieldText( const SCH_FIELD* aField, const wxString& aFieldName, const SCH_SHEET_PATH* aPath,
                                   const wxString& aVariantName ) const
 {
-    wxCHECK( !aFieldName.IsEmpty(), wxEmptyString );
-
-    const SCH_FIELD* field = GetField( aFieldName );
-
-    wxCHECK( field, wxEmptyString );
-
-    switch( field->GetId() )
+    switch( aField->GetId() )
     {
     case FIELD_T::REFERENCE:
     case FIELD_T::FOOTPRINT:
-        return field->GetText();
+        return aField->GetText();
         break;
 
     default:
         if( aVariantName.IsEmpty() )
         {
-            return field->GetText();
+            return aField->GetText();
         }
         else
         {
             const SCH_SHEET_INSTANCE* instance = getInstance( *aPath );
 
             if( instance->m_Variants.contains( aVariantName )
-              && instance->m_Variants.at( aVariantName ).m_Fields.contains( aFieldName ) )
+                && instance->m_Variants.at( aVariantName ).m_Fields.contains( aFieldName ) )
+            {
                 return instance->m_Variants.at( aVariantName ).m_Fields.at( aFieldName );
+            }
         }
 
         break;
     }
 
-    return field->GetText();
+    return aField->GetText();
+}
+
+
+wxString SCH_SHEET::GetFieldText( const wxString& aFieldName, const SCH_SHEET_PATH* aPath,
+                                  const wxString& aVariantName ) const
+{
+    wxCHECK_MSG( !aFieldName.IsEmpty(), wxEmptyString, wxT( "Can't get text from a field with no name!" ) );
+
+    const SCH_FIELD* field = GetField( aFieldName );
+
+    wxCHECK_MSG( field, wxEmptyString, wxT( "Can't get text from a field not yet added to the sheet!" ) );
+
+    return GetFieldText( field, aFieldName, aPath, aVariantName );
 }
 
 
@@ -837,6 +844,8 @@ void SCH_SHEET::RemovePin( const SCH_SHEET_PIN* aSheetPin )
                 screen->BumpConnectivityRevision();
 
             m_pins.erase( i );
+            delete aSheetPin;
+
             renumberPins();
             return;
         }
@@ -920,6 +929,10 @@ int bumpToNextGrid( const int aVal, const int aDirection )
     int base = aVal / gridSize;
     int excess = abs( aVal % gridSize );
 
+    // Use floor division for negative coordinates between grid lines.
+    if( aVal < 0 && excess > 0 )
+        --base;
+
     if( aDirection > 0 )
     {
         return ( base + 1 ) * gridSize;
@@ -940,13 +953,13 @@ int SCH_SHEET::GetMinWidth( bool aFromLeft ) const
     int pinsLeft = m_pos.x + m_size.x;
     int pinsRight = m_pos.x;
 
-    for( size_t i = 0; i < m_pins.size();  i++ )
+    for( SCH_SHEET_PIN* pin : m_pins)
     {
-        SHEET_SIDE edge = m_pins[i]->GetSide();
+        SHEET_SIDE edge = pin->GetSide();
 
         if( edge == SHEET_SIDE::TOP || edge == SHEET_SIDE::BOTTOM )
         {
-            BOX2I pinRect = m_pins[i]->GetBoundingBox();
+            BOX2I pinRect = pin->GetBoundingBox();
 
             pinsLeft = std::min( pinsLeft, pinRect.GetLeft() );
             pinsRight = std::max( pinsRight, pinRect.GetRight() );
@@ -974,13 +987,13 @@ int SCH_SHEET::GetMinHeight( bool aFromTop ) const
     int pinsTop = m_pos.y + m_size.y;
     int pinsBottom = m_pos.y;
 
-    for( size_t i = 0; i < m_pins.size();  i++ )
+    for( SCH_SHEET_PIN* pin : m_pins )
     {
-        SHEET_SIDE edge = m_pins[i]->GetSide();
+        SHEET_SIDE edge = pin->GetSide();
 
         if( edge == SHEET_SIDE::RIGHT || edge == SHEET_SIDE::LEFT )
         {
-            BOX2I pinRect = m_pins[i]->GetBoundingBox();
+            BOX2I pinRect = pin->GetBoundingBox();
 
             pinsTop = std::min( pinsTop, pinRect.GetTop() );
             pinsBottom = std::max( pinsBottom, pinRect.GetBottom() );
@@ -1028,6 +1041,8 @@ void SCH_SHEET::CleanupSheet()
 
         if( HLabel )
             m_pins.push_back( pin );
+        else
+            delete pin;
     }
 }
 
@@ -1059,9 +1074,9 @@ int SCH_SHEET::GetPenWidth() const
 void SCH_SHEET::AutoplaceFields( SCH_SCREEN* aScreen, AUTOPLACE_ALGO aAlgo )
 {
     SCH_FIELD* sheetNameField = GetField( FIELD_T::SHEET_NAME );
-    VECTOR2I  textSize = sheetNameField->GetTextSize();
-    int       borderMargin = KiROUND( GetPenWidth() / 2.0 ) + 4;
-    int       margin = borderMargin + KiROUND( std::max( textSize.x, textSize.y ) * 0.5 );
+    VECTOR2I   textSize = sheetNameField->GetTextSize();
+    int        borderMargin = KiROUND( GetPenWidth() / 2.0 ) + 4;
+    int        margin = borderMargin + KiROUND( std::max( textSize.x, textSize.y ) * 0.5 );
 
     if( IsVerticalOrientation() )
     {
@@ -1137,7 +1152,11 @@ const BOX2I SCH_SHEET::GetBoundingBox() const
     BOX2I bbox = GetBodyBoundingBox();
 
     for( const SCH_FIELD& field : m_fields )
-        bbox.Merge( field.GetBoundingBox() );
+        if( field.IsVisible() )
+            bbox.Merge( field.GetBoundingBox() );
+
+    for( const SCH_SHEET_PIN* pin : m_pins )
+        bbox.Merge( pin->GetBoundingBox() );
 
     return bbox;
 }
@@ -1540,8 +1559,7 @@ bool SCH_SHEET::UpdateDanglingState( std::vector<DANGLING_END_ITEM>& aItemListBy
 }
 
 
-bool SCH_SHEET::HasConnectivityChanges( const SCH_ITEM* aItem,
-                                        const SCH_SHEET_PATH* aInstance ) const
+bool SCH_SHEET::HasConnectivityChanges( const SCH_ITEM* aItem, const SCH_SHEET_PATH* aInstance ) const
 {
     // Do not compare to ourself.
     if( aItem == this )
@@ -1585,8 +1603,7 @@ std::vector<VECTOR2I> SCH_SHEET::GetConnectionPoints() const
 }
 
 
-INSPECT_RESULT SCH_SHEET::Visit( INSPECTOR aInspector, void* testData,
-                                 const std::vector<KICAD_T>& aScanTypes )
+INSPECT_RESULT SCH_SHEET::Visit( INSPECTOR aInspector, void* testData, const std::vector<KICAD_T>& aScanTypes )
 {
     for( KICAD_T scanType : aScanTypes )
     {
@@ -1731,8 +1748,7 @@ void SCH_SHEET::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS& 
     // Make the sheet object a clickable hyperlink (e.g. for PDF plotter)
     if( aPlotOpts.m_PDFHierarchicalLinks )
     {
-        aPlotter->HyperlinkBox( GetBoundingBox(),
-                                EDA_TEXT::GotoPageHref( findSelf().GetPageNumber() ) );
+        aPlotter->HyperlinkBox( GetBoundingBox(), EDA_TEXT::GotoPageHref( findSelf().GetPageNumber() ) );
     }
     else if( aPlotOpts.m_PDFPropertyPopups )
     {
@@ -1784,8 +1800,7 @@ void SCH_SHEET::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS& 
 SCH_SHEET& SCH_SHEET::operator=( const SCH_ITEM& aItem )
 {
     wxCHECK_MSG( Type() == aItem.Type(), *this,
-                 wxT( "Cannot assign object type " ) + aItem.GetClass() + wxT( " to type " ) +
-                 GetClass() );
+                 wxT( "Cannot assign object type " ) + aItem.GetClass() + wxT( " to type " ) + GetClass() );
 
     if( &aItem != this )
     {
@@ -1797,11 +1812,22 @@ SCH_SHEET& SCH_SHEET::operator=( const SCH_ITEM& aItem )
         m_size = sheet->m_size;
         m_fields = sheet->m_fields;
 
+        // Reparent fields after assignment to new sheet.
+        for( SCH_FIELD& field : m_fields )
+            field.SetParent( this );
+
+        for( SCH_SHEET_PIN* pin : m_pins )
+            delete pin;
+
+        m_pins.clear();
+
         for( SCH_SHEET_PIN* pin : sheet->m_pins )
         {
             m_pins.emplace_back( new SCH_SHEET_PIN( *pin ) );
             m_pins.back()->SetParent( this );
         }
+
+        m_instances.clear();
 
         for( const SCH_SHEET_INSTANCE& instance : sheet->m_instances )
             m_instances.emplace_back( instance );
@@ -1832,7 +1858,7 @@ void SCH_SHEET::RemoveInstance( const KIID_PATH& aInstancePath )
 {
     // Search for an existing path and remove it if found (should not occur)
     // (search from back to avoid invalidating iterator on remove)
-    for( int ii = m_instances.size() - 1; ii >= 0; --ii )
+    for( int ii = (int) m_instances.size() - 1; ii >= 0; --ii )
     {
         if( m_instances[ii].m_Path == aInstancePath )
         {
@@ -1870,9 +1896,8 @@ bool SCH_SHEET::addInstance( const KIID_PATH& aPath )
             return false;
     }
 
-    wxLogTrace( traceSchSheetPaths, wxT( "Adding instance `%s` to sheet `%s`." ),
-                aPath.AsString(),
-                ( GetName().IsEmpty() ) ? wxString( wxT( "root" ) ) : GetName() );
+    wxLogTrace( traceSchSheetPaths, wxT( "Adding instance `%s` to sheet `%s`." ), aPath.AsString(),
+                GetName().IsEmpty() ? wxString( wxT( "root" ) ) : GetName() );
 
     SCH_SHEET_INSTANCE instance;
 
@@ -1884,8 +1909,7 @@ bool SCH_SHEET::addInstance( const KIID_PATH& aPath )
 }
 
 
-bool SCH_SHEET::getInstance( SCH_SHEET_INSTANCE& aInstance, const KIID_PATH& aSheetPath,
-                             bool aTestFromEnd ) const
+bool SCH_SHEET::getInstance( SCH_SHEET_INSTANCE& aInstance, const KIID_PATH& aSheetPath, bool aTestFromEnd ) const
 {
     for( const SCH_SHEET_INSTANCE& instance : m_instances )
     {
@@ -1992,8 +2016,10 @@ void SCH_SHEET::setPageNumber( const KIID_PATH& aPath, const wxString& aPageNumb
 
 bool SCH_SHEET::HasHierarchyChanges( const SCH_SHEET& aOther ) const
 {
-    return GetName() != aOther.GetName() || GetFileName() != aOther.GetFileName()
-           || GetScreen() != aOther.GetScreen() || HasPageNumberChanges( aOther );
+    return GetName() != aOther.GetName()
+            || GetFileName() != aOther.GetFileName()
+            || GetScreen() != aOther.GetScreen()
+            || HasPageNumberChanges( aOther );
 }
 
 
@@ -2042,8 +2068,8 @@ bool SCH_SHEET::HasPageNumberChanges( const SCH_SHEET& aOther ) const
 
     while( itThis != instances.end() )
     {
-        if( ( itThis->m_Path == itOther->m_Path )
-          && ( itThis->m_PageNumber != itOther->m_PageNumber ) )
+        if( itThis->m_Path == itOther->m_Path
+            && itThis->m_PageNumber != itOther->m_PageNumber )
         {
             return true;
         }
@@ -2131,7 +2157,16 @@ bool SCH_SHEET::operator==( const SCH_ITEM& aOther ) const
 
     for( size_t i = 0; i < GetFields().size(); ++i )
     {
-        if( !( GetFields()[i] == other->GetFields()[i] ) )
+        if( GetFields()[i] != other->GetFields()[i] )
+            return false;
+    }
+
+    if( GetPins().size() != other->GetPins().size() )
+        return false;
+
+    for( size_t ii = 0; ii < GetPins().size(); ++ii )
+    {
+        if( !GetPins()[ii]->operator==( other->GetPins()[ii] ) )
             return false;
     }
 
@@ -2193,8 +2228,7 @@ void SCH_SHEET::ClearVariantField( const KIID_PATH& aPath, const wxString& aVari
 }
 
 
-void SCH_SHEET::RenameVariant( const KIID_PATH& aPath, const wxString& aOldName,
-                               const wxString& aNewName )
+void SCH_SHEET::RenameVariant( const KIID_PATH& aPath, const wxString& aOldName, const wxString& aNewName )
 {
     SCH_SHEET_INSTANCE* instance = getInstance( aPath );
 
@@ -2212,8 +2246,7 @@ void SCH_SHEET::RenameVariant( const KIID_PATH& aPath, const wxString& aOldName,
 }
 
 
-void SCH_SHEET::CopyVariant( const KIID_PATH& aPath, const wxString& aSourceVariant,
-                             const wxString& aNewVariant )
+void SCH_SHEET::CopyVariant( const KIID_PATH& aPath, const wxString& aSourceVariant, const wxString& aNewVariant )
 {
     SCH_SHEET_INSTANCE* instance = getInstance( aPath );
 
@@ -2441,7 +2474,7 @@ static struct SCH_SHEET_DESC
                     groupAttributes );
         propMgr.AddProperty( new PROPERTY<SCH_SHEET, bool>( _HKI( "Exclude From Bill of Materials" ),
                     &SCH_SHEET::SetExcludedFromBOMProp, &SCH_SHEET::GetExcludedFromBOMProp ),
-                groupAttributes );
+                    groupAttributes );
         propMgr.AddProperty( new PROPERTY<SCH_SHEET, bool>( _HKI( "Do not Populate" ),
                     &SCH_SHEET::SetDNPProp, &SCH_SHEET::GetDNPProp ),
                     groupAttributes );

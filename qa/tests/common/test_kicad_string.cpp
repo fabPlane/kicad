@@ -224,4 +224,53 @@ BOOST_AUTO_TEST_CASE( VariantNameSort )
 }
 
 
+/**
+ * Test #FormatTrimmedDecimal().
+ */
+BOOST_AUTO_TEST_CASE( FormatTrimmedDecimalKeepsIntegerDigits )
+{
+    // Precision 0 has no decimal point and must not lose integer zeros
+    BOOST_CHECK_EQUAL( FormatTrimmedDecimal( 100.0, 0 ), wxString( "100" ) );
+    BOOST_CHECK_EQUAL( FormatTrimmedDecimal( 1000.0, 0 ), wxString( "1000" ) );
+
+    // Byte-identical with the old exporters for precision >= 1
+    BOOST_CHECK_EQUAL( FormatTrimmedDecimal( 1.5, 6 ), wxString( "1.50" ) );
+    BOOST_CHECK_EQUAL( FormatTrimmedDecimal( 1.0, 6 ), wxString( "1.0" ) );
+    BOOST_CHECK_EQUAL( FormatTrimmedDecimal( 100.0, 4 ), wxString( "100.0" ) );
+    BOOST_CHECK_EQUAL( FormatTrimmedDecimal( 0.123456, 6 ), wxString( "0.123456" ) );
+    BOOST_CHECK_EQUAL( FormatTrimmedDecimal( -0.0001, 3 ), wxString( "0.0" ) );
+    BOOST_CHECK_EQUAL( FormatTrimmedDecimal( -0.3, 0 ), wxString( "0" ) );
+}
+
+
+// Verbatim old ODB and IPC-2581 trim loop, compared only at precision >= 1 away from negative zero
+static wxString oldTrimLoop( double aVal, int aPrecision )
+{
+    wxString str = wxString::FromCDouble( aVal, aPrecision );
+
+    while( str.EndsWith( wxT( "00" ) ) )
+        str.RemoveLast();
+
+    return str;
+}
+
+
+BOOST_AUTO_TEST_CASE( FormatTrimmedDecimalMatchesOldTrimLoop )
+{
+    for( int ii = -300; ii <= 300; ++ii )
+    {
+        double value = ii * 0.137;
+
+        for( int precision = 1; precision <= 8; ++precision )
+            BOOST_CHECK_EQUAL( FormatTrimmedDecimal( value, precision ), oldTrimLoop( value, precision ) );
+    }
+
+    // oldTrimLoop() reproduces the precision-0 bug this formatter fixes, so precision 0 is
+    // checked against literal values here rather than against oldTrimLoop()
+    BOOST_CHECK_EQUAL( FormatTrimmedDecimal( 100.0, 0 ), wxString( "100" ) );
+    BOOST_CHECK_EQUAL( FormatTrimmedDecimal( 1000.0, 0 ), wxString( "1000" ) );
+    BOOST_CHECK_EQUAL( FormatTrimmedDecimal( 2500.0, 0 ), wxString( "2500" ) );
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()

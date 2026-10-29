@@ -372,6 +372,7 @@ void SCH_TEXTBOX::swapData( SCH_ITEM* aItem )
 
     SCH_TEXTBOX* item = static_cast<SCH_TEXTBOX*>( aItem );
 
+    std::swap( m_excludedFromSim, item->m_excludedFromSim );
     std::swap( m_marginLeft, item->m_marginLeft );
     std::swap( m_marginTop, item->m_marginTop );
     std::swap( m_marginRight, item->m_marginRight );
@@ -411,7 +412,7 @@ bool SCH_TEXTBOX::operator<( const SCH_ITEM& aItem ) const
         return GetMarginBottom() < other->GetMarginBottom();
 
     if( GetExcludedFromSim() != other->GetExcludedFromSim() )
-        return GetExcludedFromSim() - other->GetExcludedFromSim();
+        return GetExcludedFromSim();
 
     return GetText() < other->GetText();
 }

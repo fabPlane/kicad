@@ -23,6 +23,7 @@
 #include <geometry/seg.h>
 #include <math/util.h>      // for rescale
 #include <math/vector2d.h>  // for VECTOR2I, VECTOR2
+#include <math/wide_int.h>
 #include <trigo.h>          // for RAD2DEG
 
 template <typename T>
@@ -30,48 +31,6 @@ int sgn( T aVal )
 {
     return ( T( 0 ) < aVal ) - ( aVal < T( 0 ) );
 }
-
-template <typename T>
-constexpr T sqrt_helper(T x, T lo, T hi)
-{
-  if (lo == hi)
-    return lo;
-
-  const T mid = (lo + hi + 1) / 2;
-  if (x / mid < mid)
-    return sqrt_helper<T>(x, lo, mid - 1);
-  else
-    return sqrt_helper(x, mid, hi);
-}
-
-template <typename T>
-constexpr T ct_sqrt(T x)
-{
-  return sqrt_helper<T>(x, 0, x / 2 + 1);
-}
-
-template <typename T>
-static constexpr T sqrt_max_typed = ct_sqrt( std::numeric_limits<T>::max() );
-
-template <typename T>
-T isqrt(T x)
-{
-  T sqrt_max = sqrt_max_typed<T>;
-
-  if( x < 0 )
-    return sqrt_max;
-
-  T r = (T) std::sqrt( (double) x );
-
-  while( r < sqrt_max && r * r < x )
-    r++;
-
-  while( r > sqrt_max || r * r > x )
-    r--;
-
-  return r;
-}
-
 
 SEG::ecoord SEG::SquaredDistance( const SEG& aSeg ) const
 {
@@ -737,13 +696,11 @@ SEG::ecoord SEG::SquaredDistance( const VECTOR2I& aP ) const
         return bp.Dot( bp );
     }
 
-    const double g = ap.SquaredEuclideanNorm() - ( double( e ) * e ) / f;
+    // Lagrange identity keeps the small result free of cancellation
+    const double cross = ToDouble( CrossWide( ab, ap ) );
+    const double g = cross * cross / double( f );
 
-    // The only way g can be negative is if there was a rounding error since
-    // e is the projection of aP onto ab and therefore cannot be greater than
-    // the length of ap and f is guaranteed to be greater than e, meaning
-    // e * e / f cannot be greater than ap.SquaredEuclideanNorm()
-    if( g < 0 || g > static_cast<double>( std::numeric_limits<ecoord>::max() ) )
+    if( !( g >= 0 ) || g > static_cast<double>( std::numeric_limits<ecoord>::max() ) )
         return 0;
 
     return KiROUND<double, ecoord>( g );

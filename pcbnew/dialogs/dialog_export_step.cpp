@@ -28,6 +28,7 @@
 #include <wx/filedlg.h>
 #include <kiplatform/ui.h>
 
+#include <bitmaps.h>
 #include <pgm_base.h>
 #include <settings/common_settings.h>
 #include <board.h>
@@ -51,6 +52,7 @@
 #include <core/map_helpers.h>
 #include <settings/settings_manager.h>
 #include <jobs/job_export_pcb_3d.h>
+#include <paths.h>
 
 #include <wx/filefn.h>
 
@@ -370,8 +372,8 @@ void DIALOG_EXPORT_STEP::onBrowseClicked( wxCommandEvent& aEvent )
     // clang-format on
 
     // Build the absolute path of current output directory to preselect it in the file browser.
-    wxString   path = ExpandEnvVarSubstitutions( m_outputFileName->GetValue(), &Prj() );
-    wxFileName fn( Prj().AbsolutePath( path ) );
+    wxString   path;
+    wxFileName fn( ResolveProjectPath( m_outputFileName->GetValue(), &Prj() ) );
 
     wxFileDialog dlg( this, _( "3D Model Output File" ), fn.GetPath(), fn.GetFullName(), filter, wxFD_SAVE );
 
@@ -542,9 +544,7 @@ void DIALOG_EXPORT_STEP::onExportButton( wxCommandEvent& aEvent )
                     return m_editFrame->GetBoard()->ResolveTextVar( token, 0 );
                 };
 
-        path = ExpandTextVars( path, &textResolver, INTERNAL );
-        path = ExpandEnvVarSubstitutions( path, &Prj() );
-        path = Prj().AbsolutePath( path );
+        path = ResolveProjectPath( path, &Prj(), &textResolver );
 
         if( path.IsEmpty() )
         {
@@ -595,7 +595,7 @@ void DIALOG_EXPORT_STEP::onExportButton( wxCommandEvent& aEvent )
             appK2S.AppendDir( wxT( "MacOS" ) );
         }
     #else
-        if( wxGetEnv( wxT( "KICAD_RUN_FROM_BUILD_DIR" ), nullptr ) )
+        if( PATHS::RunningFromBuildDir() )
         {
             appK2S.RemoveLastDir();
             appK2S.AppendDir( "kicad" );

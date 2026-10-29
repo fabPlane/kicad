@@ -53,6 +53,7 @@
 #include <dialogs/dialog_cleanup_graphics.h>
 #include <dialogs/dialog_footprint_checker.h>
 #include <dialogs/dialog_footprint_properties_fp_editor.h>
+#include <dialogs/dialog_footprint_users.h>
 #include <dialogs/dialog_lib_footprint_fields_table.h>
 #include <footprint_wizard_frame.h>
 #include <kiway.h>
@@ -236,7 +237,14 @@ int FOOTPRINT_EDITOR_CONTROL::NewFootprint( const TOOL_EVENT& aEvent )
     // Give the new footprint a resolvable identity so it opens in its own tab instead of
     // overwriting the active one.
     if( !libraryName.IsEmpty() )
+    {
         newFootprint->SetFPID( LIB_ID( libraryName, newFootprint->GetFPID().GetLibItemName() ) );
+    }
+    else
+    {
+        newFootprint->SetParent( nullptr );
+        m_frame->CreateUnsavedFootprintTab();
+    }
 
     canvas()->GetViewControls()->SetCrossHairCursorPosition( VECTOR2D( 0, 0 ), false );
     m_frame->AddFootprintToBoard( newFootprint );
@@ -249,6 +257,7 @@ int FOOTPRINT_EDITOR_CONTROL::NewFootprint( const TOOL_EVENT& aEvent )
 
     m_frame->Zoom_Automatique( false );
     m_frame->GetScreen()->SetContentModified();
+    m_frame->OnModify();
 
     tryToSaveFootprintInLibrary( *newFootprint, selected );
 
@@ -538,9 +547,10 @@ int FOOTPRINT_EDITOR_CONTROL::RenameFootprint( const TOOL_EVENT& aEvent )
                 if( footprint->GetValue() == oldName )
                     footprint->SetValue( newName );
 
-                m_frame->SaveFootprintInLibrary( footprint, libraryName );
-
+                // Both names are one file on a case-insensitive filesystem.
                 adapter->DeleteFootprint( libraryName, oldName );
+
+                m_frame->SaveFootprintInLibrary( footprint, libraryName );
             }
             catch( const IO_ERROR& ioe )
             {
@@ -1011,13 +1021,6 @@ void FOOTPRINT_EDITOR_CONTROL::editFootprintPropertiesFromLibrary( const LIB_ID&
 }
 
 
-int FOOTPRINT_EDITOR_CONTROL::DefaultPadProperties( const TOOL_EVENT& aEvent )
-{
-    getEditFrame<FOOTPRINT_EDIT_FRAME>()->ShowPadPropertiesDialog( nullptr );
-    return 0;
-}
-
-
 int FOOTPRINT_EDITOR_CONTROL::CleanupGraphics( const TOOL_EVENT& aEvent )
 {
     FOOTPRINT_EDIT_FRAME* editFrame = getEditFrame<FOOTPRINT_EDIT_FRAME>();
@@ -1040,6 +1043,20 @@ int FOOTPRINT_EDITOR_CONTROL::CheckFootprint( const TOOL_EVENT& aEvent )
         m_checkerDialog->Show( true );
     }
 
+    return 0;
+}
+
+
+int FOOTPRINT_EDITOR_CONTROL::ShowFootprintUsers( const TOOL_EVENT& aEvent )
+{
+    const FOOTPRINT* footprint = m_frame->GetBoard()->GetFirstFootprint();
+
+    if( !footprint )
+        return 0;
+
+    DIALOG_FOOTPRINT_USERS dlg( m_frame, m_frame->Kiway(), m_frame->GetLoadedFPID(), footprint->GetPinCount() );
+
+    dlg.ShowModal();
     return 0;
 }
 
@@ -1234,6 +1251,7 @@ void FOOTPRINT_EDITOR_CONTROL::setTransitions()
     Go( &FOOTPRINT_EDITOR_CONTROL::CleanupGraphics,      PCB_ACTIONS::cleanupGraphics.MakeEvent() );
 
     Go( &FOOTPRINT_EDITOR_CONTROL::CheckFootprint,       PCB_ACTIONS::checkFootprint.MakeEvent() );
+    Go( &FOOTPRINT_EDITOR_CONTROL::ShowFootprintUsers,   PCB_ACTIONS::showFootprintUsers.MakeEvent() );
     Go( &FOOTPRINT_EDITOR_CONTROL::RepairFootprint,      PCB_ACTIONS::repairFootprint.MakeEvent() );
 
     Go( &FOOTPRINT_EDITOR_CONTROL::NextTab,              PCB_ACTIONS::nextFootprintTab.MakeEvent() );
@@ -1241,7 +1259,6 @@ void FOOTPRINT_EDITOR_CONTROL::setTransitions()
     Go( &FOOTPRINT_EDITOR_CONTROL::CloseTab,             PCB_ACTIONS::closeFootprintTab.MakeEvent() );
 
     Go( &FOOTPRINT_EDITOR_CONTROL::Properties,           PCB_ACTIONS::footprintProperties.MakeEvent() );
-    Go( &FOOTPRINT_EDITOR_CONTROL::DefaultPadProperties, PCB_ACTIONS::defaultPadProperties.MakeEvent() );
     Go( &FOOTPRINT_EDITOR_CONTROL::ToggleLayersManager,  PCB_ACTIONS::showLayersManager.MakeEvent() );
     Go( &FOOTPRINT_EDITOR_CONTROL::ToggleProperties,     ACTIONS::showProperties.MakeEvent() );
     // clang-format on

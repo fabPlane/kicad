@@ -89,7 +89,32 @@ public:
      */
     static bool prepareFootprintTabHandoff( FOOTPRINT* aFootprint, bool aHasTabs );
 
-    ///< @copydoc PCB_BASE_FRAME::GetModel()
+    /**
+     * The infobar notice that applies to the footprint being edited.
+     */
+    enum class EDIT_NOTICE
+    {
+        NONE,           ///< Nothing to report, so any existing notice is dismissed
+        FROM_BOARD,     ///< Editing a footprint pulled off a board, so saving updates the board only
+        READ_ONLY_LIB   ///< Editing a footprint whose library cannot be written
+    };
+
+    /**
+     * Decide which infobar notice applies to @p aFootprint.
+     *
+     * @p aFootprint is null while the editor holds an empty board, which is the state between
+     * Clear_Pcb() and the next load.
+     *
+     * Exposed for unit testing of the notice selection.
+     *
+     * @param aFootprint is the footprint to edit the notice for.
+     * @param aIsFromBoard is true when the footprint is an instance pulled off a board.
+     * @param aIsLibWritable answers whether a named library can be written to.
+     */
+    static EDIT_NOTICE editNoticeFor( const FOOTPRINT* aFootprint, bool aIsFromBoard,
+                                      const std::function<bool( const wxString& )>& aIsLibWritable );
+
+    /// @copydoc PCB_BASE_FRAME::GetModel()
     BOARD_ITEM_CONTAINER* GetModel() const override;
     SELECTION&            GetCurrentSelection() override;
 
@@ -151,7 +176,7 @@ public:
      */
     void UpdateUserInterface();
 
-    ///< @copydoc EDADRAW_FRAME::UpdateMsgPanel
+    /// @copydoc EDA_DRAW_FRAME::UpdateMsgPanel
     void UpdateMsgPanel() override;
 
     /**
@@ -161,13 +186,20 @@ public:
 
     /**
      * Re create the layer Box by clearing the old list, and building a new one from the new
-     * layers names and layer colors..
+     * layers names and layer colors.
      *
      * @param aForceResizeToolbar true to resize the parent toolbar or false if not needed
      *                            (mainly in parent toolbar creation or when the layers names
      *                            are not modified).
      */
     void ReCreateLayerBox( bool aForceResizeToolbar = true );
+
+    void configureToolbars() override;
+
+    PLUGIN_ACTION_SCOPE PluginActionScope() const override
+    {
+        return PLUGIN_ACTION_SCOPE::FOOTPRINT;
+    }
 
     // The Tool Framework initialization, for GAL mode
     void setupTools();
@@ -183,13 +215,13 @@ public:
     /**
      * Save a library to a new name and/or library type.
      *
-     * @see #PCB_IO::FootprintSave and #IO_BASE::LibraryCreate
+     * @see #PCB_IO::FootprintSave and #IO_BASE::CreateLibrary
      *
      * @note Saving as a new library type requires the plug-in to support saving libraries
      */
     bool SaveLibraryAs( const wxString& aLibraryPath );
 
-    ///< @copydoc PCB_BASE_EDIT_FRAME::OnEditItemRequest()
+    /// @copydoc PCB_BASE_EDIT_FRAME::OnEditItemRequest()
     void OnEditItemRequest( BOARD_ITEM* aItem ) override;
 
     void LoadFootprintFromLibrary( LIB_ID aFPID );
@@ -312,12 +344,11 @@ public:
      */
     COLOR4D GetGridColor() override;
 
-    ///< @copydoc PCB_BASE_FRAME::SetActiveLayer()
+    /// @copydoc PCB_BASE_FRAME::SetActiveLayer()
     void SetActiveLayer( PCB_LAYER_ID aLayer ) override;
 
     void OnDisplayOptionsChanged() override;
 
-    ///< @copydoc EDA_DRAW_FRAME::UseGalCanvas()
     void ActivateGalCanvas() override;
 
     /**
@@ -374,7 +405,7 @@ public:
      */
     void UpdateLibraryTree( const wxDataViewItem& treeItem, FOOTPRINT* aFootprint );
 
-    ///< Reload displayed items and sets view.
+    /// Reload displayed items and sets view.
     void UpdateView();
 
     void UpdateTitle();
@@ -405,11 +436,6 @@ protected:
     FOOTPRINT_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent );
 
     /**
-     * Determines the Canvas type to load (with prompt if required) and initializes m_canvasType
-     */
-    void resolveCanvasType() override;
-
-    /**
      * Make sure the footprint info list is loaded (with a progress dialog) and then initialize
      * the footprint library tree.
      */
@@ -436,6 +462,8 @@ protected:
     void editFootprintProperties( FOOTPRINT* aFootprint );
 
     void setupUIConditions() override;
+
+    void onPluginAvailabilityChanged( wxCommandEvent& aEvt );
 
     void centerItemIdleHandler( wxIdleEvent& aEvent );
 
@@ -467,14 +495,6 @@ private:
      * the caller retains ownership of @p aBoardFootprint.
      */
     FOOTPRINT_EDITOR_TAB_CONTEXT* findOrCreateFootprintInstanceTab( FOOTPRINT* aBoardFootprint );
-
-    /**
-     * Replace the active board's footprint with aFootprint and re-point the file watcher at it.
-     *
-     * Takes ownership. Does no tab bookkeeping, so callers that need a tab for aFootprint must open
-     * it first.
-     */
-    void installFootprintOnActiveBoard( FOOTPRINT* aFootprint );
 
     /**
      * Make aCtx the active tab, borrowing its board without deleting the outgoing one.

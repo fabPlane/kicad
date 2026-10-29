@@ -47,6 +47,7 @@
 #include <board_design_settings.h>
 #include <footprint.h>
 #include <3d_rendering/3d_placeholder_utils.h>
+#include <pcb_3d_body.h>
 #include <pad.h>
 #include <pcb_track.h>
 #include <kiplatform/io.h>
@@ -2436,6 +2437,7 @@ bool STEP_PCB_MODEL::MakeShapes( std::vector<TopoDS_Shape>& aShapes, const SHAPE
                                              "z: %g; bounding box: %s" ),
                                           static_cast<int>( aContour.PointCount() ),
                                           static_cast<int>( mkWire.Error() ),
+                                          aZposition,
                                           formatBBox( aContour.BBox() ) ),
                         RPT_SEVERITY_WARNING );
             }

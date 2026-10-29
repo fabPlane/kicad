@@ -21,10 +21,13 @@
 
 #include <wx/debug.h>
 #include <wx/msgdlg.h>
+
 #include <i18n_utility.h>
 #include <macros.h>
 #include <board.h>
+#include <board_item_index.h>
 #include <board_design_settings.h>
+#include <board_design_settings_defaults.h>
 #include <lset.h>
 #include <pcb_group.h>
 #include <pcb_generator.h>
@@ -104,8 +107,8 @@ BOARD* BOARD_ITEM::GetBoard()
 BOARD_ITEM::~BOARD_ITEM()
 {
     // Backup for code paths that skip ::Remove(). Do not use the parent chain, it may be freed.
-    if( m_boardCacheOwner )
-        m_boardCacheOwner->UncacheItemByPtr( this );
+    if( m_owningIndex )
+        m_owningIndex->UnbindItem( *this );
 }
 
 
@@ -120,10 +123,11 @@ void BOARD_ITEM::SetUuid( const KIID& aUuid )
     if( m_Uuid == aUuid )
         return;
 
-    // Use the owner, not GetBoard(). The parent chain may name a wrong or dead board.
-    if( BOARD* board = m_boardCacheOwner )
+    // Use the index that holds us, not GetBoard(). The parent chain may name a wrong or dead
+    // board.
+    if( BOARD_ITEM_INDEX* owningIndex = m_owningIndex )
     {
-        board->RebindItemUuid( this, aUuid );
+        owningIndex->Rebind( *this, aUuid );
         return;
     }
 
@@ -189,6 +193,17 @@ PCB_LAYER_ID BOARD_ITEM::GetLayer() const
     return m_layer;
 }
 
+
+PCB_LAYER_ID BOARD_ITEM::GetFlippedLayer( PCB_LAYER_ID aLayer ) const
+{
+    const BOARD* board = GetBoard();
+
+    if( board )
+        return board->FlipLayer( aLayer );
+
+    return ::FlipLayer( aLayer );
+}
+
 int BOARD_ITEM::BoardLayerCount() const
 {
     const BOARD* board = GetBoard();
@@ -224,11 +239,19 @@ LSET BOARD_ITEM::BoardLayerSet() const
 
 wxString BOARD_ITEM::GetLayerName() const
 {
-    if( const BOARD* board = GetBoard() )
-        return board->GetLayerName( m_layer );
+    return GetLayerName( m_layer );
+}
+
+
+wxString BOARD_ITEM::GetLayerName( PCB_LAYER_ID aLayer ) const
+{
+    const BOARD* board = GetBoard();
+
+    if( board )
+        return board->GetLayerName( aLayer );
 
     // If no parent, return standard name
-    return BOARD::GetStandardLayerName( m_layer );
+    return BOARD::GetStandardLayerName( aLayer );
 }
 
 
@@ -332,7 +355,7 @@ void BOARD_ITEM::SwapItemData( BOARD_ITEM* aImage )
     // which would leave the cache holding dangling pointers to the destroyed children.
     if( board )
     {
-        board->UncacheChildrenById( this );
+        board->UncacheChildrenById( *this );
     }
 
     swapData( aImage );
@@ -344,7 +367,7 @@ void BOARD_ITEM::SwapItemData( BOARD_ITEM* aImage )
 
     if( board )
     {
-        board->CacheChildrenById( this );
+        board->CacheChildrenById( *this );
     }
 }
 
@@ -373,7 +396,30 @@ void BOARD_ITEM::TransformShapeToPolygon( SHAPE_POLY_SET& aBuffer, PCB_LAYER_ID 
                                           int aClearance, int aError, ERROR_LOC aErrorLoc,
                                           bool ignoreLineWidth ) const
 {
-    wxLogDebug( wxT( "%s doesn't implement TransformShapeToPolygon()" ), GetClass() );
+    wxCHECK_MSG( false, /* void */,
+                 wxString::Format( wxT( "%s doesn't implement TransformShapeToPolygon()" ), GetClass() ) );
+}
+
+
+double BOARD_ITEM::GetCoverageArea( int aTextMargin ) const
+{
+    SHAPE_POLY_SET poly;
+    TransformShapeToPolygon( poly, UNDEFINED_LAYER, 0, ARC_LOW_DEF, ERROR_OUTSIDE );
+    return polygonArea( poly );
+}
+
+
+double BOARD_ITEM::polygonArea( SHAPE_POLY_SET& aPolySet )
+{
+    for( int ii = 0; ii < aPolySet.OutlineCount(); ii++ )
+    {
+        aPolySet.Outline( ii ).SetClosed( true );
+
+        for( int jj = 0; jj < aPolySet.HoleCount( ii ); jj++ )
+            aPolySet.Hole( ii, jj ).SetClosed( true );
+    }
+
+    return aPolySet.Area();
 }
 
 

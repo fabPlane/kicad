@@ -95,10 +95,48 @@ bool PCB_IO_EASYEDAPRO::CanReadBoard( const wxString& aFileName ) const
 }
 
 
+std::vector<std::pair<wxString, wxString>>
+PCB_IO_EASYEDAPRO::EnumerateProjectBoards( const wxString& aFileName ) const
+{
+    const nlohmann::json& projectIndex = EASYEDAPRO::ReadProjectOrDeviceFile( aFileName );
+    const nlohmann::json& pcbsIndex = projectIndex.at( "pcbs" );
+
+    std::vector<std::pair<wxString, wxString>> result;
+    result.reserve( pcbsIndex.size() );
+
+    for( const auto& [uuid, entry] : pcbsIndex.items() )
+    {
+        wxString title = wxString::FromUTF8( uuid );
+
+        if( entry.is_string() && !entry.get<std::string>().empty() )
+            title = wxString::FromUTF8( entry.get_ref<const std::string&>() );
+        else if( entry.is_object() )
+        {
+            auto titleIt = entry.find( "title" );
+
+            if( titleIt != entry.end() && titleIt->is_string() )
+                title = wxString::FromUTF8( titleIt->get_ref<const std::string&>() );
+        }
+
+        result.emplace_back( wxString::FromUTF8( uuid ), title );
+    }
+
+    return result;
+}
+
+
+std::vector<IMPORT_PROJECT_DESC> PCB_IO_EASYEDAPRO::EnumerateProjectEntries( const wxString& aFileName ) const
+{
+    return EASYEDAPRO::ProjectToSelectorDialog( EASYEDAPRO::ReadProjectOrDeviceFile( aFileName ) );
+}
+
+
 void PCB_IO_EASYEDAPRO::loadBoard( const wxString& aFileName, BOARD& aBoard, bool aIsNewLoad,
                                    const std::map<std::string, UTF8>* aProperties, PROJECT* aProject )
 {
     m_props = aProperties;
+    m_importedDesignRules.clear();
+
     m_board = &aBoard;
 
     // Collect the font substitution warnings (RAII - automatically reset on scope exit)
@@ -129,13 +167,14 @@ void PCB_IO_EASYEDAPRO::loadBoard( const wxString& aFileName, BOARD& aBoard, boo
         }
         else
         {
-            std::map<wxString, wxString> prjPcbNames = project.at( "pcbs" );
 
-            if( prjPcbNames.size() == 1 )
+            std::map<wxString, nlohmann::json> prjPcbData = project.at( "pcbs" );
+
+            if( prjPcbData.size() == 1 )
             {
-                pcbToLoad = prjPcbNames.begin()->first;
+                pcbToLoad = prjPcbData.begin()->first;
             }
-            else
+            else if( m_choose_project_handler )
             {
                 std::vector<IMPORT_PROJECT_DESC> chosen = m_choose_project_handler(
                         EASYEDAPRO::ProjectToSelectorDialog( project, true, false ) );
@@ -145,6 +184,11 @@ void PCB_IO_EASYEDAPRO::loadBoard( const wxString& aFileName, BOARD& aBoard, boo
                     THROW_IO_CANCELLED();
 
                 pcbToLoad = chosen[0].PCBId;
+            }
+            else if( !prjPcbData.empty() )
+            {
+                // No chooser registered (headless), so take the first
+                pcbToLoad = prjPcbData.begin()->first;
             }
         }
 
@@ -240,6 +284,8 @@ void PCB_IO_EASYEDAPRO::loadBoard( const wxString& aFileName, BOARD& aBoard, boo
             parser.ParseBoard( m_board, project, m_projectData->m_Footprints,
                                m_projectData->m_Blobs, boardPoured, *pcbLines,
                                EASYEDAPRO::ShortenLibName( fname.GetName() ) );
+            m_importedDesignRules = parser.GetSafeSpacingRules();
+
 
             EASY_IT_BREAK;
         };

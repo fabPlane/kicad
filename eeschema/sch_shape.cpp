@@ -260,32 +260,6 @@ void SCH_SHAPE::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS& 
 
     static std::vector<VECTOR2I> ptList;
 
-    if( GetShape() == SHAPE_T::POLY )
-    {
-        ptList.clear();
-
-        for( const VECTOR2I& pt : GetPolyShape().Outline( 0 ).CPoints() )
-            ptList.push_back( renderSettings->TransformCoordinate( pt ) + aOffset );
-    }
-    else if( GetShape() == SHAPE_T::BEZIER )
-    {
-        ptList.clear();
-
-        for( const VECTOR2I& pt : m_bezierPoints )
-            ptList.push_back( renderSettings->TransformCoordinate( pt ) + aOffset );
-    }
-    else if( GetShape() == SHAPE_T::ELLIPSE || GetShape() == SHAPE_T::ELLIPSE_ARC )
-    {
-        ptList.clear();
-
-        SHAPE_ELLIPSE e = buildShapeEllipse();
-
-        SHAPE_LINE_CHAIN chain = e.ConvertToPolyline( getMaxError() );
-
-        for( int ii = 0; ii < chain.PointCount(); ++ii )
-            ptList.push_back( renderSettings->TransformCoordinate( chain.CPoint( ii ) ) + aOffset );
-    }
-
     COLOR4D    color = GetStroke().GetColor();
     COLOR4D    bg = renderSettings->GetBackgroundColor();
     LINE_STYLE lineStyle = GetStroke().GetLineStyle();
@@ -387,12 +361,13 @@ void SCH_SHAPE::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS& 
     VECTOR2I end = renderSettings->TransformCoordinate( m_end ) + aOffset;
     VECTOR2I mid, center;
 
-    auto transformBezierPoint = [&]( const VECTOR2D& aPoint )
-    {
-        return renderSettings->TransformCoordinate( VECTOR2I( aPoint ) ) + aOffset;
-    };
+    auto transformBezierPoint =
+            [&]( const VECTOR2D& aPoint )
+            {
+                return renderSettings->TransformCoordinate( VECTOR2I( aPoint ) ) + aOffset;
+            };
 
-    std::vector<VECTOR2I> lineEndingPlotPoints = ptList;
+    std::vector<VECTOR2I> lineEndingPlotPoints;
 
     switch( GetShape() )
     {
@@ -404,32 +379,25 @@ void SCH_SHAPE::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS& 
         VECTOR2I origArcStart = start;
         VECTOR2I origArcEnd = end;
 
-        if( GetStartEnding().GetStyle() != LINE_ENDING_STYLE::NONE
-            || GetEndEnding().GetStyle() != LINE_ENDING_STYLE::NONE )
+        SHAPE_ARC arc( start, mid, end, 0 );
+        VECTOR2I  c = arc.GetCenter();
+        EDA_ANGLE startAngle = arc.GetStartAngle();
+        EDA_ANGLE arcAngle = arc.GetCentralAngle();
+
+        // Determine arc direction from start/mid/end.
+        EDA_ANGLE origStart = startAngle;
+
+        if( ShortenArcForEndings( startAngle, arcAngle, arc.GetRadius(), pen_size ) )
         {
-            SHAPE_ARC arc( start, mid, end, 0 );
-            VECTOR2I  c = arc.GetCenter();
-            EDA_ANGLE startAngle = arc.GetStartAngle();
-            EDA_ANGLE arcAngle = arc.GetCentralAngle();
+            RotatePoint( start, c, origStart - startAngle );
 
-            // Determine arc direction from start/mid/end.
-            EDA_ANGLE origStart = startAngle;
-            if( ShortenArcForEndings( startAngle, arcAngle, arc.GetRadius(), pen_size ) )
-            {
-                RotatePoint( start, c, origStart - startAngle );
+            VECTOR2I newEnd = start;
+            RotatePoint( newEnd, c, -arcAngle );
 
-                VECTOR2I newEnd = start;
-                RotatePoint( newEnd, c, -arcAngle );
+            VECTOR2I newMid = start;
+            RotatePoint( newMid, c, -arcAngle / 2 );
 
-                VECTOR2I newMid = start;
-                RotatePoint( newMid, c, -arcAngle / 2 );
-
-                aPlotter->Arc( start, newMid, newEnd, fill, pen_size );
-            }
-        }
-        else
-        {
-            aPlotter->Arc( start, mid, end, fill, pen_size );
+            aPlotter->Arc( start, newMid, newEnd, fill, pen_size );
         }
 
         // Restore original endpoints for ending placement.
@@ -448,48 +416,64 @@ void SCH_SHAPE::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS& 
         aPlotter->Rect( start, end, fill, pen_size, GetCornerRadius() );
         break;
 
-    case SHAPE_T::POLY:
-    {
-        if( !ShortenBodyPolyPoints( ptList, IsClosed(), 0, pen_size ) )
-            break;
+    case SHAPE_T::SEGMENT:
+        if( EDA_SHAPE::ShortenSegmentForEndings( start, end, GetStartEnding(), GetEndEnding(), pen_size ) )
+            aPlotter->ThickSegment( start, end, pen_size, nullptr );
 
-        aPlotter->PlotPoly( ptList, fill, pen_size, nullptr );
         break;
-    }
+
+    case SHAPE_T::POLY:
+        ptList.clear();     // clear every time; it's static
+
+        if( !GetPolyShape().IsEmpty() )
+        {
+            for( const VECTOR2I& pt : GetPolyShape().Outline( 0 ).CPoints() )
+                ptList.push_back( renderSettings->TransformCoordinate( pt ) + aOffset );
+
+            if( ShortenBodyPolyPoints( ptList, 0, pen_size ) )
+                aPlotter->PlotPoly( ptList, fill, pen_size, nullptr );
+        }
+
+        lineEndingPlotPoints = ptList;
+        break;
 
     case SHAPE_T::BEZIER:
-    {
-        std::optional<BEZIER<double>> curve = ShortenedBezierCurve( pen_size );
-
-        if( curve && aPlotter->GetPlotterType() == PLOT_FORMAT::SVG )
+        if( std::optional<BEZIER<double>> curve = ShortenedBezierCurve( pen_size ) )
         {
-            aPlotter->BezierCurve( transformBezierPoint( curve->Start ), transformBezierPoint( curve->C1 ),
-                                   transformBezierPoint( curve->C2 ), transformBezierPoint( curve->End ), GetMaxError(),
-                                   pen_size );
+            if( aPlotter->GetPlotterType() == PLOT_FORMAT::SVG )
+            {
+                aPlotter->BezierCurve( transformBezierPoint( curve->Start ), transformBezierPoint( curve->C1 ),
+                                       transformBezierPoint( curve->C2 ), transformBezierPoint( curve->End ),
+                                       GetMaxError(), pen_size );
+            }
+            else
+            {
+                std::vector<VECTOR2D> pts = ShortenedBezierPolyline( pen_size );
+                std::vector<VECTOR2I> plotPts;
+
+                plotPts.reserve( pts.size() );
+
+                for( const VECTOR2D& pt : pts )
+                    plotPts.push_back( transformBezierPoint( pt ) );
+
+                aPlotter->PlotPoly( plotPts, fill, pen_size, nullptr );
+            }
         }
-        else if( curve )
-        {
-            std::vector<VECTOR2D> pts = ShortenedBezierPolyline( pen_size );
-            std::vector<VECTOR2I> plotPts;
 
-            plotPts.reserve( pts.size() );
-
-            for( const VECTOR2D& pt : pts )
-                plotPts.push_back( transformBezierPoint( pt ) );
-
-            aPlotter->PlotPoly( plotPts, fill, pen_size, nullptr );
-        }
         break;
-    }
 
     case SHAPE_T::ELLIPSE:
-        if( !ptList.empty() )
-            ptList.push_back( ptList.front() );
+    case SHAPE_T::ELLIPSE_ARC:
+    {
+        ptList.clear();     // clear every time; it's static
 
-        aPlotter->PlotPoly( ptList, fill, pen_size, nullptr );
+        SHAPE_LINE_CHAIN chain = buildShapeEllipse().ConvertToPolyline( getMaxError() );
+
+        if( GetShortenedBodyPolyPoints( chain, 0, ptList, pen_size ) )
+            aPlotter->PlotPoly( ptList, fill, pen_size, nullptr );
+
         break;
-
-    case SHAPE_T::ELLIPSE_ARC: aPlotter->PlotPoly( ptList, FILL_T::NO_FILL, pen_size, nullptr ); break;
+    }
 
     default:
         UNIMPLEMENTED_FOR( SHAPE_T_asString() );
@@ -497,10 +481,9 @@ void SCH_SHAPE::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS& 
 
     aPlotter->SetDash( pen_size, LINE_STYLE::SOLID );
 
-    // Plot line endings for open shapes.
-    if( !IsClosed()
-        && ( GetStartEnding().GetStyle() != LINE_ENDING_STYLE::NONE
-             || GetEndEnding().GetStyle() != LINE_ENDING_STYLE::NONE ) )
+    // Plot line endings
+    if( GetStartEnding().GetStyle() != LINE_ENDING_STYLE::NONE
+        || GetEndEnding().GetStyle() != LINE_ENDING_STYLE::NONE )
     {
         VECTOR2I startPt, endPt;
 
@@ -515,10 +498,8 @@ void SCH_SHAPE::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS& 
         switch( GetShape() )
         {
         case SHAPE_T::ARC:
-        {
             endingShape.SetArcGeometry( startPt, mid, endPt );
             break;
-        }
 
         case SHAPE_T::POLY:
             if( lineEndingPlotPoints.size() >= 2 )
@@ -538,14 +519,12 @@ void SCH_SHAPE::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS& 
             break;
 
         case SHAPE_T::BEZIER:
-        {
             endingShape.SetStart( startPt );
             endingShape.SetBezierC1( transformBezierPoint( GetBezierC1() ) );
             endingShape.SetBezierC2( transformBezierPoint( GetBezierC2() ) );
             endingShape.SetEnd( endPt );
             endingShape.RebuildBezierToSegmentsPointsList( getMaxError() );
             break;
-        }
 
         case SHAPE_T::SEGMENT:
             endingShape.SetStart( startPt );
@@ -614,9 +593,13 @@ wxString SCH_SHAPE::GetItemDescription( UNITS_PROVIDER* aUnitsProvider, bool aFu
                                  aUnitsProvider->MessageTextFromValue( std::abs( m_start.x - m_end.x ) ),
                                  aUnitsProvider->MessageTextFromValue( std::abs( m_start.y - m_end.y ) ) );
 
+    case SHAPE_T::SEGMENT:
+        return wxString::Format( _( "Line, length %s" ),
+                                 aUnitsProvider->MessageTextFromValue( GetLength() ) );
+
     case SHAPE_T::POLY:
         return wxString::Format( _( "Polyline, %d points" ),
-                                 int( GetPolyShape().Outline( 0 ).GetPointCount() ) );
+                                 int( GetPolyShape().IsEmpty() ? 0 : GetPolyShape().Outline( 0 ).GetPointCount() ) );
 
     case SHAPE_T::BEZIER:
         return wxString::Format( _( "Bezier Curve, %d points" ),
@@ -643,13 +626,13 @@ BITMAPS SCH_SHAPE::GetMenuImage() const
 {
     switch( GetShape() )
     {
-    case SHAPE_T::SEGMENT:   return BITMAPS::add_line;
-    case SHAPE_T::ARC:       return BITMAPS::add_arc;
-    case SHAPE_T::CIRCLE:    return BITMAPS::add_circle;
-    case SHAPE_T::RECTANGLE: return BITMAPS::add_rectangle;
-    case SHAPE_T::POLY:      return BITMAPS::add_graphical_segments;
-    case SHAPE_T::BEZIER:    return BITMAPS::add_bezier;
-    case SHAPE_T::ELLIPSE: return BITMAPS::add_ellipse;
+    case SHAPE_T::SEGMENT:     return BITMAPS::add_line;
+    case SHAPE_T::ARC:         return BITMAPS::add_arc;
+    case SHAPE_T::CIRCLE:      return BITMAPS::add_circle;
+    case SHAPE_T::RECTANGLE:   return BITMAPS::add_rectangle;
+    case SHAPE_T::POLY:        return BITMAPS::add_graphical_segments;
+    case SHAPE_T::BEZIER:      return BITMAPS::add_bezier;
+    case SHAPE_T::ELLIPSE:     return BITMAPS::add_ellipse;
     case SHAPE_T::ELLIPSE_ARC: return BITMAPS::add_ellipse_arc;
 
     default:
@@ -680,6 +663,21 @@ std::vector<int> SCH_SHAPE::ViewGetLayers() const
     layers[2] = LAYER_SELECTION_SHADOWS;
 
     return layers;
+}
+
+
+void SCH_SHAPE::SetArcOrLine( const VECTOR2I& aStart, const VECTOR2I& aMid, const VECTOR2I& aEnd )
+{
+    if( IsStraightArc( aStart, aMid, aEnd ) )
+    {
+        SetShape( SHAPE_T::POLY );
+        AddPoint( aStart );
+        AddPoint( aEnd );
+    }
+    else
+    {
+        SetArcGeometry( aStart, aMid, aEnd );
+    }
 }
 
 

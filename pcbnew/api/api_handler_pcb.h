@@ -39,6 +39,14 @@ class PCB_EDIT_FRAME;
 class PROGRESS_REPORTER;
 class PCB_TRACK;
 class PROPERTY_BASE;
+class JOB_EXPORT_PCB_FAB;
+class JOB_EXPORT_PCB_ODB;
+
+
+void ApplyFabExportContent( const kiapi::board::jobs::FabExportContent& aContent, JOB_EXPORT_PCB_FAB& aJob );
+
+void ApplyOdbJobRequest( const kiapi::board::jobs::RunBoardJobExportODB& aRequest,
+                         JOB_EXPORT_PCB_ODB& aJob );
 
 
 class API_HANDLER_PCB : public API_HANDLER_BOARD
@@ -56,6 +64,7 @@ private:
             const HANDLER_CONTEXT<commands::GetOpenDocuments>& aCtx );
 
     HANDLER_RESULT<Empty> handleSaveDocument( const HANDLER_CONTEXT<commands::SaveDocument>& aCtx );
+    HANDLER_RESULT<Empty> handleSaveDocumentAs( const HANDLER_CONTEXT<commands::SaveDocumentAs>& aCtx );
 
     HANDLER_RESULT<Empty> handleSaveCopyOfDocument(
             const HANDLER_CONTEXT<commands::SaveCopyOfDocument>& aCtx );
@@ -219,6 +228,9 @@ private:
     HANDLER_RESULT<types::RunJobResponse> handleRunBoardJobExportGencad(
             const HANDLER_CONTEXT<RunBoardJobExportGencad>& aCtx );
 
+    HANDLER_RESULT<types::RunJobResponse> handleRunBoardJobExportSpecctraDsn(
+            const HANDLER_CONTEXT<RunBoardJobExportSpecctraDsn>& aCtx );
+
     HANDLER_RESULT<types::RunJobResponse> handleRunBoardJobExportIpc2581(
             const HANDLER_CONTEXT<RunBoardJobExportIpc2581>& aCtx );
 
@@ -226,11 +238,17 @@ private:
             const HANDLER_CONTEXT<RunBoardJobExportIpcD356>& aCtx );
 
     // Since 11.0
+    /// Deprecated alias of RunBoardJobExportSpecctraDsn
     HANDLER_RESULT<types::RunJobResponse> handleRunBoardJobExportSpecctra(
             const HANDLER_CONTEXT<RunBoardJobExportSpecctra>& aCtx );
 
+    HANDLER_RESULT<types::RunJobResponse> runSpecctraDsnJob( const types::RunJobSettings& aSettings );
+
     HANDLER_RESULT<types::RunJobResponse> handleRunBoardJobExportODB(
             const HANDLER_CONTEXT<RunBoardJobExportODB>& aCtx );
+
+    HANDLER_RESULT<types::RunJobResponse> handleRunBoardJobExportIdf(
+            const HANDLER_CONTEXT<RunBoardJobExportIdf>& aCtx );
 
     HANDLER_RESULT<types::RunJobResponse> handleRunBoardJobExportStats(
             const HANDLER_CONTEXT<RunBoardJobExportStats>& aCtx );

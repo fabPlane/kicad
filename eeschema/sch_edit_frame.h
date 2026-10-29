@@ -293,8 +293,6 @@ public:
 
     /**
      * Test all of the connectable objects in the schematic for unused connection points.
-     *
-     * @return True if any connection state changes were made.
      */
     void TestDanglingEnds();
 
@@ -404,12 +402,12 @@ public:
      * @param aStartNumber The start number for non-sheet-based annotation styles.
      * @param aResetAnnotation Clear any previous annotation if true.  Otherwise, keep the
      *                         existing symbol annotation.
+     * @param aRegroupUnits regroups symbol units when true.
      * @param aRepairTimestamps Test for and repair any duplicate time stamps if true.
      *                          Otherwise, keep the existing time stamps.  This option
      *                          could change previous annotation because time stamps are
      *                          used to handle annotation in complex hierarchies.
      * @param aReporter A sink for error messages.  Use NULL_REPORTER if you don't need errors.
-     * @param aSymbolFilter Filter for symbol handling. Ignored for non-selection scopes.
      *
      * When the sheet number is used in annotation, each sheet annotation starts from sheet
      * number * 100.  In other words the first sheet uses 100 to 199, the second sheet uses
@@ -417,8 +415,7 @@ public:
      */
     void AnnotateSymbols( SCH_COMMIT* aCommit, ANNOTATE_SCOPE_T aAnnotateScope, ANNOTATE_ORDER_T aSortOption,
                           ANNOTATE_ALGO_T aAlgoOption, bool aRecursive, int aStartNumber, bool aResetAnnotation,
-                          bool aRegroupUnits, bool aRepairTimestamps, REPORTER& aReporter,
-                          SYMBOL_FILTER aSymbolFilter );
+                          bool aRegroupUnits, bool aRepairTimestamps, REPORTER& aReporter );
 
     /**
      * Check for annotation errors.
@@ -431,13 +428,14 @@ public:
      * - Multiple part per package symbols where the reference designator is different between
      *   parts.
      *
-     * @return Number of annotation errors found.
-     * @param aReporter A handler for error reporting.
+     * @param aErrorHandler
      * @param aAnnotateScope See #ANNOTATE_SCOPE_T Check the current sheet only if true.
      *                       Otherwise check the entire schematic.
+     * @param aRecursive
+     * @return Number of annotation errors found.
      */
     int CheckAnnotate( ANNOTATION_ERROR_HANDLER aErrorHandler, ANNOTATE_SCOPE_T aAnnotateScope,
-                       bool aRecursive, SYMBOL_FILTER aSymbolFilter );
+                       bool aRecursive );
 
     /**
      * Run a modal version of the annotate dialog for a specific purpose.
@@ -503,6 +501,14 @@ public:
 
     bool OpenProjectFiles( const std::vector<wxString>& aFileSet, int aCtl = 0 ) override;
 
+    /**
+     * Reload the schematic and all its sheets from disk.
+     * The caller handles confirmation before unsaved edits are discarded.
+     *
+     * @return false when there is no filename or the reload fails.
+     */
+    bool ReloadFromDisk();
+
     void SetSchematic( SCHEMATIC* aSchematic );
 
     wxString GetCurrentFileName() const override;
@@ -553,6 +559,7 @@ public:
      * File names foo.sch and Foo.sch are unique files on Linux and MacOS but on Windows
      * this would result in a broken schematic.
      *
+     * @param aOldName
      * @param aSchematicFileName is the absolute path and file name of the file to test.
      * @return true if the user accepts the potential file name clash risk.
      */
@@ -677,6 +684,7 @@ public:
     /**
      * Remove a given junction and heals any wire segments under the junction.
      *
+     * @param aCommit is the commit to undo the junction delete.
      * @param aItem The junction to delete
      */
     void DeleteJunction( SCH_COMMIT* aCommit, SCH_ITEM* aItem );
@@ -686,6 +694,8 @@ public:
     /**
      * Change the unit of \a aSymbol, swapping with another placed unit if the user asks.
      *
+     * @param aSymbol
+     * @param aUnit
      * @param aCommit is the commit of an edit in progress, such as a move.  The changes are staged
      *                there and not pushed.  Without it, a local commit is pushed.
      */
@@ -694,6 +704,8 @@ public:
     /**
      * Change the body style of \a aSymbol.
      *
+     * @param aSymbol
+     * @param aBodyStyle
      * @param aCommit is the commit of an edit in progress, such as a move.  The change is staged
      *                there and not pushed.  Without it, a local commit is pushed.
      */
@@ -714,6 +726,7 @@ public:
      * If it is a delete command, items are put on list with the .Flags member
      * set to DELETED.
      *
+     * @param aScreen is the undo/redo screen.
      * @param aItemToCopy is the schematic item modified by the command to undo.
      * @param aTypeCommand is the command type (see enum UNDO_REDO).
      * @param aAppend set to true to add the item to the previous undo list.
@@ -830,6 +843,10 @@ public:
 
     /**
      * Generate the connection data for the entire schematic hierarchy.
+     *
+     * @param aCommit
+     * @param aCleanupFlags
+     * @param aProgressReporter
      * @param aCleanupDone the commit already applied cleanup; flags still select the rebuild scope.
      * @return false if recalculation failed; the frame has already reported the failure.
      */
@@ -930,7 +947,7 @@ public:
     void FocusSearch();
 
     /**
-     * Add \a aListener to post #EDA_EVT_SCHEMATIC_CHANGED command events to.
+     * Add \a aListener to post EDA_EVT_SCHEMATIC_CHANGED command events to.
      *
      * @warning The caller is responsible for removing any listeners that are no long valid.
      *
@@ -1009,8 +1026,6 @@ protected:
      */
     void sendNetlistToCvpcb();
 
-    void onSize( wxSizeEvent& aEvent );
-
     void saveProjectSettings() override;
 
     void onCloseSymbolDiffDialog( wxCommandEvent& aEvent );
@@ -1072,8 +1087,9 @@ private:
     /**
      *  Load the given filename but sets the path to the current project path.
      *
-     *  @param full filepath of file to be imported.
-     *  @param aFileType SCH_FILE_T value for file type
+     * @param aFileName full filepath of file to be imported.
+     * @param aFileType SCH_FILE_T value for file type.
+     * @param aProperties
      */
     bool importFile( const wxString& aFileName, int aFileType,
                      const std::map<std::string, UTF8>* aProperties = nullptr );
@@ -1083,9 +1099,11 @@ private:
      *
      * @param aSheet is the #SCH_SHEET object to save.
      * @param aSavePath is the full path of the destination file
+     * @param isSaveAs indicates this is a save-as or save-copy-as operation, and that the dirty
+     *                 bit should NOT be cleared on the sheet
      * @return True if the file has been saved.
      */
-    bool saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSavePath );
+    bool saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSavePath, bool isSaveAs );
 
     /**
      * Fill a map of uuid -> reference from the currently loaded schematic.

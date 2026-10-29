@@ -25,6 +25,7 @@
 #include <pcb_base_frame.h>
 #include <core/mirror.h>
 #include <connectivity/connectivity_data.h>
+#include <bitmaps.h>
 #include <board.h>
 #include <board_design_settings.h>
 #include <convert_basic_shapes_to_polygon.h>
@@ -46,6 +47,7 @@
 #include <geometry/shape_arc.h>
 #include <drc/drc_engine.h>
 #include <pcb_painter.h>
+#include <pcbnew_settings.h>
 #include <trigo.h>
 #include <properties/property_validators.h>
 #include <properties/property.h>
@@ -87,6 +89,27 @@ PCB_ARC::PCB_ARC( BOARD_ITEM* aParent, const SHAPE_ARC* aArc ) :
     m_Start = aArc->GetP0();
     m_End = aArc->GetP1();
     m_Mid = aArc->GetArcMid();
+}
+
+
+std::unique_ptr<PCB_TRACK> PCB_ARC::CreateFromThreePoints( BOARD_ITEM* aParent, const VECTOR2I& aStart,
+                                                           const VECTOR2I& aMid, const VECTOR2I& aEnd )
+{
+    if( IsStraightArc( aStart, aMid, aEnd ) )
+    {
+        std::unique_ptr<PCB_TRACK> track = std::make_unique<PCB_TRACK>( aParent );
+
+        track->SetStart( aStart );
+        track->SetEnd( aEnd );
+        return track;
+    }
+
+    std::unique_ptr<PCB_ARC> arc = std::make_unique<PCB_ARC>( aParent );
+
+    arc->SetStart( aStart );
+    arc->SetMid( aMid );
+    arc->SetEnd( aEnd );
+    return arc;
 }
 
 
@@ -528,9 +551,17 @@ bool PCB_ARC::Deserialize( const google::protobuf::Any &aContainer )
         return false;
 
     SetUuidDirect( KIID( arc.id().value() ) );
-    SetStart( VECTOR2I( arc.start().x_nm(), arc.start().y_nm() ) );
-    SetMid( VECTOR2I( arc.mid().x_nm(), arc.mid().y_nm() ) );
-    SetEnd( VECTOR2I( arc.end().x_nm(), arc.end().y_nm() ) );
+    const VECTOR2I start( arc.start().x_nm(), arc.start().y_nm() );
+    const VECTOR2I mid( arc.mid().x_nm(), arc.mid().y_nm() );
+    const VECTOR2I end( arc.end().x_nm(), arc.end().y_nm() );
+
+    // The item type is fixed here, so reject points that have no arc center
+    if( IsStraightArc( start, mid, end ) )
+        return false;
+
+    SetStart( start );
+    SetMid( mid );
+    SetEnd( end );
     SetWidth( arc.width().value_nm() );
     SetLayer( FromProtoEnum<PCB_LAYER_ID, kiapi::board::types::BoardLayer>( arc.layer() ) );
     UnpackNet( arc.net() );
@@ -670,9 +701,8 @@ MINOPTMAX<int> PCB_TRACK::GetWidthConstraint( wxString* aSource ) const
 
     if( GetBoard() && GetBoard()->GetDesignSettings().m_DRCEngine )
     {
-        BOARD_DESIGN_SETTINGS& bds = GetBoard()->GetDesignSettings();
-
-        constraint = bds.m_DRCEngine->EvalRules( TRACK_WIDTH_CONSTRAINT, this, nullptr, m_layer );
+        constraint = GetBoard()->GetDesignSettings().m_DRCEngine->EvalRules( TRACK_WIDTH_CONSTRAINT, this,
+                                                                             nullptr, m_layer );
     }
 
     if( aSource )
@@ -688,9 +718,8 @@ MINOPTMAX<int> PCB_VIA::GetWidthConstraint( wxString* aSource ) const
 
     if( GetBoard() && GetBoard()->GetDesignSettings().m_DRCEngine )
     {
-        BOARD_DESIGN_SETTINGS& bds = GetBoard()->GetDesignSettings();
-
-        constraint = bds.m_DRCEngine->EvalRules( VIA_DIAMETER_CONSTRAINT, this, nullptr, m_layer );
+        constraint = GetBoard()->GetDesignSettings().m_DRCEngine->EvalRules( VIA_DIAMETER_CONSTRAINT, this,
+                                                                             nullptr, m_layer );
     }
 
     if( aSource )
@@ -706,15 +735,37 @@ MINOPTMAX<int> PCB_VIA::GetDrillConstraint( wxString* aSource ) const
 
     if( GetBoard() && GetBoard()->GetDesignSettings().m_DRCEngine )
     {
-        BOARD_DESIGN_SETTINGS& bds = GetBoard()->GetDesignSettings();
-
-        constraint = bds.m_DRCEngine->EvalRules( HOLE_SIZE_CONSTRAINT, this, nullptr, m_layer );
+        // Holes are not layer-specific, as in the hole size test
+        constraint = GetBoard()->GetDesignSettings().m_DRCEngine->EvalRules( HOLE_SIZE_CONSTRAINT, this,
+                                                                             nullptr, UNDEFINED_LAYER );
     }
 
     if( aSource )
         *aSource = constraint.GetName();
 
     return constraint.Value();
+}
+
+
+void PCB_VIA::SetSizeFromRules( int aDiameter, int aDrill )
+{
+    // Area rules test the via's shape, so evaluate them at the preferred size
+    SetPadstackMode( PADSTACK::MODE::NORMAL );
+    SetWidth( PADSTACK::ALL_LAYERS, aDiameter );
+    SetDrill( aDrill );
+
+    // Callers size vias that may still move, so keep them out of the pointer-keyed rule caches
+    bool wasTransient = HasFlag( ROUTER_TRANSIENT );
+    SetFlags( ROUTER_TRANSIENT );
+
+    int diameter = GetWidthConstraint().PinnedOpt( aDiameter );
+    int drill = GetDrillConstraint().PinnedOpt( aDrill );
+
+    if( !wasTransient )
+        ClearFlags( ROUTER_TRANSIENT );
+
+    SetWidth( PADSTACK::ALL_LAYERS, diameter );
+    SetDrill( drill );
 }
 
 
@@ -732,9 +783,8 @@ int PCB_VIA::GetMinAnnulus( PCB_LAYER_ID aLayer, wxString* aSource ) const
 
     if( GetBoard() && GetBoard()->GetDesignSettings().m_DRCEngine )
     {
-        BOARD_DESIGN_SETTINGS& bds = GetBoard()->GetDesignSettings();
-
-        constraint = bds.m_DRCEngine->EvalRules( ANNULAR_WIDTH_CONSTRAINT, this, nullptr, aLayer );
+        constraint = GetBoard()->GetDesignSettings().m_DRCEngine->EvalRules( ANNULAR_WIDTH_CONSTRAINT, this,
+                                                                             nullptr, aLayer );
     }
 
     if( constraint.Value().HasMin() )
@@ -1386,7 +1436,7 @@ void PCB_TRACK::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
         m_End.y   = aCentre.y - ( m_End.y - aCentre.y );
     }
 
-    SetLayer( GetBoard()->FlipLayer( GetLayer() ) );
+    SetLayer( GetFlippedLayer( GetLayer() ) );
 }
 
 
@@ -1405,7 +1455,7 @@ void PCB_ARC::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
         m_Mid.y = aCentre.y - ( m_Mid.y - aCentre.y );
     }
 
-    SetLayer( GetBoard()->FlipLayer( GetLayer() ) );
+    SetLayer( GetFlippedLayer( GetLayer() ) );
 }
 
 
@@ -1437,8 +1487,8 @@ void PCB_VIA::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
         PCB_LAYER_ID top_layer;
         PCB_LAYER_ID bottom_layer;
         LayerPair( &top_layer, &bottom_layer );
-        top_layer    = GetBoard()->FlipLayer( top_layer );
-        bottom_layer = GetBoard()->FlipLayer( bottom_layer );
+        top_layer = GetFlippedLayer( top_layer );
+        bottom_layer = GetFlippedLayer( bottom_layer );
         SetLayerPair( top_layer, bottom_layer );
     }
 }
@@ -1700,8 +1750,8 @@ int PCB_TRACK::GetSolderMaskExpansion() const
     if( GetBoard() && GetBoard()->GetDesignSettings().m_DRCEngine
         && GetBoard()->GetDesignSettings().m_DRCEngine->HasRulesForConstraintType( SOLDER_MASK_EXPANSION_CONSTRAINT ) )
     {
-        DRC_CONSTRAINT              constraint;
-        std::shared_ptr<DRC_ENGINE> drcEngine = GetBoard()->GetDesignSettings().m_DRCEngine;
+        DRC_CONSTRAINT constraint;
+        DRC_ENGINE*    drcEngine = GetBoard()->GetDesignSettings().m_DRCEngine.get();
 
         constraint = drcEngine->EvalRules( SOLDER_MASK_EXPANSION_CONSTRAINT, this, nullptr, m_layer );
 
@@ -2355,7 +2405,8 @@ void PCB_VIA::GetOutermostConnectedLayers( PCB_LAYER_ID* aTopmost,
         {
             connected = true;
         }
-        else if( GetBoard()->GetConnectivity()->IsConnectedOnLayer( this, layer, nonZoneTypes ) )
+        else if( GetBoard()
+                 && GetBoard()->GetConnectivity()->IsConnectedOnLayer( this, layer, nonZoneTypes ) )
         {
             connected = true;
         }
@@ -2419,21 +2470,32 @@ double PCB_TRACK::ViewGetLOD( int aLayer, const KIGFX::VIEW* aView ) const
                 return LOD_HIDE;
         }
 
-        VECTOR2I start( GetStart() );
-        VECTOR2I end( GetEnd() );
-
-        // Calc the approximate size of the netname (assume square chars)
-        SEG::ecoord nameSize = GetDisplayNetname().size() * GetWidth();
-
-        if( VECTOR2I( end - start ).SquaredEuclideanNorm() < nameSize * nameSize )
-            return LOD_HIDE;
-
         BOX2I clipBox = BOX2ISafe( aView->GetViewport() );
 
-        ClipLine( &clipBox, start.x, start.y, end.x, end.y );
+        // Calc the approximate size of the netname (assume square chars)
+        int nameSize = (int) GetDisplayNetname().size() * GetWidth();
 
-        if( VECTOR2I( end - start ).SquaredEuclideanNorm() == 0 )
-            return LOD_HIDE;
+        if( Type() == PCB_ARC_T )
+        {
+            if( KiROUND( GetLength() ) < nameSize )
+                return LOD_HIDE;
+
+            if( !clipBox.Intersects( GetBoundingBox() ) )
+                return LOD_HIDE;
+        }
+        else if( Type() == PCB_TRACE_T )
+        {
+            VECTOR2I start( GetStart() );
+            VECTOR2I end( GetEnd() );
+
+            if( VECTOR2I( end - start ).SquaredEuclideanNorm() < SEG::Square( nameSize ) )
+                return LOD_HIDE;
+
+            ClipLine( &clipBox, start.x, start.y, end.x, end.y );
+
+            if( VECTOR2I( end - start ).SquaredEuclideanNorm() == 0 )
+                return LOD_HIDE;
+        }
 
         // Netnames will be shown only if zoom is appropriate
         return lodScaleForThreshold( aView, m_width, pcbIUScale.mmToIU( 4.0 ) );
@@ -2472,7 +2534,9 @@ const BOX2I PCB_TRACK::ViewBBox() const
     }
     else
     {
-        bbox.Inflate( GetWidth() );     // Add a bit extra for safety
+        // Add a bit extra for safety.
+        const PCB_VIA* via = dynamic_cast<const PCB_VIA*>( this );
+        bbox.Inflate( via ? via->GetWidth( PADSTACK::ALL_LAYERS ) : GetWidth() );
     }
 
     return bbox;
@@ -2568,6 +2632,20 @@ double PCB_VIA::ViewGetLOD( int aLayer, const KIGFX::VIEW* aView ) const
             {
                 return LOD_HIDE;
             }
+        }
+    }
+
+    // The painter draws a via copper layer only where the via flashes
+    if( IsViaCopperLayer( aLayer ) && !FlashLayer( aLayer - LAYER_VIA_COPPER_START ) )
+        return LOD_HIDE;
+
+    // The painter draws clearance outlines only for this display mode and never when printing
+    if( IsClearanceLayer( aLayer ) )
+    {
+        if( renderSettings->IsPrinting() || !pcbconfig()
+            || pcbconfig()->m_Display.m_TrackClearance != SHOW_WITH_VIA_ALWAYS )
+        {
+            return LOD_HIDE;
         }
     }
 
@@ -2840,13 +2918,20 @@ void PCB_TRACK::GetMsgPanelInfoBase_Common( EDA_DRAW_FRAME* aFrame, std::vector<
 
 wxString PCB_VIA::LayerMaskDescribe() const
 {
-    const BOARD* board = GetBoard();
     PCB_LAYER_ID top_layer;
     PCB_LAYER_ID bottom_layer;
 
     LayerPair( &top_layer, &bottom_layer );
 
-    return board->GetLayerName( top_layer ) + wxT( " - " ) + board->GetLayerName( bottom_layer );
+    return GetLayerName( top_layer ) + wxT( " - " ) + GetLayerName( bottom_layer );
+}
+
+
+double PCB_TRACK::GetCoverageArea( int aTextMargin ) const
+{
+    // Width squared, so a long track does not outrank a short one it happens to cross
+    const double width = GetWidth();
+    return width * width;
 }
 
 
@@ -2888,6 +2973,13 @@ bool PCB_ARC::HitTest( const VECTOR2I& aPosition, int aAccuracy ) const
         return arc_hittest >= ANGLE_360 + arc_angle;
 
     return arc_hittest <= arc_angle;
+}
+
+
+double PCB_VIA::GetCoverageArea( int aTextMargin ) const
+{
+    // A via covers its pad, so the width rule it inherits from tracks does not apply
+    return BOARD_ITEM::GetCoverageArea( aTextMargin );
 }
 
 
@@ -3132,6 +3224,9 @@ std::shared_ptr<SHAPE> PCB_VIA::GetEffectiveShape( PCB_LAYER_ID aLayer, FLASHING
         {
             PCB_LAYER_ID cuLayer = m_padStack.EffectiveLayerFor( aLayer );
             diameter = GetWidth( cuLayer );
+
+            if( IsSolderMaskLayer( aLayer ) )
+                diameter += 2 * GetSolderMaskExpansion();
         }
     }
     else

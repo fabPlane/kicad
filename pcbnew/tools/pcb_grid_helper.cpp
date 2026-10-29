@@ -518,7 +518,7 @@ void PCB_GRID_HELPER::OnBoardItemRemoved( BOARD& aBoard, BOARD_ITEM* aRemovedIte
     {
         for( EDA_ITEM* eda_item : m_snapItem->items )
         {
-            if( eda_item->IsBOARD_ITEM() )
+            if( eda_item && eda_item->IsBOARD_ITEM() )
             {
                 BOARD_ITEM* item = static_cast<BOARD_ITEM*>( eda_item );
 
@@ -1786,7 +1786,7 @@ void PCB_GRID_HELPER::computeAnchors( BOARD_ITEM* aItem, const VECTOR2I& aRefPos
                 {
                 case PAD_SHAPE::CIRCLE:
                 {
-                    const CIRCLE circle( aPad->ShapePos( aLayer ), aPad->GetSizeX() / 2 );
+                    const CIRCLE circle( aPad->ShapePos( aLayer ), aPad->GetSize( aLayer ).x / 2 );
 
                     for( const TYPED_POINT2I& pt : KIGEOM::GetCircleKeyPoints( circle, false ) )
                         addAnchor( pt.m_point, OUTLINE | SNAPPABLE, aPad, pt.m_types );

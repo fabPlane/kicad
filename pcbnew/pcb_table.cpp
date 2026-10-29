@@ -17,11 +17,13 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include "pcb_table.h"
+
 #include <pcb_edit_frame.h>
 #include <footprint.h>
-#include <pcb_table.h>
+#include <bitmaps.h>
 #include <board.h>
-#include <board_design_settings.h>
+#include <board_design_settings_defaults.h>
 #include <geometry/shape_simple.h>
 #include <geometry/shape_segment.h>
 #include <geometry/shape_compound.h>
@@ -95,6 +97,7 @@ void PCB_TABLE::CopyFrom( const BOARD_ITEM* aOther )
 {
     wxCHECK( aOther && aOther->Type() == PCB_TABLE_T, /* void */ );
 
+    BOARD*           board = GetBoard();
     const PCB_TABLE* other = static_cast<const PCB_TABLE*>( aOther );
 
     BOARD_ITEM::CopyFrom( aOther );
@@ -110,10 +113,16 @@ void PCB_TABLE::CopyFrom( const BOARD_ITEM* aOther )
     m_colWidths = other->m_colWidths;
     m_rowHeights = other->m_rowHeights;
 
+    if( board )
+        board->UncacheChildrenById( *this );
+
     ClearCells();
 
     for( PCB_TABLECELL* cell : other->m_cells )
         AddCell( static_cast<PCB_TABLECELL*>( cell->Clone() ) );
+
+    if( board )
+        board->CacheChildrenById( *this );
 }
 
 
@@ -213,8 +222,10 @@ bool PCB_TABLE::Deserialize( const google::protobuf::Any& aContainer )
 
         if( !cell->Deserialize( protoCell ) )
         {
+            // Since cells are positional, we must add something to the table.  Probably better
+            // to add a new, empy cell than a partially deserialized who-knows-what.
             delete cell;
-            continue;
+            cell = new PCB_TABLECELL( this );
         }
 
         AddCell( cell );
@@ -236,6 +247,8 @@ bool PCB_TABLE::Deserialize( const google::protobuf::Any& aContainer )
 
     if( table.has_separators_stroke() )
         kiapi::common::UnpackStroke( m_separatorsStroke, table.separators_stroke() );
+
+    Normalize();
 
     return true;
 }
@@ -543,7 +556,7 @@ void PCB_TABLE::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
 
         m_colWidths = std::move( newColWidths );
 
-        SetLayer( GetBoard()->FlipLayer( GetLayer() ) );
+        SetLayer( GetFlippedLayer( GetLayer() ) );
         return;
     }
 
@@ -592,7 +605,7 @@ void PCB_TABLE::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
 
     m_colWidths = std::move( newColWidths );
 
-    SetLayer( GetBoard()->FlipLayer( GetLayer() ) );
+    SetLayer( GetFlippedLayer( GetLayer() ) );
     Normalize();
 
     if( originalAngle != ANGLE_0 )
@@ -607,17 +620,14 @@ void PCB_TABLE::Mirror( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
 {
     // Mirror is Flip with the layer restored. TOP_BOTTOM needs a 180 deg pre-rotation
     // because rotate-then-LR-flip equals TB-flip.
-    PCB_LAYER_ID              origLayer = GetLayer();
-    std::vector<PCB_LAYER_ID> origCellLayers;
-    std::vector<bool>         origMirrorSettings;
-
-    origCellLayers.reserve( m_cells.size() );
-    origMirrorSettings.reserve( m_cells.size() );
+    PCB_LAYER_ID                           origLayer = GetLayer();
+    std::map<PCB_TABLECELL*, PCB_LAYER_ID> origCellLayers;
+    std::map<PCB_TABLECELL*, bool>         origMirrorSettings;
 
     for( PCB_TABLECELL* cell : m_cells )
     {
-        origCellLayers.push_back( cell->GetLayer() );
-        origMirrorSettings.push_back( cell->IsMirrored() );
+        origCellLayers[cell] = cell->GetLayer();
+        origMirrorSettings[cell] = cell->IsMirrored();
     }
 
     if( aFlipDirection == FLIP_DIRECTION::TOP_BOTTOM )
@@ -627,10 +637,10 @@ void PCB_TABLE::Mirror( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
 
     SetLayer( origLayer );
 
-    for( size_t i = 0; i < m_cells.size(); ++i )
+    for( PCB_TABLECELL* cell : m_cells )
     {
-        m_cells[i]->SetLayer( origCellLayers[i] );
-        m_cells[i]->SetMirrored( origMirrorSettings[i] );
+        cell->SetLayer( origCellLayers[cell] );
+        cell->SetMirrored( origMirrorSettings[cell] );
     }
 }
 
@@ -654,6 +664,9 @@ const BOX2I PCB_TABLE::GetBoundingBox() const
     for( PCB_TABLECELL* cell : m_cells )
         bbox.Merge( cell->GetBoundingBox() );
 
+    if( m_strokeExternal )
+        bbox.Inflate( m_borderStroke.GetWidth() / 2 );
+
     return bbox;
 }
 
@@ -671,12 +684,14 @@ double PCB_TABLE::ViewGetLOD( int aLayer, const KIGFX::VIEW* aView ) const
 void PCB_TABLE::DrawBorders( const std::function<void( const VECTOR2I& aPt1, const VECTOR2I& aPt2,
                                                        const STROKE_PARAMS& aStroke )>& aCallback ) const
 {
+    if( m_cells.empty() )   // Shouldn't be possible....
+        return;
+
     EDA_ANGLE             drawAngle = GetCell( 0, 0 )->GetDrawRotation();
     std::vector<VECTOR2I> topLeft = GetCell( 0, 0 )->GetCornersInSequence( drawAngle );
     std::vector<VECTOR2I> bottomLeft = GetCell( GetRowCount() - 1, 0 )->GetCornersInSequence( drawAngle );
     std::vector<VECTOR2I> topRight = GetCell( 0, GetColCount() - 1 )->GetCornersInSequence( drawAngle );
-    std::vector<VECTOR2I> bottomRight =
-            GetCell( GetRowCount() - 1, GetColCount() - 1 )->GetCornersInSequence( drawAngle );
+    std::vector<VECTOR2I> botRight = GetCell( GetRowCount() - 1, GetColCount() - 1 )->GetCornersInSequence( drawAngle );
     STROKE_PARAMS stroke;
 
     for( int col = 0; col < GetColCount() - 1; ++col )
@@ -734,8 +749,8 @@ void PCB_TABLE::DrawBorders( const std::function<void( const VECTOR2I& aPt1, con
     if( StrokeExternal() && GetBorderStroke().GetWidth() >= 0 )
     {
         aCallback( topLeft[0], topRight[1], GetBorderStroke() );
-        aCallback( topRight[1], bottomRight[2], GetBorderStroke() );
-        aCallback( bottomRight[2], bottomLeft[3], GetBorderStroke() );
+        aCallback( topRight[1], botRight[2], GetBorderStroke() );
+        aCallback( botRight[2], bottomLeft[3], GetBorderStroke() );
         aCallback( bottomLeft[3], topLeft[0], GetBorderStroke() );
     }
 }
@@ -932,6 +947,9 @@ int PCB_TABLE::Compare( const PCB_TABLE* aTable, const PCB_TABLE* aOther )
         if( ( diff = aTable->GetColWidth( col ) - aOther->GetColWidth( col ) ) != 0 )
             return diff;
     }
+
+    if( ( diff = aTable->GetRowCount() - aOther->GetRowCount() ) != 0 )
+        return diff;
 
     for( int row = 0; row < aTable->GetRowCount(); ++row )
     {

@@ -25,6 +25,7 @@ set( QA_KIMATH_SRCS
 
     geometry/geom_test_utils.cpp
     geometry/test_arc_chord_params.cpp
+    geometry/test_arc_construction.cpp
     geometry/test_bezier.cpp
     geometry/test_chamfer.cpp
     geometry/test_circle.cpp
@@ -52,6 +53,7 @@ set( QA_KIMATH_SRCS
     geometry/test_shape_poly_set_distance.cpp
     geometry/test_shape_poly_set_iterator.cpp
     geometry/test_shape_poly_set_split_outlines.cpp
+    geometry/test_shape_poly_set_triangle_index.cpp
     geometry/test_shape_line_chain.cpp
     geometry/test_shape_line_chain_collision.cpp
     geometry/test_transform_trs.cpp
@@ -66,6 +68,7 @@ set( QA_KIMATH_SRCS
     math/test_vector2.cpp
     math/test_vector3.cpp
     math/test_util.cpp
+    math/test_wide_int.cpp
 )
 
 if( WIN32 )

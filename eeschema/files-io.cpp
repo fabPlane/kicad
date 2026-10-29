@@ -67,6 +67,7 @@
 #include <symbol_import_reconciler.h>
 #include <tool/actions.h>
 #include <tool/tool_manager.h>
+#include <tools/sch_actions.h>
 #include <tools/sch_editor_control.h>
 #include <tools/sch_navigate_tool.h>
 #include <trace_helpers.h>
@@ -94,6 +95,35 @@
 #include "widgets/filedlg_hook_save_project.h"
 #include "widgets/panel_remote_symbol.h"
 #include "save_project_utils.h"
+
+
+bool SCH_EDIT_FRAME::ReloadFromDisk()
+{
+    wxString file = Schematic().GetFileName();
+
+    if( file.IsEmpty() )
+        return false;
+
+    // Resolve the filename before changing sheets.
+    file = Prj().AbsolutePath( file );
+
+    if( GetCurrentSheet().Last() != &Schematic().Root() )
+    {
+        // Use the hierarchy's root path so it includes the root sheet's KIID.
+        SCH_SHEET_PATH rootSheetPath = Schematic().Hierarchy().at( 0 );
+        GetToolManager()->RunAction<SCH_SHEET_PATH*>( SCH_ACTIONS::changeSheet, &rootSheetPath );
+    }
+
+    // The caller already handled confirmation, so skip the save prompt.
+    SCH_SCREENS screens( Schematic().Root() );
+
+    for( SCH_SCREEN* screen = screens.GetFirst(); screen; screen = screens.GetNext() )
+        screen->SetContentModified( false );
+
+    ReleaseFile();
+    return OpenProjectFiles( std::vector<wxString>( 1, file ), KICTL_REVERT );
+}
+
 
 bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, int aCtl )
 {
@@ -229,8 +259,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
     if( isNonKicadImport )
     {
         progressReporter.Hide();
-        importFile( fullFileName, schFileType, nullptr );
-        return true;
+        return importFile( fullFileName, schFileType, nullptr );
     }
 
     if( schFileType == SCH_IO_MGR::SCH_LEGACY )
@@ -254,7 +283,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         Prj().SetElem( PROJECT::ELEM::LEGACY_SYMBOL_LIBS, nullptr );
     }
 
-    wxFileName rfn( GetCurrentFileName() );
+    wxFileName rfn( fullFileName );
     rfn.MakeRelativeTo( Prj().GetProjectPath() );
     LoadWindowState( rfn.GetFullPath() );
 
@@ -318,7 +347,8 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                     // Load each top-level sheet
                     for( const TOP_LEVEL_SHEET_INFO& sheetInfo : topLevelSheets )
                     {
-                        wxFileName sheetFileName( Prj().GetProjectPath(), sheetInfo.filename );
+                        wxFileName sheetFileName( sheetInfo.filename );
+                        sheetFileName.MakeAbsolute( Prj().GetProjectPath() );
 
                         // When loading legacy schematic files, ensure we are referencing the correct extension
                         if( schFileType == SCH_IO_MGR::SCH_LEGACY )
@@ -714,9 +744,11 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         // Older files can omit implied junctions. Repair them before publishing connectivity;
         // repairing current files could instead connect an intentional wire crossing.
         const bool nativeNeedsFixup = schFileType == SCH_IO_MGR::SCH_KICAD
-                                && Schematic().RootScreen()->GetFileFormatVersionAtLoad()
-                                           < SEXPR_SCHEMATIC_FILE_VERSION;
+                            && Schematic().RootScreen()->GetFileFormatVersionAtLoad() < SEXPR_SCHEMATIC_FILE_VERSION;
 
+        // Don't include in commit or call OnModify(); this fixup is necessary to move forward
+        // but isn't required in the older files.  If they discard this file and open it again,
+        // we'll just re-apply the fixup.
         if( schFileType == SCH_IO_MGR::SCH_LEGACY || nativeNeedsFixup )
             Schematic().FixupJunctionsAfterImport();
 
@@ -843,6 +875,9 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
     m_remoteSymbolPane->BindWebViewLoaded();
 
+    // A standalone editor has no project manager to attach the git session for it.
+    RefreshGitCommitPane();
+
     if( m_apiHandler )
         m_apiHandler->NotifyDocumentOpened();
 
@@ -966,7 +1001,7 @@ void SCH_EDIT_FRAME::OnImportProject()
 }
 
 
-bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSavePath )
+bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSavePath, bool isSaveAs )
 {
     wxString msg;
     wxFileName schematicFileName;
@@ -1050,7 +1085,8 @@ bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSave
 
     if( success )
     {
-        screen->SetContentModified( false );
+        if( !isSaveAs )
+            screen->SetContentModified( false );
 
         msg.Printf( _( "File '%s' saved." ),  screen->GetFileName() );
         SetStatusText( msg, 0 );
@@ -1368,7 +1404,7 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
         if( !saveCopy && tmpFn.GetFullPath() != screen->GetFileName() )
             screen->AssignNewUuid();
 
-        bool savedThisSheet = saveSchematicFile( screens.GetSheet( i ), tmpFn.GetFullPath() );
+        bool savedThisSheet = saveSchematicFile( screens.GetSheet( i ), tmpFn.GetFullPath(), saveCopy );
 
         if( savedThisSheet )
             savedSheetPaths.push_back( tmpFn.GetFullPath() );
@@ -1427,7 +1463,7 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
     // Record a full project snapshot so related files (symbols, libs, sheets) are captured.
     // Skip when running standalone without a project loaded - the save path can land
     // anywhere on the filesystem and there is no project context for a snapshot.
-    if( success && !Prj().IsNullProject() )
+    if( success && !saveCopy && !Prj().IsNullProject() )
     {
         Kiway().LocalHistory().RunRegisteredSaversAndCommit( Prj().GetProjectPath(), wxS( "SCH Save" ), wxS( "sch" ) );
 
@@ -1471,6 +1507,9 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
         m_infoBar->ShowMessageFor( backupMsg.Trim(), 10000, wxICON_WARNING );
     }
 
+    if( success )
+        RefreshGitCommitPane();
+
     return success;
 }
 
@@ -1478,6 +1517,7 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
 bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
                                  const std::map<std::string, UTF8>* aProperties )
 {
+    bool                   success = true;
     wxFileName             filename( aFileName );
     wxFileName             newfilename;
     SCH_IO_MGR::SCH_FILE_T fileType = (SCH_IO_MGR::SCH_FILE_T) aFileType;
@@ -1507,6 +1547,8 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
     case SCH_IO_MGR::SCH_DIPTRACE:
     case SCH_IO_MGR::SCH_PCAD:
     case SCH_IO_MGR::SCH_ORCAD:
+    case SCH_IO_MGR::SCH_EASYPC:
+    case SCH_IO_MGR::SCH_TARGET3001:
     {
         // We insist on caller sending us an absolute path, if it does not, we say it's a bug.
         // Unless we are passing the files in aproperties, in which case aFileName can be empty.
@@ -1572,6 +1614,9 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
                 {
                     errorReporter.m_Reporter->Flush(); // Build HTML messages
                     errorReporter.ShowModal();
+
+                    // These are not catastrophic errors: leave success set to true so the caller
+                    // doesn't destroy the frame.
                 }
 
                 const wxString drawingSheetName = Schematic().Settings().m_SchDrawingSheetFileName;
@@ -1635,6 +1680,8 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
 
             msg.Printf( _( "Failed to load '%s'." ), aFileName );
             SetMsgPanel( wxEmptyString, msg );
+
+            success = false;
         }
         catch( const std::exception& exc )
         {
@@ -1646,6 +1693,8 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
 
             msg.Printf( _( "Failed to load '%s'." ), aFileName );
             SetMsgPanel( wxEmptyString, msg );
+
+            success = false;
         }
 
         ClearUndoRedoList();
@@ -1695,7 +1744,7 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
         break;
     }
 
-    return true;
+    return success;
 }
 
 

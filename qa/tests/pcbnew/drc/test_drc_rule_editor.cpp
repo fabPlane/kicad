@@ -42,8 +42,13 @@
 #include <drc/rule_editor/drc_re_rule_saver.h>
 #include <drc/drc_engine.h>
 #include <drc/drc_rule_condition.h>
+#include <drc/drc_rule_parser.h>
+#include <pcbnew/pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
+#include <pcbnew_utils/board_file_utils.h>
+#include <reporter.h>
 #include <dialogs/rule_editor_dialog_base.h>
 #include <footprint.h>
+#include <pcbnew_utils/board_file_utils.h>
 
 BOOST_AUTO_TEST_SUITE( DRC_RULE_EDITOR )
 
@@ -398,6 +403,64 @@ BOOST_AUTO_TEST_CASE( DeletedSplitEntryStaysDeleted )
     }
 
     BOOST_CHECK_EQUAL( constraints, 1 );
+}
+
+
+// Regenerated rules must keep their layers on a board with user layer names
+BOOST_AUTO_TEST_CASE( EditedRulesKeepTheirLayers )
+{
+    const std::string path = KI_TEST::GetPcbnewTestDataDir() + "issue24211/issue24211";
+
+    PCB_IO_KICAD_SEXPR     plugin;
+    std::unique_ptr<BOARD> board = plugin.LoadBoard( path + ".kicad_pcb" );
+
+    BOOST_REQUIRE( board );
+    BOOST_REQUIRE( board->GetLayerName( F_Cu ) == wxS( "top_layer" ) );
+
+    auto layersByRule =
+            []( const wxString& aText )
+            {
+                DRC_RULES_PARSER                       parser( aText, wxS( "issue24211" ) );
+                WX_STRING_REPORTER                     reporter;
+                std::vector<std::shared_ptr<DRC_RULE>> rules;
+
+                parser.Parse( rules, &reporter );
+
+                BOOST_CHECK_MESSAGE( !reporter.HasMessageOfSeverity( RPT_SEVERITY_ERROR ),
+                                     reporter.GetMessages().ToStdString() << aText.ToStdString() );
+
+                std::map<wxString, LSET> layers;
+
+                for( const std::shared_ptr<DRC_RULE>& rule : rules )
+                    layers[rule->m_Name] = rule->m_LayerCondition;
+
+                return layers;
+            };
+
+    wxString original;
+    wxFFile  file( path + ".kicad_dru", "r" );
+
+    BOOST_REQUIRE( file.ReadAll( &original ) );
+
+    DRC_RULE_LOADER                        loader;
+    std::vector<DRC_RE_LOADED_PANEL_ENTRY> entries = loader.LoadFile( path + ".kicad_dru" );
+
+    BOOST_REQUIRE( !entries.empty() );
+
+    for( DRC_RE_LOADED_PANEL_ENTRY& entry : entries )
+        entry.wasEdited = true;
+
+    DRC_RULE_SAVER saver;
+
+    BOOST_CHECK( layersByRule( saver.GenerateRulesText( entries, board.get() ) ) == layersByRule( original ) );
+
+    // A layer set without source text, as a caller other than the loader builds it
+    entries.resize( 1 );
+    entries[0].layerCondition = LSET( { F_Cu } );
+
+    std::map<wxString, LSET> single = layersByRule( saver.GenerateRulesText( entries, board.get() ) );
+
+    BOOST_CHECK( single[entries[0].ruleName] == LSET( { F_Cu } ) );
 }
 
 
@@ -1528,45 +1591,67 @@ BOOST_AUTO_TEST_CASE( RuleLoaderNumericConstraints )
 
 // A ratio is stored scaled by 1000, so the editor has to scale it back. The depth beside it is
 // a plain count and must come through untouched.
-BOOST_AUTO_TEST_CASE( RuleLoaderMicroviaRatioRoundTrip )
+BOOST_AUTO_TEST_CASE( RuleLoaderHoleRatioRoundTrip )
 {
     wxString ruleText = "(version 1)\n"
                         "(rule \"Ratio\"\n"
-                        "    (constraint microvia_aspect_ratio (max 1.0)))\n"
+                        "    (constraint hole_aspect_ratio (max 1.0))\n"
+                        "    (condition \"A.Via_Type == 'Micro'\"))\n"
+                        "(rule \"HoleRatio\"\n"
+                        "    (constraint hole_aspect_ratio (max 8.0)))\n"
                         "(rule \"Depth\"\n"
                         "    (constraint microvia_stack_depth (max 3)))";
 
     DRC_RULE_LOADER                        loader;
     std::vector<DRC_RE_LOADED_PANEL_ENTRY> entries = loader.LoadFromString( ruleText );
 
-    BOOST_REQUIRE_EQUAL( entries.size(), 2 );
-    BOOST_CHECK_EQUAL( entries[0].panelType, MICROVIA_ASPECT_RATIO );
-    BOOST_CHECK_EQUAL( entries[1].panelType, MICROVIA_STACK_DEPTH );
+    // One panel owns the constraint. Scoping it to microvias is a condition, not another panel.
+    BOOST_REQUIRE_EQUAL( entries.size(), 3 );
+    BOOST_CHECK_EQUAL( entries[0].panelType, HOLE_ASPECT_RATIO );
+    BOOST_CHECK_EQUAL( entries[1].panelType, HOLE_ASPECT_RATIO );
+    BOOST_CHECK_EQUAL( entries[2].panelType, MICROVIA_STACK_DEPTH );
 
-    auto ratio = std::dynamic_pointer_cast<DRC_RE_NUMERIC_INPUT_CONSTRAINT_DATA>( entries[0].constraintData );
-    auto depth = std::dynamic_pointer_cast<DRC_RE_NUMERIC_INPUT_CONSTRAINT_DATA>( entries[1].constraintData );
+    auto scoped = std::dynamic_pointer_cast<DRC_RE_NUMERIC_INPUT_CONSTRAINT_DATA>( entries[0].constraintData );
+    auto plain = std::dynamic_pointer_cast<DRC_RE_NUMERIC_INPUT_CONSTRAINT_DATA>( entries[1].constraintData );
+    auto depth = std::dynamic_pointer_cast<DRC_RE_NUMERIC_INPUT_CONSTRAINT_DATA>( entries[2].constraintData );
 
-    BOOST_REQUIRE( ratio );
+    BOOST_REQUIRE( scoped );
+    BOOST_REQUIRE( plain );
     BOOST_REQUIRE( depth );
-    BOOST_CHECK_CLOSE( ratio->GetNumericInputValue(), 1.0, 0.0001 );
+    BOOST_CHECK_CLOSE( scoped->GetNumericInputValue(), 1.0, 0.0001 );
+    BOOST_CHECK_CLOSE( plain->GetNumericInputValue(), 8.0, 0.0001 );
     BOOST_CHECK_CLOSE( depth->GetNumericInputValue(), 3.0, 0.0001 );
+
+    BOOST_CHECK_EQUAL( scoped->GetRuleCondition(), wxString( wxS( "A.Via_Type == 'Micro'" ) ) );
+    BOOST_CHECK( plain->GetRuleCondition().IsEmpty() );
 
     entries[0].wasEdited = true;
     entries[1].wasEdited = true;
+    entries[2].wasEdited = true;
 
     DRC_RULE_SAVER                         saver;
     std::vector<DRC_RE_LOADED_PANEL_ENTRY> reloaded =
             loader.LoadFromString( saver.GenerateRulesText( entries, nullptr ) );
 
-    BOOST_REQUIRE_EQUAL( reloaded.size(), 2 );
+    BOOST_REQUIRE_EQUAL( reloaded.size(), 3 );
+    BOOST_CHECK_EQUAL( reloaded[0].panelType, HOLE_ASPECT_RATIO );
+    BOOST_CHECK_EQUAL( reloaded[1].panelType, HOLE_ASPECT_RATIO );
+    BOOST_CHECK_EQUAL( reloaded[2].panelType, MICROVIA_STACK_DEPTH );
 
-    auto ratioAgain = std::dynamic_pointer_cast<DRC_RE_NUMERIC_INPUT_CONSTRAINT_DATA>( reloaded[0].constraintData );
-    auto depthAgain = std::dynamic_pointer_cast<DRC_RE_NUMERIC_INPUT_CONSTRAINT_DATA>( reloaded[1].constraintData );
+    auto scopedAgain = std::dynamic_pointer_cast<DRC_RE_NUMERIC_INPUT_CONSTRAINT_DATA>( reloaded[0].constraintData );
+    auto plainAgain = std::dynamic_pointer_cast<DRC_RE_NUMERIC_INPUT_CONSTRAINT_DATA>( reloaded[1].constraintData );
+    auto depthAgain = std::dynamic_pointer_cast<DRC_RE_NUMERIC_INPUT_CONSTRAINT_DATA>( reloaded[2].constraintData );
 
-    BOOST_REQUIRE( ratioAgain );
+    BOOST_REQUIRE( scopedAgain );
+    BOOST_REQUIRE( plainAgain );
     BOOST_REQUIRE( depthAgain );
-    BOOST_CHECK_CLOSE( ratioAgain->GetNumericInputValue(), 1.0, 0.0001 );
+    BOOST_CHECK_CLOSE( scopedAgain->GetNumericInputValue(), 1.0, 0.0001 );
+    BOOST_CHECK_CLOSE( plainAgain->GetNumericInputValue(), 8.0, 0.0001 );
     BOOST_CHECK_CLOSE( depthAgain->GetNumericInputValue(), 3.0, 0.0001 );
+
+    // The scoping survives the trip, which is what keeps the two rules distinct.
+    BOOST_CHECK_EQUAL( scopedAgain->GetRuleCondition(), wxString( wxS( "A.Via_Type == 'Micro'" ) ) );
+    BOOST_CHECK( plainAgain->GetRuleCondition().IsEmpty() );
 }
 
 
@@ -1792,6 +1877,30 @@ BOOST_AUTO_TEST_CASE( RuleSaverLoadSaveRoundTrip )
     BOOST_CHECK_EQUAL( reloadedEntries[0].panelType, entries[0].panelType );
 }
 
+BOOST_AUTO_TEST_CASE( RuleSaverKeepsUneditedFileIntact )
+{
+    // issue16182 comments each rule outside it, and issue20480 has two rules sharing name and condition
+    for( const char* name : { "issue16182.kicad_dru", "issue20480/issue20480.kicad_dru" } )
+    {
+        BOOST_TEST_CONTEXT( name )
+        {
+            wxString path = KI_TEST::GetPcbnewTestDataDir() + name;
+            wxString content;
+            wxFFile  file( path, "r" );
+
+            BOOST_REQUIRE( file.IsOpened() );
+            file.ReadAll( &content );
+
+            DRC_RULE_LOADER                        loader;
+            std::vector<DRC_RE_LOADED_PANEL_ENTRY> entries = loader.LoadFile( path );
+            DRC_RULE_SAVER                         saver;
+
+            BOOST_REQUIRE( !entries.empty() );
+            BOOST_CHECK_EQUAL( saver.GenerateRulesText( entries, nullptr, loader.GetFileTrivia() ), content );
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE( RuleSaverPreservesQuotedNameWithSpaces )
 {
     // Issue 23852: editing a rule named like "Annular width: LEDs" must not rewrite
@@ -1852,11 +1961,11 @@ BOOST_AUTO_TEST_CASE( RuleSaverPreservesBareSymbolNameUnquoted )
 
 BOOST_AUTO_TEST_CASE( RuleSaverQuotesNameStartingWithDigit )
 {
-    // Names starting with a digit must be quoted so S-expression parsers treat them
+    // Names that pass DSNLEXER's isNumber() test must be quoted so S-expression parsers treat them
     // as a symbol rather than a numeric literal.
     DRC_RE_LOADED_PANEL_ENTRY entry;
     entry.panelType = MINIMUM_CLEARANCE;
-    entry.ruleName = wxS( "3.3V_Power" );
+    entry.ruleName = wxS( "3.3" );
     entry.wasEdited = true;
 
     auto numericData = std::make_shared<DRC_RE_NUMERIC_INPUT_CONSTRAINT_DATA>();
@@ -1869,12 +1978,12 @@ BOOST_AUTO_TEST_CASE( RuleSaverQuotesNameStartingWithDigit )
     std::vector<DRC_RE_LOADED_PANEL_ENTRY> entries = { entry };
     wxString result = saver.GenerateRulesText( entries, nullptr );
 
-    BOOST_CHECK( result.Contains( wxS( "\"3.3V_Power\"" ) ) );
+    BOOST_CHECK( result.Contains( wxS( "\"3.3\"" ) ) );
 
     DRC_RULE_LOADER loader;
     std::vector<DRC_RE_LOADED_PANEL_ENTRY> reloaded = loader.LoadFromString( result );
     BOOST_REQUIRE_EQUAL( reloaded.size(), 1 );
-    BOOST_CHECK_EQUAL( reloaded[0].ruleName, "3.3V_Power" );
+    BOOST_CHECK_EQUAL( reloaded[0].ruleName, "3.3" );
 }
 
 
@@ -2122,6 +2231,16 @@ BOOST_AUTO_TEST_CASE( IntegrationSplitRulePreservesOrder )
     BOOST_CHECK( lastBIndex < firstCIndex );
 }
 
+
+// A selector rebuilds only its own test, so anything more must stay a custom query
+BOOST_AUTO_TEST_CASE( SelectorConditionKeepsWholeTest )
+{
+    using KIND = DRC_RULE_EDITOR_UTILS::SELECTOR_KIND;
+
+    BOOST_CHECK( !DRC_RULE_EDITOR_UTILS::ParseSelectorCondition( wxS( "hasNetclass('N') == 0" ) ) );
+    BOOST_CHECK( DRC_RULE_EDITOR_UTILS::ParseSelectorCondition( wxS( "enclosedByArea('R')" ) )->kind
+                 == KIND::ENCLOSED_BY_AREA );
+}
 
 // ============================================================================
 // Condition Group Panel Tests

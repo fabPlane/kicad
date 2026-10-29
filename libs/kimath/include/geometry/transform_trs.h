@@ -55,9 +55,15 @@ public:
     TRANSFORM_TRS RescaleAround( const VECTOR2I& aFixedPoint, double aSx, double aSy ) const;
 
     bool IsIdentity() const;
+
+    /// Scales that differ only by rounding count as equal, so a pure rotation stays uniform
     bool IsUniformScale() const;
 
+    /// True when both scales are 1, ignoring rounding
+    bool HasUnitScale() const;
+
     double ApplyLinearScale( double aLength ) const;
+    double InverseApplyLinearScale( double aLength ) const;
 
     const VECTOR2I&  GetTranslate() const { return m_translate; }
     const EDA_ANGLE& GetRotate() const { return m_rotate; }

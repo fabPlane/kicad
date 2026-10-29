@@ -47,9 +47,12 @@ PCB_FIELD::PCB_FIELD( FOOTPRINT* aParent, FIELD_T aFieldId, const wxString& aNam
 PCB_FIELD::PCB_FIELD( const PCB_TEXT& aText, FIELD_T aFieldId, const wxString& aName ) :
         PCB_TEXT( aText.GetParent(), PCB_FIELD_T ),
         m_id( aFieldId ),
-        m_ordinal( static_cast<int>( aFieldId ) ),
+        m_ordinal( 0 ),
         m_name( aName )
 {
+    if( m_id == FIELD_T::USER && GetParentFootprint() )
+        m_ordinal = GetParentFootprint()->GetNextFieldOrdinal();
+
     PCB_TEXT::operator=( aText );
 }
 
@@ -135,6 +138,14 @@ wxString PCB_FIELD::GetUntranslatedName() const
 
 wxString PCB_FIELD::GetShownText( RESOLUTION_CONTEXT aContext, int aDepth ) const
 {
+    const BOARD* board = GetBoard();
+    return GetShownText( board ? board->GetCurrentVariant() : wxString(), aContext, aDepth );
+}
+
+
+wxString PCB_FIELD::GetShownText( const wxString& aVariantName, RESOLUTION_CONTEXT aContext,
+                                   int aDepth ) const
+{
     const FOOTPRINT* parentFootprint = GetParentFootprint();
     const BOARD*     board = GetBoard();
     wxString         text;
@@ -143,15 +154,13 @@ wxString PCB_FIELD::GetShownText( RESOLUTION_CONTEXT aContext, int aDepth ) cons
 
     if( parentFootprint && board )
     {
-        const wxString& variantName = board->GetCurrentVariant();
-
-        if( !variantName.IsEmpty() && variantName.CmpNoCase( GetDefaultVariantName() ) != 0 )
+        if( !aVariantName.IsEmpty() && aVariantName.CmpNoCase( GetDefaultVariantName() ) != 0 )
         {
-            if( const FOOTPRINT_VARIANT* variant = parentFootprint->GetVariant( variantName ) )
+            if( const FOOTPRINT_VARIANT* variant = parentFootprint->GetVariant( aVariantName ) )
             {
                 if( variant->HasFieldValue( GetName() ) )
                 {
-                    text = parentFootprint->GetFieldValueForVariant( variantName, GetName() );
+                    text = parentFootprint->GetFieldValueForVariant( aVariantName, GetName() );
 
                     // Variable references in variant values are considered to be in schematic scope,
                     // and are thus resolved before the footprint gets them.
@@ -177,10 +186,10 @@ wxString PCB_FIELD::GetShownText( RESOLUTION_CONTEXT aContext, int aDepth ) cons
                     return true;
                 }
 
-                if( parentFootprint && parentFootprint->ResolveTextVar( token, aDepth + 1 ) )
+                if( parentFootprint && parentFootprint->ResolveTextVar( token, aVariantName, aDepth + 1 ) )
                     return true;
 
-                if( board && board->ResolveTextVar( token, aDepth + 1 ) )
+                if( board && board->ResolveTextVar( token, aVariantName, aDepth + 1 ) )
                     return true;
 
                 return false;

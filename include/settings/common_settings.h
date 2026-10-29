@@ -92,6 +92,8 @@ public:
 
         /// Maximum total size of backups (bytes), 0 for unlimited
         unsigned long long limit_total_size;
+
+        constexpr static unsigned long long UNLIMITED_SIZE = 0; ///< Value representing unlimited total size
     };
 
     struct ENVIRONMENT
@@ -186,6 +188,13 @@ public:
         bool sim_model;
     };
 
+    // Sticky "Use relative path" choice, remembered per file-picker context.
+    struct RELATIVE_PATH_DEFAULTS
+    {
+        bool drawing_sheet;
+        bool jobset_destination;
+    };
+
     struct PACKAGE_MANAGER
     {
         int sash_pos;
@@ -210,6 +219,7 @@ public:
         bool                        useDefaultAuthor;
         wxString                    authorName;
         wxString                    authorEmail;
+        bool                        showContributorAvatars;
     };
 
     struct API
@@ -277,6 +287,7 @@ public:
     SYSTEM              m_System;
     DO_NOT_SHOW_AGAIN   m_DoNotShowAgain;
     EMBED_FILE_DEFAULTS m_EmbedFileDefaults;
+    RELATIVE_PATH_DEFAULTS m_RelativePathDefaults;
     PACKAGE_MANAGER     m_PackageManager;
     GIT                 m_Git;
     API                 m_Api;

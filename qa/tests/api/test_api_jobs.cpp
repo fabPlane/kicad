@@ -25,6 +25,7 @@
 #include <wx/filename.h>
 
 #include <boost/test/unit_test.hpp>
+#include <gestfich.h>
 #include <qa_utils/file_utils.h>
 #include <qa_utils/wx_utils/unit_test_utils.h>
 
@@ -37,6 +38,11 @@
 #include <api/board/board_types.pb.h>
 #include <api/schematic/schematic_jobs.pb.h>
 
+#include <api/board/board_commands.pb.h>
+
+#include <wx/file.h>
+
+#include <footprint.h>
 
 /**
  * Compare two text files line-by-line, optionally skipping the first @a aSkipLines lines of each
@@ -115,7 +121,7 @@ static size_t countOccurrences( const std::string& aHaystack, const std::string&
 
 
 /**
- * Return every distinct #RRGGBB literal appearing in @a aSvg.
+ * Return every distinct \#RRGGBB literal appearing in @a aSvg.
  */
 static std::set<std::string> collectColours( const std::string& aSvg )
 {
@@ -411,6 +417,88 @@ BOOST_FIXTURE_TEST_CASE( ExportBoardDrill, API_SERVER_E2E_FIXTURE )
     wxString goldenPath = testDataDir + wxS( "basic_test_excellon_inches.drl" );
     BOOST_CHECK_MESSAGE( textFilesMatch( goldenPath, generatedDrillPath, 5 ),
                          "Drill output does not match golden file" );
+}
+
+
+BOOST_FIXTURE_TEST_CASE( ExportBoardOdbVariants, API_SERVER_E2E_FIXTURE )
+{
+    BOOST_REQUIRE_MESSAGE( Start(), LastError() );
+
+    wxFileName boardPath( wxString::FromUTF8( KI_TEST::GetTestDataRootDir() ) + wxS( "pcbnew/issue24735/" ),
+                          wxS( "issue24735.kicad_pcb" ) );
+
+    kiapi::common::types::DocumentSpecifier document;
+
+    BOOST_REQUIRE_MESSAGE( Client().OpenDocument( boardPath.GetFullPath(), &document ),
+                           "OpenDocument failed: " + Client().LastError() );
+
+    KI_TEST::SCOPED_TEMP_DIR tempDir( "api_job_odb" );
+    wxFileName               target( tempDir.CreateChildDirStr( "odb" ), wxS( "combined" ) );
+
+    kiapi::board::jobs::RunBoardJobExportODB request;
+    *request.mutable_job_settings()->mutable_document() = document;
+    request.mutable_job_settings()->set_output_path( target.GetFullPath().ToUTF8().data() );
+    request.set_units( kiapi::common::types::U_MM );
+    request.set_compression( kiapi::board::jobs::ODBC_NONE );
+    request.add_variant_names( "var1" );
+    request.add_variant_names( "var2" );
+    request.set_variant_packaging( kiapi::board::jobs::ODBVP_COMBINED );
+
+    kiapi::common::types::RunJobResponse response;
+    BOOST_REQUIRE_MESSAGE( Client().RunJob( request, &response ), "RunJob failed: " + Client().LastError() );
+    BOOST_REQUIRE_MESSAGE( response.status() == kiapi::common::types::JS_SUCCESS,
+                           "Job failed: " + wxString::FromUTF8( response.message() ) );
+
+    auto hasLine = []( const wxString& aPackage, const wxString& aDir, const std::string& aLine )
+    {
+        wxFileName    file( aPackage + wxFileName::GetPathSeparator() + aDir, wxS( "attrlist" ) );
+        std::ifstream input( ToFsPath( file.GetFullPath() ) );
+        std::string   line;
+
+        while( std::getline( input, line ) )
+        {
+            if( line == aLine )
+                return true;
+        }
+
+        return false;
+    };
+
+    BOOST_REQUIRE_EQUAL( response.output_path_size(), 1 );
+    wxString combined = wxString::FromUTF8( response.output_path( 0 ) );
+    BOOST_REQUIRE_MESSAGE( wxFileName::DirExists( combined ), "Missing reported output " + combined );
+    BOOST_CHECK_MESSAGE( wxFileName::DirName( combined ).SameAs( wxFileName::DirName( target.GetFullPath() ) ),
+                         "Combined output ignored the requested path: " + combined );
+    BOOST_CHECK( hasLine( combined, wxS( "misc" ), ".variant_list=var1:var2" ) );
+    BOOST_CHECK( hasLine( combined, wxS( "steps/pcb" ), ".current_variant=var1" ) );
+
+    // One package per variant proves every repeated variant name reached the job
+    wxFileName separateTarget( tempDir.CreateChildDirStr( "odb_separate" ), wxS( "separate" ) );
+    request.mutable_job_settings()->set_output_path( separateTarget.GetFullPath().ToUTF8().data() );
+    request.set_variant_packaging( kiapi::board::jobs::ODBVP_SEPARATE );
+    response.Clear();
+
+    BOOST_REQUIRE_MESSAGE( Client().RunJob( request, &response ), "RunJob failed: " + Client().LastError() );
+    BOOST_REQUIRE_MESSAGE( response.status() == kiapi::common::types::JS_SUCCESS,
+                           "Separate job failed: " + wxString::FromUTF8( response.message() ) );
+    BOOST_REQUIRE_EQUAL( response.output_path_size(), 2 );
+    std::set<std::string> currentVariants;
+
+    for( int i = 0; i < response.output_path_size(); ++i )
+    {
+        wxString package = wxString::FromUTF8( response.output_path( i ) );
+        BOOST_REQUIRE_MESSAGE( wxFileName::DirExists( package ), "Missing reported output " + package );
+        BOOST_CHECK_MESSAGE( package.StartsWith( separateTarget.GetFullPath() + wxS( "-" ) ),
+                             "Separate output ignored the requested path: " + package );
+
+        for( const std::string variant : { "var1", "var2" } )
+        {
+            if( hasLine( package, wxS( "steps/pcb" ), ".current_variant=" + variant ) )
+                currentVariants.insert( variant );
+        }
+    }
+
+    BOOST_CHECK( currentVariants == std::set<std::string>( { "var1", "var2" } ) );
 }
 
 
@@ -843,6 +931,147 @@ BOOST_FIXTURE_TEST_CASE( ExportBoardSpecctra, API_SERVER_E2E_FIXTURE )
         wxRemoveFile( outputPath.GetFullPath() );
 
     wxRemoveFile( tempFile );
+}
+
+
+BOOST_FIXTURE_TEST_CASE( ExportBoardSpecctraDsn, API_SERVER_E2E_FIXTURE )
+{
+    BOOST_REQUIRE_MESSAGE( Start(), LastError() );
+
+    wxString testDataDir = wxString::FromUTF8( KI_TEST::GetTestDataRootDir() ) + wxS( "cli/basic_test/" );
+
+    wxFileName boardPath( testDataDir, wxS( "basic_test.kicad_pcb" ) );
+
+    kiapi::common::types::DocumentSpecifier document;
+
+    BOOST_REQUIRE_MESSAGE( Client().OpenDocument( boardPath.GetFullPath(), &document ),
+                           "OpenDocument failed: " + Client().LastError() );
+
+    KI_TEST::SCOPED_TEMP_DIR tempDir( "api_job_specctra_dsn" );
+    wxFileName               outputPath( tempDir.ChildPathStr( "basic_test.dsn" ) );
+
+    kiapi::board::jobs::RunBoardJobExportSpecctraDsn request;
+    *request.mutable_job_settings()->mutable_document() = document;
+    request.mutable_job_settings()->set_output_path( outputPath.GetFullPath().ToUTF8().data() );
+
+    kiapi::common::types::RunJobResponse response;
+    BOOST_REQUIRE_MESSAGE( Client().RunJob( request, &response ), "RunJob failed: " + Client().LastError() );
+
+    BOOST_REQUIRE_MESSAGE( response.status() == kiapi::common::types::JS_SUCCESS,
+                           "Job failed: " + wxString::FromUTF8( response.message() ) );
+    BOOST_REQUIRE_MESSAGE( response.output_path_size() > 0, "Job returned no output paths" );
+
+    wxString generatedPath = wxString::FromUTF8( response.output_path( 0 ) );
+    BOOST_REQUIRE_MESSAGE( wxFileName::FileExists( generatedPath ), "Generated DSN does not exist: " + generatedPath );
+    BOOST_CHECK_MESSAGE( generatedPath == outputPath.GetFullPath(), "Output path not honored: " + generatedPath );
+
+    const std::string dsn = KI_TEST::LoadStringData( generatedPath );
+    BOOST_CHECK( dsn.find( "(unit um)" ) != std::string::npos );
+    BOOST_CHECK( dsn.find( "(network" ) != std::string::npos );
+}
+
+
+BOOST_FIXTURE_TEST_CASE( ImportSpecctraSessionErrors, API_SERVER_E2E_FIXTURE )
+{
+    BOOST_REQUIRE_MESSAGE( Start(), LastError() );
+
+    wxString testDataDir = wxString::FromUTF8( KI_TEST::GetTestDataRootDir() ) + wxS( "cli/basic_test/" );
+
+    wxFileName boardPath( testDataDir, wxS( "basic_test.kicad_pcb" ) );
+
+    kiapi::common::types::DocumentSpecifier document;
+
+    BOOST_REQUIRE_MESSAGE( Client().OpenDocument( boardPath.GetFullPath(), &document ),
+                           "OpenDocument failed: " + Client().LastError() );
+
+    // Missing session path -> AS_BAD_REQUEST
+    {
+        kiapi::board::commands::ImportSpecctraSession request;
+        *request.mutable_board() = document;
+        request.set_session_path( wxFileName( wxS( "/nonexistent/missing.ses" ) ).GetFullPath().ToUTF8().data() );
+
+        kiapi::common::ApiResponse response;
+        BOOST_CHECK_MESSAGE( Client().SendCommand( request, &response ),
+                             "SendCommand failed: " + Client().LastError() );
+        BOOST_CHECK_EQUAL( response.status().status(), kiapi::common::AS_BAD_REQUEST );
+    }
+
+    // Malformed session -> AS_BAD_REQUEST
+    {
+        KI_TEST::SCOPED_TEMP_DIR tempDir( "api_job_specctra_ses_bad" );
+        wxFileName               sesPath( tempDir.ChildPathStr( "malformed.ses" ) );
+
+        wxFile badFile;
+        BOOST_REQUIRE( badFile.Create( sesPath.GetFullPath(), true ) );
+        badFile.Write( "(session test.ses\n  (base_design test.dsn)\n", 45 );
+        badFile.Close();
+
+        kiapi::board::commands::ImportSpecctraSession request;
+        *request.mutable_board() = document;
+        request.set_session_path( sesPath.GetFullPath().ToUTF8().data() );
+
+        kiapi::common::ApiResponse response;
+        BOOST_CHECK_MESSAGE( Client().SendCommand( request, &response ), "SendCommand failed" );
+        BOOST_CHECK_EQUAL( response.status().status(), kiapi::common::AS_BAD_REQUEST );
+        BOOST_CHECK( !response.status().error_message().empty() );
+    }
+}
+
+
+BOOST_FIXTURE_TEST_CASE( ImportSpecctraSession, API_SERVER_E2E_FIXTURE )
+{
+    BOOST_REQUIRE_MESSAGE( Start(), LastError() );
+
+    wxString testDataDir = wxString::FromUTF8( KI_TEST::GetTestDataRootDir() ) + wxS( "cli/basic_test/" );
+
+    wxFileName boardPath( testDataDir, wxS( "basic_test.kicad_pcb" ) );
+
+    kiapi::common::types::DocumentSpecifier document;
+
+    BOOST_REQUIRE_MESSAGE( Client().OpenDocument( boardPath.GetFullPath(), &document ),
+                           "OpenDocument failed: " + Client().LastError() );
+
+    FOOTPRINT footprint( nullptr );
+    BOOST_REQUIRE_MESSAGE( Client().GetFootprintByReference( document, wxS( "J1" ), &footprint ),
+                           "GetFootprintByReference failed: " + Client().LastError() );
+
+    VECTOR2I positionBefore = footprint.GetPosition();
+
+    wxFileName sesPath( wxString::FromUTF8( KI_TEST::GetPcbnewTestDataDir() ) + wxString( wxS( "/specctra/" ) ),
+                        wxS( "basic_test" ), wxS( "ses" ) );
+
+    BOOST_REQUIRE_MESSAGE( wxFileName::FileExists( sesPath.GetFullPath() ),
+                           "Session fixture is missing: " + sesPath.GetFullPath() );
+
+    kiapi::board::commands::ImportSpecctraSession request;
+    *request.mutable_board() = document;
+    request.set_session_path( sesPath.GetFullPath().ToUTF8().data() );
+
+    kiapi::common::ApiResponse response;
+    BOOST_REQUIRE_MESSAGE( Client().SendCommand( request, &response ),
+                           "Session import SendCommand failed: " + Client().LastError() );
+    BOOST_CHECK_EQUAL( response.status().status(), kiapi::common::AS_OK );
+
+    kiapi::board::commands::ImportSpecctraSessionResponse importResponse;
+    BOOST_REQUIRE_MESSAGE( response.message().UnpackTo( &importResponse ),
+                           "Failed to unpack ImportSpecctraSessionResponse" );
+    BOOST_CHECK_EQUAL( importResponse.skipped_count(), 0 );
+    BOOST_CHECK_MESSAGE( importResponse.report().empty(), "Unexpected importer report: "
+                           + importResponse.report() );
+
+    // The session replaces all unlocked board routes with the routed session contents
+    int traceCountAfter = 0;
+    BOOST_REQUIRE_MESSAGE( Client().GetItemsCount( document, kiapi::common::types::KOT_PCB_TRACE, &traceCountAfter ),
+                           "GetItems (traces after import) failed: " + Client().LastError() );
+    BOOST_CHECK_EQUAL( traceCountAfter, 1 );
+
+    // The session places J1 at board origin (0, 0).
+    FOOTPRINT after( nullptr );
+    BOOST_REQUIRE_MESSAGE( Client().GetFootprintByReference( document, wxS( "J1" ), &after ),
+                           "GetFootprintByReference after import failed: " + Client().LastError() );
+    BOOST_CHECK( after.GetPosition() != positionBefore );
+    BOOST_CHECK_EQUAL( after.GetPosition().x, 0 );
+    BOOST_CHECK_EQUAL( after.GetPosition().y, 0 );
 }
 
 

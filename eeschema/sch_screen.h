@@ -237,8 +237,6 @@ public:
      *          hierarchy recursion issues or bad things will happen.
      *
      * @param aScreen is the screen to append to this one.
-     * @return false if there are any duplicate sheet names or any hierarchy recursion issues the
-     *         calling this method or KiCad will crash.
      */
     void Append( SCH_SCREEN* aScreen );
 
@@ -267,7 +265,7 @@ public:
 
     /**
      * Initialize the #LIB_SYMBOL reference for each #SCH_SYMBOL found in this schematic
-     * from the project #SYMBOL_LIB_TABLE.
+     * from the project #LIBRARY_TABLE.
      *
      * Symbol library links are set using the symbol library table and will fall back to
      * the cache only if the cache is loaded.  The cache should only be loaded when opening
@@ -298,6 +296,7 @@ public:
      *       do not use a draw list and therefore plots nothing.
      *
      * @param[in] aPlotter The plotter object to plot to.
+     * @param[in] aPlotOpts The options to control the plot output.
      */
     void Plot( PLOTTER* aPlotter, const SCH_PLOT_OPTS& aPlotOpts ) const;
 
@@ -349,6 +348,14 @@ public:
     bool PruneUnusedLibSymbol( const wxString& aName );
 
     /**
+     * Include the alternate symbols that \a aSymbol's variants select in the library symbols.
+     *
+     * Alternates already present are kept unless \a aRefresh is set, in which case they are
+     * reloaded from the symbol libraries.  Alternates that no library can supply are left alone.
+     */
+    void IncludeVariantSymbols( const SCH_SYMBOL& aSymbol, bool aRefresh = false );
+
+    /**
      * Remove \a aItem from the linked list and deletes the object.
      *
      * If \a aItem is a schematic sheet label, it is removed from the screen associated with
@@ -374,6 +381,7 @@ public:
      * symbol pin or all graphical segments lines connected to \a aItem.
      *
      * @param aItem The item to test for connections.
+     * @param aSecondPass
      * @return a set of all #SCH_ITEM objects connected to \a aItem.
      */
     std::set<SCH_ITEM*> MarkConnections( SCH_ITEM* aItem, bool aSecondPass );
@@ -520,7 +528,7 @@ public:
      * @param aPosition Position to search for
      * @param aIgnoreEndpoints If true, ignore wires/buses with end points matching aPosition
      * @return Buses and wires
-    */
+     */
     std::vector<SCH_LINE*> GetBusesAndWires( const VECTOR2I& aPosition,
                                              bool aIgnoreEndpoints = false ) const;
 
@@ -536,7 +544,7 @@ public:
      *
      * @param aItems List of objects to check
      * @return Points where a junction is needed
-    */
+     */
     std::vector<VECTOR2I> GetNeededJunctions( const std::deque<EDA_ITEM*>& aItems ) const;
 
     /**
@@ -573,7 +581,7 @@ public:
      * After loading a file from disk, the library symbols do not yet contain the full
      * data for their embedded files, only a reference.  This iterates over all lib symbols
      * in the schematic and updates the library symbols with the full data.
-    */
+     */
     void FixupEmbeddedData();
 
     /**
@@ -852,6 +860,7 @@ public:
      * the list.
      *
      * @param aMarkerType Type of markers to be deleted.
+     * @param aIncludeExclusions Delete the excluded markers when true.
      */
     void DeleteAllMarkers( enum MARKER_BASE::MARKER_T aMarkerType, bool aIncludeExclusions );
 

@@ -85,7 +85,7 @@ static const std::map<wxString, ELECTRICAL_PINTYPE> pinDirectionsMap = {
 };
 
 
-///< Compute a bounding box for all items in a schematic sheet
+/// Compute a bounding box for all items in a schematic sheet
 static BOX2I getSheetBbox( SCH_SHEET* aSheet )
 {
     BOX2I bbox;
@@ -97,7 +97,7 @@ static BOX2I getSheetBbox( SCH_SHEET* aSheet )
 }
 
 
-///< Strip the Eagle "@<tag>" linking hint from a pin name (e.g. return 'GND' for 'GND@2')
+/// Strip the Eagle "@<tag>" linking hint from a pin name (e.g. return 'GND' for 'GND@2')
 static inline wxString extractNetName( const wxString& aPinName )
 {
     return aPinName.BeforeFirst( '@' );
@@ -164,17 +164,17 @@ void SCH_IO_EAGLE::loadLayerDefs( const std::vector<std::unique_ptr<ELAYER>>& aL
          * Layers in KiCad schematics are not actually layers, but abstract groups mainly used to
          * decide item colors.
          *
-         * <layers>
-         *     <layer number="90" name="Modules" color="5" fill="1" visible="yes" active="yes"/>
-         *     <layer number="91" name="Nets" color="2" fill="1" visible="yes" active="yes"/>
-         *     <layer number="92" name="Busses" color="1" fill="1" visible="yes" active="yes"/>
-         *     <layer number="93" name="Pins" color="2" fill="1" visible="no" active="yes"/>
-         *     <layer number="94" name="Symbols" color="4" fill="1" visible="yes" active="yes"/>
-         *     <layer number="95" name="Names" color="7" fill="1" visible="yes" active="yes"/>
-         *     <layer number="96" name="Values" color="7" fill="1" visible="yes" active="yes"/>
-         *     <layer number="97" name="Info" color="7" fill="1" visible="yes" active="yes"/>
-         *     <layer number="98" name="Guide" color="6" fill="1" visible="yes" active="yes"/>
-         * </layers>
+         * \<layers\>
+         *     \<layer number="90" name="Modules" color="5" fill="1" visible="yes" active="yes"/\>
+         *     \<layer number="91" name="Nets" color="2" fill="1" visible="yes" active="yes"/\>
+         *     \<layer number="92" name="Busses" color="1" fill="1" visible="yes" active="yes"/\>
+         *     \<layer number="93" name="Pins" color="2" fill="1" visible="no" active="yes"/\>
+         *     \<layer number="94" name="Symbols" color="4" fill="1" visible="yes" active="yes"/\>
+         *     \<layer number="95" name="Names" color="7" fill="1" visible="yes" active="yes"/\>
+         *     \<layer number="96" name="Values" color="7" fill="1" visible="yes" active="yes"/\>
+         *     \<layer number="97" name="Info" color="7" fill="1" visible="yes" active="yes"/\>
+         *     \<layer number="98" name="Guide" color="6" fill="1" visible="yes" active="yes"/\>
+         * \</layers\>
          */
 
         switch ( elayer->number)
@@ -453,7 +453,14 @@ SCH_SHEET* SCH_IO_EAGLE::LoadSchematicFile( const wxString& aFileName, SCHEMATIC
         adapter->LoadOne( getLibName() );
     }
 
-    m_eagleDoc = std::make_unique<EAGLE_DOC>( currentNode, this );
+    try
+    {
+        m_eagleDoc = std::make_unique<EAGLE_DOC>( currentNode, this );
+    }
+    catch( const XML_PARSER_ERROR& exc )
+    {
+        THROW_IO_ERROR( exc.what() );
+    }
 
     // If the attribute is found, store the Eagle version;
     // otherwise, store the dummy "0.0" version.
@@ -1550,12 +1557,14 @@ void SCH_IO_EAGLE::loadSegments( const std::vector<std::unique_ptr<ESEGMENT>>& a
             // signals, so a global bus label would join same-named buses project-wide where
             // Eagle only had visual grouping; (2) nets inside module instances are scoped
             // by the module's ports, so a global label would punch through the hierarchy.
-            if( segmentCount > 1 || m_netCounts[netName] > 1 )
+            if( aIsBus || !m_modules.empty() )
             {
-                if( aIsBus || !m_modules.empty() )
+                if( segmentCount > 1 || m_netCounts[netName] > 1 )
                     label.reset( new SCH_LABEL );
-                else
-                    label.reset( new SCH_GLOBALLABEL );
+            }
+            else
+            {
+                label.reset( new SCH_GLOBALLABEL );
             }
 
             if( label )
@@ -1579,6 +1588,8 @@ void SCH_IO_EAGLE::loadSegments( const std::vector<std::unique_ptr<ESEGMENT>>& a
                         label->SetSpinStyle( SPIN_STYLE::UP );
                 }
 
+                // adjustNetLabels() moves the label off a crossing wire so it does not join another net
+                segDesc.labels.push_back( label.get() );
                 screen->Append( label.release() );
             }
         }
@@ -1886,7 +1897,7 @@ void SCH_IO_EAGLE::loadInstance( const std::unique_ptr<EINSTANCE>& aInstance,
     {
         Report( wxString::Format( wxS( "Eagle library '%s' not found while looking up symbol for "
                                        "deviceset '%s', device '%s', and gate '%s." ),
-                                  libName, epart->deviceset, epart->device, aInstance->gate ) );
+                                  libName, epart->deviceset, epart->device, aInstance->gate ), RPT_SEVERITY_WARNING );
         return;
     }
 
@@ -1896,7 +1907,7 @@ void SCH_IO_EAGLE::loadInstance( const std::unique_ptr<EINSTANCE>& aInstance,
     {
         Report( wxString::Format( wxS( "Symbol not found for deviceset '%s', device '%s', and "
                                        "gate '%s in library '%s'." ),
-                                  epart->deviceset, epart->device, aInstance->gate, libName ) );
+                                  epart->deviceset, epart->device, aInstance->gate, libName ), RPT_SEVERITY_WARNING );
         return;
     }
 
@@ -2155,7 +2166,8 @@ void SCH_IO_EAGLE::loadInstance( const std::unique_ptr<EINSTANCE>& aInstance,
 
             if( eLibIt == m_eagleDoc->drawing->schematic->libraries.end() )
             {
-                Report( wxString::Format( wxS( "Library '%s' not found in schematic." ), epart->library ) );
+                Report( wxString::Format( wxS( "Library '%s' not found in schematic." ), epart->library ),
+                        RPT_SEVERITY_WARNING );
                 continue;
             }
 
@@ -2165,7 +2177,7 @@ void SCH_IO_EAGLE::loadInstance( const std::unique_ptr<EINSTANCE>& aInstance,
             {
                 Report( wxString::Format( wxS( "Device set '%s' not found in library '%s'." ),
                                           epart->deviceset,
-                                          epart->library ) );
+                                          epart->library ), RPT_SEVERITY_WARNING );
                 continue;
             }
 
@@ -2176,7 +2188,7 @@ void SCH_IO_EAGLE::loadInstance( const std::unique_ptr<EINSTANCE>& aInstance,
                 Report( wxString::Format( wxS( "Device '%s' not found in device set '%s' in library '%s'." ),
                                           epart->device,
                                           epart->deviceset,
-                                          epart->library ) );
+                                          epart->library ), RPT_SEVERITY_WARNING );
                 continue;
             }
 
@@ -2189,7 +2201,7 @@ void SCH_IO_EAGLE::loadInstance( const std::unique_ptr<EINSTANCE>& aInstance,
                                           variant->technology.value(),
                                           epart->device,
                                           epart->deviceset,
-                                          epart->library ) );
+                                          epart->library ), RPT_SEVERITY_WARNING );
                 continue;
             }
 
@@ -2285,7 +2297,7 @@ EAGLE_LIBRARY* SCH_IO_EAGLE::loadLibrary( const ELIBRARY* aLibrary, EAGLE_LIBRAR
                 {
                     Report( wxString::Format( wxS( "Eagle symbol '%s' not found in library '%s'." ),
                                               egate->symbol,
-                                              aLibrary->GetName() ) );
+                                              aLibrary->GetName() ), RPT_SEVERITY_WARNING );
                     continue;
                 }
 
