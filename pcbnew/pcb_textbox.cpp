@@ -147,7 +147,7 @@ bool PCB_TEXTBOX::Deserialize( const kiapi::board::types::BoardTextBox& boardTex
         SetAttributes( attrs );
 
         // Handles setting shape to rectangle or polygon
-        SetTextAngle( attrs.m_Angle );
+        SetTextAngle( attrs.m_Angle.GetAngle() );
     }
 
     if( text.has_margin_left() )
@@ -187,16 +187,16 @@ bool PCB_TEXTBOX::Deserialize( const google::protobuf::Any& aContainer )
 }
 
 
-void PCB_TEXTBOX::StyleFromSettings( const BOARD_DESIGN_SETTINGS& settings, bool aCheckSide )
+void PCB_TEXTBOX::StyleFromSettings( const BOARD_DESIGN_SETTINGS& aSettings, bool aCheckSide )
 {
-    PCB_SHAPE::StyleFromSettings( settings, aCheckSide );
+    PCB_SHAPE::StyleFromSettings( aSettings, aCheckSide );
 
-    SetTextSize( settings.GetTextSize( GetLayer() ) );
-    SetTextThickness( settings.GetTextThickness( GetLayer() ) );
-    SetItalic( settings.GetTextItalic( GetLayer() ) );
+    SetTextSize( aSettings.GetTextSize( GetLayer() ) );
+    SetTextThickness( aSettings.GetTextThickness( GetLayer() ) );
+    SetItalic( aSettings.GetTextItalic( GetLayer() ) );
 
     if( GetParentFootprint() )
-        SetKeepUpright( settings.GetTextUpright( GetLayer() ) );
+        SetKeepUpright( aSettings.GetTextUpright( GetLayer() ) );
 
     if( aCheckSide )
     {
@@ -362,9 +362,12 @@ void PCB_TEXTBOX::SetRight( int aVal )
 EDA_ANGLE PCB_TEXTBOX::GetTextAngle() const
 {
     if( const FOOTPRINT* fp = GetParentFootprint() )
-        return m_libTextAngle + fp->GetOrientation();
+    {
+        EDA_ANGLE angle = m_libTextAngle.GetAngle() + fp->GetOrientation();
+        return angle.Normalized();
+    }
 
-    return m_libTextAngle;
+    return m_libTextAngle.GetAngle();
 }
 
 
@@ -524,7 +527,7 @@ wxString PCB_TEXTBOX::GetShownText( RESOLUTION_CONTEXT aContext, int aDepth ) co
                 if( parentFootprint && parentFootprint->ResolveTextVar( token, aDepth + 1 ) )
                     return true;
 
-                if( board->ResolveTextVar( token, aDepth + 1 ) )
+                if( board && board->ResolveTextVar( token, aDepth + 1 ) )
                     return true;
 
                 return false;
@@ -672,8 +675,6 @@ void PCB_TEXTBOX::Rotate( const VECTOR2I& aRotCentre, const EDA_ANGLE& aAngle )
         m_libTextAngle = newAbs - fp->GetOrientation();
     else
         m_libTextAngle = newAbs;
-
-    m_libTextAngle.Normalize();
 }
 
 
@@ -687,7 +688,6 @@ void PCB_TEXTBOX::Mirror( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection
     else
         m_libTextAngle = -m_libTextAngle;
 
-    m_libTextAngle.Normalize();
     EDA_TEXT::SetTextAngle( GetTextAngle() );
 }
 
@@ -701,7 +701,6 @@ void PCB_TEXTBOX::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
     else
         m_libTextAngle = ANGLE_180 - m_libTextAngle;
 
-    m_libTextAngle.Normalize();
     EDA_TEXT::SetTextAngle( GetTextAngle() );
 
     if( IsSideSpecific() )
@@ -855,6 +854,20 @@ std::shared_ptr<SHAPE> PCB_TEXTBOX::GetEffectiveShape( PCB_LAYER_ID aLayer, FLAS
 }
 
 
+PCB_SHAPE PCB_TEXTBOX::GetPolygonalBoxShape() const
+{
+    // Build a PCB_SHAPE type POLYGON of the TEXTBOX, according to the box shape and the textbox rotation
+    PCB_SHAPE dummy( GetParent(), SHAPE_T::POLY );
+    dummy.SetWidth( GetBorderWidth() );
+    dummy.SetStroke( GetStroke() );
+    dummy.SetLayer( GetLayer() );
+    std::vector<VECTOR2I> poly = GetCorners();  // Already rotated
+    dummy.SetPolyPoints( poly );
+
+    return dummy;
+}
+
+
 void PCB_TEXTBOX::TransformTextToPolySet( SHAPE_POLY_SET& aBuffer, int aClearance, int aMaxError,
                                           ERROR_LOC aErrorLoc ) const
 {
@@ -897,6 +910,14 @@ void PCB_TEXTBOX::TransformTextToPolySet( SHAPE_POLY_SET& aBuffer, int aClearanc
         SHAPE_POLY_SET finalPoly;
 
         TransformShapeToPolygon( finalPoly, GetLayer(), aClearance, aMaxError, aErrorLoc );
+
+        // A TEXTBOX can be rotated, but TransformShapeToPolygon does not handle the text rotation.
+        // so rotate the finalPoly by the text rotation
+        EDA_ANGLE angle = GetTextAngle();
+
+        if( angle != ANGLE_0 )
+            finalPoly.Rotate( angle, GetCenter() );
+
         finalPoly.BooleanSubtract( textShape );
 
         aBuffer.Append( finalPoly );
@@ -913,6 +934,14 @@ void PCB_TEXTBOX::TransformTextToPolySet( SHAPE_POLY_SET& aBuffer, int aClearanc
 
         aBuffer.Append( textShape );
     }
+}
+
+
+double PCB_TEXTBOX::GetCoverageArea( int aTextMargin ) const
+{
+    SHAPE_POLY_SET poly;
+    TransformTextToPolySet( poly, aTextMargin, ARC_LOW_DEF, ERROR_INSIDE );
+    return polygonArea( poly );
 }
 
 

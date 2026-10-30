@@ -321,18 +321,32 @@ DIALOG_SYMBOL_PROPERTIES::DIALOG_SYMBOL_PROPERTIES( SCH_EDIT_FRAME* aParent, SCH
         m_pinMapPanel( nullptr )
 {
     m_symbol = aSymbol;
-    LIB_SYMBOL* libSymbol = m_symbol->GetLibSymbolRef().get();
 
-    // GetLibSymbolRef() now points to the cached part in the schematic, which should always be
-    // there for usual cases, but can be null when opening old schematics not storing the part
-    // so we need to handle m_part == nullptr
-    // wxASSERT( m_part );
+    // GetLibSymbolRef() hands back a raw pointer into a unique_ptr owned by the schematic symbol.
+    // This dialog is quasi-modal, so the still-live schematic can free that part through
+    // SetLibSymbol() (library update, ERC, undo) while the dialog is open.  Keep a private copy
+    // alive for the dialog's lifetime instead.
+    if( LIB_SYMBOL* libSymbol = aSymbol->GetLibSymbolRef().get() )
+        m_part = std::make_unique<LIB_SYMBOL>( *libSymbol );
 
-    m_fields = new FIELDS_GRID_TABLE( this, aParent, m_fieldsGrid, m_symbol );
+    std::vector<EMBEDDED_FILES*> embeddedFilesStack;
+
+    if( m_part )
+        embeddedFilesStack.push_back( m_part->GetEmbeddedFiles() );
+
+    embeddedFilesStack.push_back( m_symbol->Schematic() );
+
+    if( m_symbol->GetEmbeddedFiles() )
+    {
+        m_embeddedFiles = new PANEL_EMBEDDED_FILES( m_notebook1, m_symbol->GetEmbeddedFiles(), 0, embeddedFilesStack );
+        m_notebook1->AddPage( m_embeddedFiles, _( "Embedded Files" ) );
+        embeddedFilesStack.push_back( m_embeddedFiles->GetLocalFiles() );
+    }
+
+    m_fields = new FIELDS_GRID_TABLE( this, aParent, m_fieldsGrid, m_symbol, m_part.get(), embeddedFilesStack );
     m_fieldsGrid->SetTable( m_fields );
     m_fieldsGrid->OverrideMinSize( 1.0, 1.0 );
-    m_fieldsGrid->PushEventHandler( new FIELDS_GRID_TRICKS( m_fieldsGrid, this,
-                                                            m_fields->GetEmbeddedFilesStack(),
+    m_fieldsGrid->PushEventHandler( new FIELDS_GRID_TRICKS( m_fieldsGrid, this, embeddedFilesStack,
                                                             [&]( wxCommandEvent& aEvent )
                                                             {
                                                                 OnAddField( aEvent );
@@ -358,16 +372,10 @@ DIALOG_SYMBOL_PROPERTIES::DIALOG_SYMBOL_PROPERTIES( SCH_EDIT_FRAME* aParent, SCH
     m_fieldsGrid->ShowHideColumns( "0 1 2 3 4 5 6 7" );
     m_shownColumns = m_fieldsGrid->GetShownColumns();
 
-    if( m_symbol->GetEmbeddedFiles() )
-    {
-        m_embeddedFiles = new PANEL_EMBEDDED_FILES( m_notebook1, m_symbol->GetEmbeddedFiles() );
-        m_notebook1->AddPage( m_embeddedFiles, _( "Embedded Files" ) );
-    }
-
     m_pinMapPanel = new PANEL_SYMBOL_PIN_MAP( m_pinMapPage );
     bPinMapPageSizer->Add( m_pinMapPanel, 1, wxEXPAND, 5 );
 
-    if( libSymbol && libSymbol->IsMultiBodyStyle() )
+    if( m_part && m_part->IsMultiBodyStyle() )
     {
         wxSizer* altPinDefsSizer = m_pinGrid->GetContainingSizer();
 
@@ -396,7 +404,7 @@ DIALOG_SYMBOL_PROPERTIES::DIALOG_SYMBOL_PROPERTIES( SCH_EDIT_FRAME* aParent, SCH
         m_pinGrid->SetTable( m_dataModel );
     }
 
-    if( libSymbol && libSymbol->IsPower() )
+    if( m_part && m_part->IsPower() )
         m_spiceFieldsButton->Hide();
 
     m_pinGrid->PushEventHandler( new GRID_TRICKS( m_pinGrid ) );
@@ -629,7 +637,10 @@ bool DIALOG_SYMBOL_PROPERTIES::TransferDataToWindow()
     {
         m_ShowPinNumButt->SetValue( libSymbol->GetShowPinNumbers() );
         m_ShowPinNameButt->SetValue( libSymbol->GetShowPinNames() );
+        m_LocalPower->SetValue( libSymbol->IsLocalPower() );
     }
+
+    m_LocalPower->Enable( libSymbol && libSymbol->IsPower() );
 
     // Set the symbol's library name.
     m_tcLibraryID->SetValue( UnescapeString( m_symbol->GetLibId().Format() ) );
@@ -845,6 +856,7 @@ bool DIALOG_SYMBOL_PROPERTIES::TransferDataFromWindow()
 
     m_symbol->SetShowPinNames( m_ShowPinNameButt->GetValue() );
     m_symbol->SetShowPinNumbers( m_ShowPinNumButt->GetValue() );
+    m_symbol->SetLocalPowerProp( m_LocalPower->GetValue() );
 
     // Restore m_Flag modified by SetUnit() and other change settings from the dialog
     m_symbol->ClearFlags();
@@ -1018,6 +1030,9 @@ void DIALOG_SYMBOL_PROPERTIES::OnGridEditorShown( wxGridEvent& aEvent )
     }
 
     m_editorShown = true;
+
+    // Let WX_GRID run its editor-positioning handler
+    aEvent.Skip();
 }
 
 

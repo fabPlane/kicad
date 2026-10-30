@@ -59,6 +59,8 @@
 #include <mmh3_hash.h>
 #include <pcbnew_settings.h>
 
+#include "fmt/xchar.h"
+
 
 using namespace DSN;
 
@@ -107,7 +109,7 @@ namespace DSN
 {
 
 
-void ExportBoardToSpecctraFile( BOARD* aBoard, const wxString& aFullFilename )
+void ExportBoardToSpecctraFile( BOARD* aBoard, const wxString& aFullFilename, REPORTER* aReporter )
 {
     SPECCTRA_DB db;
 
@@ -117,7 +119,7 @@ void ExportBoardToSpecctraFile( BOARD* aBoard, const wxString& aFullFilename )
 
     // Build the board outlines *before* flipping footprints
     if( !db.BuiltBoardOutlines( aBoard ) )
-        wxLogWarning( _( "Board outline is malformed. Run DRC for a full analysis." ) );
+        ReportWarning( aReporter, _( "Board outline is malformed. Run DRC for a full analysis." ) );
 
     // DSN Images (=KiCad FOOTPRINTs and PADs) must be presented from the top view.  So we
     // temporarily flip any footprints which are on the back side of the board to the front,
@@ -155,7 +157,7 @@ static inline double scale( int kicadDist )
 }
 
 
-///< Convert integer internal units to float um
+/// Convert integer internal units to float um
 static inline double IU2um( int kicadDist )
 {
     return kicadDist * ( 1000.0 / pcbIUScale.IU_PER_MM );
@@ -612,7 +614,7 @@ PADSTACK* SPECCTRA_DB::makePADSTACK( BOARD* aBoard, PAD* aPad )
                 else if( layer == copperCount - 1 )
                     uniqifier += 'B';
                 else
-                    uniqifier += char('0' + layer); // layer index char
+                    uniqifier += fmt::format( "0{}", layer );
             }
         }
     }
@@ -1004,7 +1006,7 @@ IMAGE* SPECCTRA_DB::makeIMAGE( BOARD* aBoard, FOOTPRINT* aFootprint )
 
                     window->SetShape( cutout );
 
-                    cutout->layer_id = m_layerIds[ m_kicadLayer2pcb[ zone->GetLayer() ] ];
+                    cutout->layer_id = m_layerIds[ m_kicadLayer2pcb[ layer ] ];
                 }
 
                 isStartContour = iterator.IsEndContour();

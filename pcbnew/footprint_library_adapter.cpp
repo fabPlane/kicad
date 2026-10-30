@@ -53,6 +53,7 @@ FOOTPRINT_LIBRARY_ADAPTER::FOOTPRINT_LIBRARY_ADAPTER( LIBRARY_MANAGER& aManager 
 
 FOOTPRINT_LIBRARY_ADAPTER::~FOOTPRINT_LIBRARY_ADAPTER()
 {
+    resetProjectCache( true );
     evictOwnedGlobalEntries();
 }
 
@@ -100,6 +101,7 @@ void FOOTPRINT_LIBRARY_ADAPTER::enumerateLibrary( LIB_DATA* aLib, const wxString
             FOOTPRINT* footprint = static_cast<FOOTPRINT*>( cached->Clone() );
             footprint->SetParent( nullptr );
             footprint->SetParentGroup( nullptr );
+            footprint->ClearAllNets();
 
             // For non-caching plugins, delete the allocated footprint now that we've cloned it
             if( !pluginCaches )
@@ -137,6 +139,7 @@ std::optional<LIB_STATUS> FOOTPRINT_LIBRARY_ADAPTER::LoadOne( LIB_DATA* aLib )
     {
         enumerateLibrary( aLib, getUri( aLib->row ) );
         aLib->status.load_status = LOAD_STATUS::LOADED;
+        aLib->status.error.reset();
     }
     catch( IO_ERROR& e )
     {
@@ -156,10 +159,8 @@ std::optional<LIB_STATUS> FOOTPRINT_LIBRARY_ADAPTER::LoadOne( const wxString& ni
     if( result.has_value() )
         return LoadOne( *result );
 
-    return LIB_STATUS{
-        .load_status = LOAD_STATUS::LOAD_ERROR,
-        .error = LIBRARY_ERROR( { result.error() } )
-    };
+    return LIB_STATUS{ .load_status = LOAD_STATUS::LOAD_ERROR,
+                       .error = LIBRARY_ERROR( { result.error() } ) };
 }
 
 
@@ -278,7 +279,7 @@ void FOOTPRINT_LIBRARY_ADAPTER::RefreshLibraryIfChanged( const wxString& aNickna
     {
         enumerateLibrary( lib, uri );
     }
-    catch( IO_ERROR& e )
+    catch( IO_ERROR& )
     {
         std::unique_lock lock( PreloadedFootprintsMutex );
         PreloadedFootprints.Get().erase( aNickname );
@@ -364,6 +365,9 @@ FOOTPRINT* FOOTPRINT_LIBRARY_ADAPTER::LoadFootprint( const wxString& aNickname, 
                 LIB_ID id = footprint->GetFPID();
                 id.SetLibNickname( ( *lib )->row->Nickname() );
                 footprint->SetFPID( id );
+                footprint->SetParent( nullptr );
+                footprint->SetParentGroup( nullptr );
+                footprint->ClearAllNets();
                 return footprint.release();
             }
         }
@@ -468,6 +472,7 @@ FOOTPRINT_LIBRARY_ADAPTER::SAVE_T FOOTPRINT_LIBRARY_ADAPTER::SaveFootprint( cons
                 FOOTPRINT* clone = static_cast<FOOTPRINT*>( aFootprint->Clone() );
                 clone->SetParent( nullptr );
                 clone->SetParentGroup( nullptr );
+                clone->ClearAllNets();
 
                 LIB_ID id = clone->GetFPID();
                 id.SetLibNickname( aNickname );

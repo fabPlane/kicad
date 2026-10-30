@@ -329,6 +329,9 @@ static int pcbnewMergeExport( int aKind, const wxString& aAncestor, const wxStri
 static int pcbnewOpenDiffDialogExport( int aKind, const wxString& aFileA, const wxString& aFileB,
                                        const wxString& aLabelA, const wxString& aLabelB,
                                        wxWindow* aParent, REPORTER* aReporter );
+static KICAD_DIFF::DIFF_CANVAS_CONTEXT*
+pcbnewAttachDiffCanvasesExport( int aKind, const wxString& aFileA, const wxString& aFileB, WIDGET_DIFF_CANVAS* aBefore,
+                                WIDGET_DIFF_CANVAS* aAfter, KICAD_DIFF::DOCUMENT_DIFF* aDiff, REPORTER* aReporter );
 #endif
 
 
@@ -680,6 +683,8 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
 #ifndef KICAD_HEADLESS_API
         case KIFACE_OPEN_DIFF_DIALOG:
             return reinterpret_cast<void*>( &pcbnewOpenDiffDialogExport );
+
+        case KIFACE_ATTACH_DIFF_CANVASES: return reinterpret_cast<void*>( &pcbnewAttachDiffCanvasesExport );
 #endif
 
         default:
@@ -735,9 +740,8 @@ private:
     std::atomic_bool                     m_libraryPreloadInProgress;
     std::atomic_bool                     m_libraryPreloadAbort;
 
-    void closeCurrentDocument( KICAD_API_SERVER* aServer );
-
-    void closeCurrentFootprint( KICAD_API_SERVER* aServer );
+    void closeBoard( KICAD_API_SERVER* aServer );
+    void closeFootprint( KICAD_API_SERVER* aServer );
 
     void closeCurrentProject( KICAD_API_SERVER* aServer );
 
@@ -769,6 +773,16 @@ int pcbnewOpenDiffDialogExport( int aKind, const wxString& aFileA, const wxStrin
 {
     return kiface.JobHandler()->OpenDiffDialog( static_cast<KICAD_DIFF::DOC_KIND>( aKind ), aFileA,
                                                 aFileB, aLabelA, aLabelB, aParent, aReporter );
+}
+
+
+KICAD_DIFF::DIFF_CANVAS_CONTEXT* pcbnewAttachDiffCanvasesExport( int aKind, const wxString& aFileA,
+                                                                 const wxString& aFileB, WIDGET_DIFF_CANVAS* aBefore,
+                                                                 WIDGET_DIFF_CANVAS*        aAfter,
+                                                                 KICAD_DIFF::DOCUMENT_DIFF* aDiff, REPORTER* aReporter )
+{
+    return kiface.JobHandler()->AttachDiffCanvases( static_cast<KICAD_DIFF::DOC_KIND>( aKind ), aFileA, aFileB, aBefore,
+                                                    aAfter, *aDiff, aReporter );
 }
 #endif
 
@@ -847,12 +861,16 @@ bool IFACE::OnKifaceStart( PGM_BASE* aProgram, int aCtlBits, KIWAY* aKiway )
 
 void IFACE::Reset()
 {
+    closeBoard( nullptr );
+    closeFootprint( nullptr );
 }
 
 
 void IFACE::OnKifaceEnd()
 {
-#if defined( KICAD_NATIVE_MODEL_PREVIEW ) && defined( __WXGTK3__ )
+    CancelPreload( true );
+
+#if defined( KICAD_NATIVE_MODEL_PREVIEW ) && defined( __WXGTK3__ ) && !defined( KICAD_HEADLESS_API )
     ShutdownNativeModelFilePickerGtk();
 #endif
 
@@ -1000,7 +1018,7 @@ bool IFACE::HandleJobConfig( JOB* aJob, wxWindow* aParent )
 }
 
 
-void IFACE::closeCurrentDocument( KICAD_API_SERVER* aServer )
+void IFACE::closeBoard( KICAD_API_SERVER* aServer )
 {
     if( m_openHandler )
     {
@@ -1016,11 +1034,13 @@ void IFACE::closeCurrentDocument( KICAD_API_SERVER* aServer )
     // uses the board from the newly opened document rather than a stale copy.
     // An asynchronous API job may still be reading it.
     API_JOB_REGISTRY::Instance().WaitForIdle();
-    m_jobHandler->ClearCachedBoard();
+
+    if( m_jobHandler )
+        m_jobHandler->ClearCachedBoard();
 }
 
 
-void IFACE::closeCurrentFootprint( KICAD_API_SERVER* aServer )
+void IFACE::closeFootprint( KICAD_API_SERVER* aServer )
 {
     if( m_openFpHandler )
     {
@@ -1050,7 +1070,7 @@ bool IFACE::HandleApiOpenDocument( const DOCUMENT_SPEC& aSpec, KICAD_API_SERVER*
 {
     wxCHECK( aServer, false );
 
-    if( aSpec.kind == DOCUMENT_SPEC::KIND::FPID_KIND )
+    if( aSpec.kind == DOCUMENT_SPEC::KIND::LIBID_KIND )
         return handleOpenFootprint( aSpec.path, aSpec.libId.GetUniStringLibId(), aServer, aError );
 
     if( aSpec.kind == DOCUMENT_SPEC::KIND::PROJECT_KIND )
@@ -1133,7 +1153,7 @@ bool IFACE::handleOpenFootprint( const wxString& aProjectPath, const wxString& a
     }
 
     // One footprint at a time; the board (if any) stays open
-    closeCurrentFootprint( aServer );
+    closeFootprint( aServer );
 
     if( !m_apiHandlerFpLibs )
     {
@@ -1195,7 +1215,7 @@ bool IFACE::handleOpenPcb( const wxString& aPath, KICAD_API_SERVER* aServer, wxS
 
     // We currently only support one document per type (and each needs to come from
     // the same project).  This will need evolution once we support MDI and multi-project.
-    closeCurrentDocument( aServer );
+    closeBoard( aServer );
 
     SETTINGS_MANAGER& settingsManager = Pgm().GetSettingsManager();
 
@@ -1303,7 +1323,7 @@ bool IFACE::handleCreatePcb( const wxString& aPath, KICAD_API_SERVER* aServer, w
         return false;
     }
 
-    closeCurrentDocument( aServer );
+    closeBoard( aServer );
 
     SETTINGS_MANAGER& settingsManager = Pgm().GetSettingsManager();
 
@@ -1375,7 +1395,7 @@ bool IFACE::HandleApiCloseDocument( const DOCUMENT_SPEC& aSpec, KICAD_API_SERVER
         return true;
     }
 
-    if( aSpec.kind == DOCUMENT_SPEC::KIND::FPID_KIND )
+    if( aSpec.kind == DOCUMENT_SPEC::KIND::LIBID_KIND )
     {
         if( !m_openFpContext )
         {
@@ -1389,12 +1409,12 @@ bool IFACE::HandleApiCloseDocument( const DOCUMENT_SPEC& aSpec, KICAD_API_SERVER
         if( aSpec.libId.IsValid() && m_openFpContext->GetLoadedFPID() != aSpec.libId )
         {
             if( aError )
-                *aError = wxS( "Requested footprint does not match the open footprint" );
+                *aError = wxS( "Requested document does not match the open document" );
 
             return false;
         }
 
-        closeCurrentFootprint( aServer );
+        closeFootprint( aServer );
         return true;
     }
 
@@ -1419,16 +1439,13 @@ bool IFACE::HandleApiCloseDocument( const DOCUMENT_SPEC& aSpec, KICAD_API_SERVER
         }
     }
 
-    closeCurrentDocument( aServer );
+    closeBoard( aServer );
     return true;
 }
 
 
 void IFACE::PreloadLibraries( KIWAY* aKiway )
 {
-    constexpr static int interval = 150;
-    constexpr static int timeLimit = 120000;
-
     wxCHECK( aKiway, /* void */ );
 
     // Use compare_exchange to atomically check and set the flag to prevent race conditions
@@ -1452,51 +1469,8 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
 
             FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( &aKiway->Prj() );
 
-            int elapsed = 0;
-            bool aborted = false;
-
             reporter->Report( _( "Loading Footprint Libraries" ) );
-            adapter->AsyncLoad();
-
-            while( true )
-            {
-                if( m_libraryPreloadAbort.load() )
-                {
-                    m_libraryPreloadAbort.store( false );
-                    aborted = true;
-                    break;
-                }
-
-                std::this_thread::sleep_for( std::chrono::milliseconds( interval ) );
-
-                if( std::optional<float> loadStatus = adapter->AsyncLoadProgress() )
-                {
-                    float progress = *loadStatus;
-                    reporter->SetCurrentProgress( progress );
-
-                    if( progress >= 1 )
-                        break;
-                }
-                else
-                {
-                    reporter->SetCurrentProgress( 1 );
-                    break;
-                }
-
-                elapsed += interval;
-
-                if( elapsed > timeLimit )
-                    break;
-            }
-
-            // AbortAsyncLoad() sets the adapter's worker abort flag and then blocks,
-            // so workers exit at their next checkpoint. BlockUntilLoaded() alone just
-            // waits for each future to complete naturally, which can hang indefinitely
-            // if a worker is stuck on a stalled network or filesystem operation.
-            if( aborted )
-                adapter->AbortAsyncLoad();
-            else
-                adapter->BlockUntilLoaded();
+            bool aborted = !adapter->RunPreload( *reporter, m_libraryPreloadAbort );
 
             // If aborted, skip operations that use the adapter since the project may have changed
             // and the adapter's project reference could be stale. This prevents use-after-free
@@ -1511,10 +1485,8 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
                 wxLogTrace( traceLibraries, "pcbnew PreloadLibraries: aborted, skipping footprint processing" );
             }
 
-            m_libraryPreloadAbort.store( false );
             Pgm().GetBackgroundJobMonitor().Remove( m_libraryPreloadBackgroundJob );
             m_libraryPreloadBackgroundJob.reset();
-            m_libraryPreloadInProgress.store( false );
 
             // Only send reload notifications if we weren't aborted
             if( !aborted )
@@ -1524,6 +1496,10 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
                 aKiway->ExpressMail( FRAME_FOOTPRINT_EDITOR, MAIL_RELOAD_LIB, payload, nullptr, true );
                 aKiway->ExpressMail( FRAME_CVPCB, MAIL_RELOAD_LIB, payload, nullptr, true );
             }
+
+            // A cancel that came after the loop left the flag set, and it would end the next preload at once
+            m_libraryPreloadAbort.store( false );
+            m_libraryPreloadInProgress.store( false );
         };
 
 #ifdef KICAD_HEADLESS_API
@@ -1555,7 +1531,12 @@ void IFACE::CancelPreload( bool aBlock )
         m_libraryPreloadAbort.store( true );
 
         if( aBlock )
+        {
             m_libraryPreloadReturn.wait();
+
+            // The preload has ended, so a flag it never read can only stop the next one
+            m_libraryPreloadAbort.store( false );
+        }
     }
 }
 

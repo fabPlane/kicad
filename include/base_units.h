@@ -76,12 +76,14 @@ struct EDA_IU_SCALE
     const double IU_PER_PS{ 1e6 };        ///< Internal time units are attoseconds
     const double IU_PER_PS_PER_MM{ 1e6 }; ///< Internal delay units are attoseconds/mm
     const double MM_PER_IU;
+    const double MILS_PER_IU;
 
 
     constexpr EDA_IU_SCALE( double aIUPerMM ) :
             IU_PER_MM( aIUPerMM ),
             IU_PER_MILS( aIUPerMM * 0.0254 ),
-            MM_PER_IU( 1 / IU_PER_MM )
+            MM_PER_IU( 1 / IU_PER_MM ),
+            MILS_PER_IU( 1 / IU_PER_MILS )
     {
     }
 
@@ -137,7 +139,7 @@ constexpr double ARC_HIGH_DEF_MM = 0.005;
 // Warning: too small values can create very long calculation time in zone filling
 // 0.05 to 0.005 mm are reasonable values
 
-// Allowed error to approximate an arg by segments, in Pcbnew IU
+// Allowed error to approximate an arc by segments, in Pcbnew IU
 constexpr int ARC_LOW_DEF = pcbIUScale.mmToIU( ARC_LOW_DEF_MM );
 constexpr int ARC_HIGH_DEF = pcbIUScale.mmToIU( ARC_HIGH_DEF_MM );
 

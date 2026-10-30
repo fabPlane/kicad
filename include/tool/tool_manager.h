@@ -188,6 +188,7 @@ public:
      *
      * @param aAction is the action to be invoked.
      * @param aCommit is the commit object the tool handling the action should add the new edits to
+     * @param aParam
      * @return True if the action was handled immediately
      */
     template<typename T>
@@ -248,7 +249,7 @@ public:
     /**
      * Run the specified action after the current action (coroutine) ends.
      *
-     * @nite The type of the optional parameter must match exactly with the type the consuming
+     * @note The type of the optional parameter must match exactly with the type the consuming
      *       action is expecting, otherwise an assert will occur when reading the parameter.
      *
      * @param aAction is the action to be invoked.
@@ -318,7 +319,7 @@ public:
      */
     TOOL_BASE* FindTool( const std::string& aName ) const;
 
-    /*
+    /**
      * Return the tool of given type or nullptr if there is no such tool registered.
      */
     template<typename T>
@@ -332,7 +333,7 @@ public:
         return nullptr;
     }
 
-    /*
+    /**
      * Return all registered tools.
      */
     std::vector<TOOL_BASE*> Tools() { return m_toolOrder; }
@@ -622,14 +623,14 @@ private:
     bool isActive( TOOL_BASE* aTool ) const;
 
     /**
-     * Save the #VIEW_CONTROLS settings to the tool state object.
+     * Save the #KIGFX::VIEW_CONTROLS settings to the tool state object.
      *
-     * If #VIEW_CONTROLS settings are affected by #TOOL_MANAGER, the original settings are saved.
+     * If #KIGFX::VIEW_CONTROLS settings are affected by #TOOL_MANAGER, the original settings are saved.
      */
     void saveViewControls( TOOL_STATE* aState );
 
     /**
-     * Apply #VIEW_CONTROLS settings stored in a #TOOL_STATE object.
+     * Apply #KIGFX::VIEW_CONTROLS settings stored in a #TOOL_STATE object.
      */
     void applyViewControls( const TOOL_STATE* aState );
 

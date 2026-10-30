@@ -4,10 +4,6 @@ if( COMPILER_SUPPORTS_WARNINGS )
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${WARN_FLAGS_C}")
 endif()
 
-if( KICAD_IDF_TOOLS )
-    add_subdirectory( idftools )
-endif()
-
 # The Quick Look extensions are Objective-C++ app extensions, so they build with the rest of the
 # tree under whichever generator KiCad is configured with.
 set( KICAD_BUILD_QUICKLOOK OFF CACHE INTERNAL "Quick Look model preview extensions are buildable" FORCE )
@@ -38,7 +34,7 @@ if( KICAD_BUILD_QUICKLOOK )
         DESTINATION "${OSX_BUNDLE_INSTALL_DIR}/Contents/PlugIns"
         USE_SOURCE_PERMISSIONS
         COMPONENT Runtime )
-    install( FILES
+    install( PROGRAMS
         "$<TARGET_FILE:kicad_3d_import>"
         "$<TARGET_FILE:kicad_3dsg>"
         DESTINATION "${OSX_BUNDLE_INSTALL_DIR}/Contents/Frameworks"

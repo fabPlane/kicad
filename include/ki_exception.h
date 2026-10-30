@@ -23,14 +23,15 @@
 
 #include <kicommon.h>
 
+#include <string>
+
 #include <wx/string.h>
 
 
 /**
- * @ingroup exception_types
+ * @defgroup exception_types Custom KiCad Exception Objects
  * @{
  */
-
 
 /// macro which captures the "call site" values of __FILE_, __FUNCTION__ & __LINE__
 #define THROW_IO_ERROR( msg )   throw IO_ERROR( msg, __FILE__, __FUNCTION__, __LINE__ )
@@ -103,8 +104,11 @@ public:
     virtual const wxString What() const;            ///< A composite of Problem() and Where()
 
 protected:
+    void updateWhat();
+
     wxString    problem;
     wxString    where;
+    std::string whatMessage;
 };
 
 
@@ -209,6 +213,6 @@ struct KICOMMON_API FUTURE_FORMAT_ERROR : public PARSE_ERROR
                const wxString& aRequiredGenerator = wxEmptyString );
 };
 
-/** @} exception_types */
+/** @} */
 
 #endif // KI_EXCEPTION_H_

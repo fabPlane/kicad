@@ -110,6 +110,9 @@ void CONNECTION_SUBGRAPH::RemoveItem( SCH_ITEM* aItem )
         m_driver_connection = nullptr;
     }
 
+    if( aItem == m_no_connect )
+        m_no_connect = nullptr;
+
     if( aItem->Type() == SCH_SHEET_PIN_T )
         m_hier_pins.erase( static_cast<SCH_SHEET_PIN*>( aItem ) );
 
@@ -299,7 +302,7 @@ bool CONNECTION_SUBGRAPH::ResolveDrivers( bool aCheckMultipleDrivers )
         {
             SCH_PIN* pin = static_cast<SCH_PIN*>( item );
 
-            if( !static_cast<SCH_SYMBOL*>( pin->GetParentSymbol() )->IsInNetlist() )
+            if( !static_cast<SCH_SYMBOL*>( pin->GetParentSymbol() )->DoNetList() )
                 continue;
         }
 
@@ -593,21 +596,24 @@ void CONNECTION_SUBGRAPH::Absorb( CONNECTION_SUBGRAPH* aOther )
 
     m_absorbed_subgraphs.insert( aOther );
     m_absorbed_subgraphs.insert( aOther->m_absorbed_subgraphs.begin(),
-            aOther->m_absorbed_subgraphs.end() );
+                                 aOther->m_absorbed_subgraphs.end() );
 
     m_bus_neighbors.insert( aOther->m_bus_neighbors.begin(), aOther->m_bus_neighbors.end() );
     m_bus_parents.insert( aOther->m_bus_parents.begin(), aOther->m_bus_parents.end() );
 
+    if( !m_no_connect && aOther->m_no_connect )
+        m_no_connect = aOther->m_no_connect;
+
     m_multiple_drivers |= aOther->m_multiple_drivers;
 
     std::function<void( CONNECTION_SUBGRAPH* )> set_absorbed_by =
-            [ & ]( CONNECTION_SUBGRAPH *child )
-    {
-        child->m_absorbed_by = this;
+            [&]( CONNECTION_SUBGRAPH *child )
+            {
+                child->m_absorbed_by = this;
 
-        for( CONNECTION_SUBGRAPH* subchild : child->m_absorbed_subgraphs )
-            set_absorbed_by( subchild );
-    };
+                for( CONNECTION_SUBGRAPH* subchild : child->m_absorbed_subgraphs )
+                    set_absorbed_by( subchild );
+            };
 
     aOther->m_absorbed = true;
     aOther->m_dirty = false;
@@ -775,31 +781,32 @@ void CONNECTION_GRAPH::ExchangeItem( SCH_ITEM* aOldItem, SCH_ITEM* aNewItem )
 {
     wxCHECK2( aOldItem->Type() == aNewItem->Type(), return );
 
-    auto exchange = [&]( SCH_ITEM* aOld, SCH_ITEM* aNew )
-    {
-        auto it = m_item_to_subgraph_map.find( aOld );
-
-        if( it == m_item_to_subgraph_map.end() )
-            return;
-
-        std::vector<CONNECTION_SUBGRAPH*> sgs = std::move( it->second );
-
-        for( CONNECTION_SUBGRAPH* sg : sgs )
-            sg->ExchangeItem( aOld, aNew );
-
-        m_item_to_subgraph_map.erase( it );
-        m_item_to_subgraph_map.emplace( aNew, std::move( sgs ) );
-        aNew->registerConnectivityOwner( m_lifetime );
-
-        for( auto it2 = m_items.begin(); it2 != m_items.end(); ++it2 )
-        {
-            if( *it2 == aOld )
+    auto exchange =
+            [&]( SCH_ITEM* aOld, SCH_ITEM* aNew )
             {
-                *it2 = aNew;
-                break;
-            }
-        }
-    };
+                auto it = m_item_to_subgraph_map.find( aOld );
+
+                if( it == m_item_to_subgraph_map.end() )
+                    return;
+
+                std::vector<CONNECTION_SUBGRAPH*> sgs = std::move( it->second );
+
+                for( CONNECTION_SUBGRAPH* sg : sgs )
+                    sg->ExchangeItem( aOld, aNew );
+
+                m_item_to_subgraph_map.erase( it );
+                m_item_to_subgraph_map.emplace( aNew, std::move( sgs ) );
+                aNew->registerConnectivityOwner( m_lifetime );
+
+                for( auto it2 = m_items.begin(); it2 != m_items.end(); ++it2 )
+                {
+                    if( *it2 == aOld )
+                    {
+                        *it2 = aNew;
+                        break;
+                    }
+                }
+            };
 
     exchange( aOldItem, aNewItem );
 
@@ -813,9 +820,7 @@ void CONNECTION_GRAPH::ExchangeItem( SCH_ITEM* aOldItem, SCH_ITEM* aNewItem )
         wxCHECK2( oldPins.size() == newPins.size(), return );
 
         for( size_t ii = 0; ii < oldPins.size(); ii++ )
-        {
             exchange( oldPins[ii], newPins[ii] );
-        }
     }
 }
 
@@ -887,8 +892,7 @@ void CONNECTION_GRAPH::Recalculate( const SCH_SHEET_LIST& aSheetList, bool aUnco
         {
             if( item->IsConnectable() && ( aUnconditional || item->IsConnectivityDirty() ) )
             {
-                wxLogTrace( ConnTrace, wxT( "Adding item %s to connectivity graph update" ),
-                            item->GetTypeDesc() );
+                wxLogTrace( ConnTrace, wxT( "Adding item %s to connectivity graph update" ), item->GetTypeDesc() );
                 items.push_back( item );
                 dirty_items.insert( item );
 
@@ -1019,96 +1023,97 @@ void CONNECTION_GRAPH::Recalculate( const SCH_SHEET_LIST& aSheetList, bool aUnco
 }
 
 
-std::set<std::pair<SCH_SHEET_PATH, SCH_ITEM*>> CONNECTION_GRAPH::ExtractAffectedItems(
-        const std::set<SCH_ITEM*> &aItems )
+std::set<std::pair<SCH_SHEET_PATH, SCH_ITEM*>>
+CONNECTION_GRAPH::ExtractAffectedItems( const std::set<SCH_ITEM*> &aItems )
 {
     std::set<std::pair<SCH_SHEET_PATH, SCH_ITEM*>> retvals;
-    std::set<CONNECTION_SUBGRAPH*> subgraphs;
+    std::set<CONNECTION_SUBGRAPH*>                 subgraphs;
 
-    auto traverse_subgraph = [&retvals, &subgraphs]( CONNECTION_SUBGRAPH* aSubgraph )
-    {
-        // Find the primary subgraph on this sheet
-        while( aSubgraph->m_absorbed_by )
-        {
-            // Should we skip this if the absorbed by sub-graph is not this sub-grap?
-            wxASSERT( aSubgraph->m_graph == aSubgraph->m_absorbed_by->m_graph );
-            aSubgraph = aSubgraph->m_absorbed_by;
-        }
-
-        // Find the top most connected subgraph on all sheets
-        while( aSubgraph->m_hier_parent )
-        {
-            // Should we skip this if the absorbed by sub-graph is not this sub-grap?
-            wxASSERT( aSubgraph->m_graph == aSubgraph->m_hier_parent->m_graph );
-            aSubgraph = aSubgraph->m_hier_parent;
-        }
-
-        // Recurse through all subsheets to collect connected items
-        aSubgraph->getAllConnectedItems( retvals, subgraphs );
-    };
-
-    auto scan_subgraphs = [&traverse_subgraph]( const std::vector<CONNECTION_SUBGRAPH*>& aScanList )
-    {
-        for( CONNECTION_SUBGRAPH* sg : aScanList )
-        {
-            traverse_subgraph( sg );
-
-            for( auto& bus_it : sg->m_bus_neighbors )
+    auto traverse_subgraph =
+            [&retvals, &subgraphs]( CONNECTION_SUBGRAPH* aSubgraph )
             {
-                for( CONNECTION_SUBGRAPH* bus_sg : bus_it.second )
-                    traverse_subgraph( bus_sg );
-            }
+                // Find the primary subgraph on this sheet
+                while( aSubgraph->m_absorbed_by )
+                {
+                    // Should we skip this if the absorbed by sub-graph is not this sub-grap?
+                    wxASSERT( aSubgraph->m_graph == aSubgraph->m_absorbed_by->m_graph );
+                    aSubgraph = aSubgraph->m_absorbed_by;
+                }
 
-            for( auto& bus_it : sg->m_bus_parents )
+                // Find the top most connected subgraph on all sheets
+                while( aSubgraph->m_hier_parent )
+                {
+                    // Should we skip this if the absorbed by sub-graph is not this sub-grap?
+                    wxASSERT( aSubgraph->m_graph == aSubgraph->m_hier_parent->m_graph );
+                    aSubgraph = aSubgraph->m_hier_parent;
+                }
+
+                // Recurse through all subsheets to collect connected items
+                aSubgraph->getAllConnectedItems( retvals, subgraphs );
+            };
+
+    auto scan_subgraphs =
+            [&traverse_subgraph]( const std::vector<CONNECTION_SUBGRAPH*>& aScanList )
             {
-                for( CONNECTION_SUBGRAPH* bus_sg : bus_it.second )
-                    traverse_subgraph( bus_sg );
-            }
-        }
-    };
+                for( CONNECTION_SUBGRAPH* sg : aScanList )
+                {
+                    traverse_subgraph( sg );
 
-    auto extract_element = [&]( SCH_ITEM* aItem )
-    {
-        CONNECTION_SUBGRAPH* item_sg = GetSubgraphForItem( aItem );
+                    for( auto& bus_it : sg->m_bus_neighbors )
+                    {
+                        for( CONNECTION_SUBGRAPH* bus_sg : bus_it.second )
+                            traverse_subgraph( bus_sg );
+                    }
 
-        if( !item_sg )
-        {
-            wxLogTrace( ConnTrace, wxT( "Item %s not found in connection graph" ),
-                        aItem->GetTypeDesc() );
+                    for( auto& bus_it : sg->m_bus_parents )
+                    {
+                        for( CONNECTION_SUBGRAPH* bus_sg : bus_it.second )
+                            traverse_subgraph( bus_sg );
+                    }
+                }
+            };
 
-            // A label names the net it joins, so a freshly placed one sits in no subgraph yet but
-            // still has to drag that net's other subgraphs into the rebuild
-            if( aItem->HasCachedDriverName() )
-                scan_subgraphs( GetAllSubgraphs( aItem->GetCachedDriverName() ) );
+    auto extract_element =
+            [&]( SCH_ITEM* aItem )
+            {
+                CONNECTION_SUBGRAPH* item_sg = GetSubgraphForItem( aItem );
 
-            return;
-        }
+                if( !item_sg )
+                {
+                    wxLogTrace( ConnTrace, wxT( "Item %s not found in connection graph" ),
+                                aItem->GetTypeDesc() );
 
-        if( !item_sg->ResolveDrivers( true ) )
-        {
-            wxLogTrace( ConnTrace, wxT( "Item %s in subgraph %ld (%p) has no driver" ),
-                        aItem->GetTypeDesc(), item_sg->m_code, item_sg );
-        }
+                    // A label names the net it joins, so a freshly placed one sits in no subgraph yet but
+                    // still has to drag that net's other subgraphs into the rebuild
+                    if( aItem->HasCachedDriverName() )
+                        scan_subgraphs( GetAllSubgraphs( aItem->GetCachedDriverName() ) );
 
-        std::vector<CONNECTION_SUBGRAPH*> sg_to_scan = GetAllSubgraphs( item_sg->GetNetName() );
+                    return;
+                }
 
-        if( sg_to_scan.empty() )
-        {
-            wxLogTrace( ConnTrace, wxT( "Item %s in subgraph %ld with net %s has no neighbors" ),
-                        aItem->GetTypeDesc(), item_sg->m_code, item_sg->GetNetName() );
-            sg_to_scan.push_back( item_sg );
-        }
+                if( !item_sg->ResolveDrivers( true ) )
+                {
+                    wxLogTrace( ConnTrace, wxT( "Item %s in subgraph %ld (%p) has no driver" ),
+                                aItem->GetTypeDesc(), item_sg->m_code, item_sg );
+                }
 
-        wxLogTrace( ConnTrace,
-                    wxT( "Removing all item %s connections from subgraph %ld with net %s: Found "
-                         "%zu subgraphs" ),
-                    aItem->GetTypeDesc(), item_sg->m_code, item_sg->GetNetName(),
-                    sg_to_scan.size() );
+                std::vector<CONNECTION_SUBGRAPH*> sg_to_scan = GetAllSubgraphs( item_sg->GetNetName() );
 
-        scan_subgraphs( sg_to_scan );
+                if( sg_to_scan.empty() )
+                {
+                    wxLogTrace( ConnTrace, wxT( "Item %s in subgraph %ld with net %s has no neighbors" ),
+                                aItem->GetTypeDesc(), item_sg->m_code, item_sg->GetNetName() );
+                    sg_to_scan.push_back( item_sg );
+                }
 
-        std::erase( m_items, aItem );
-    };
+                wxLogTrace( ConnTrace, wxT( "Removing all item %s connections from subgraph %ld with net %s: "
+                                            "Found %zu subgraphs" ),
+                            aItem->GetTypeDesc(), item_sg->m_code, item_sg->GetNetName(), sg_to_scan.size() );
+
+                scan_subgraphs( sg_to_scan );
+
+                std::erase( m_items, aItem );
+            };
 
     for( SCH_ITEM* item : aItems )
     {
@@ -1123,7 +1128,7 @@ std::set<std::pair<SCH_SHEET_PATH, SCH_ITEM*>> CONNECTION_GRAPH::ExtractAffected
         {
             SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
 
-            for( SCH_PIN* pin : symbol->GetPins( &m_schematic->CurrentSheet() ) )
+            for( SCH_PIN* pin : symbol->GetGraphicalPins( ALL_UNITS, ALL_BODY_STYLES ) )
                 extract_element( pin );
         }
         else
@@ -1144,6 +1149,15 @@ std::set<std::pair<SCH_SHEET_PATH, SCH_ITEM*>> CONNECTION_GRAPH::ExtractAffected
 void CONNECTION_GRAPH::RemoveItem( SCH_ITEM* aItem )
 {
     std::erase( m_items, aItem );
+
+    if( aItem->Type() == SCH_PIN_T )
+    {
+        std::erase_if( m_global_power_pins,
+                       [aItem]( const std::pair<SCH_SHEET_PATH, SCH_PIN*>& aEntry )
+                       {
+                           return aEntry.second == aItem;
+                       } );
+    }
 
     auto it = m_item_to_subgraph_map.find( aItem );
 

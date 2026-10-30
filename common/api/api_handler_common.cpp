@@ -1060,8 +1060,8 @@ HANDLER_RESULT<AppSettings> API_HANDLER_COMMON::handleGetAppSettings( const HAND
     response.set_current_grid( static_cast<uint32_t>( std::max( 0, grid.last_size_idx ) ) );
     response.set_grid_visible( grid.show );
     response.set_grid_axes_visible( grid.axes_enabled );
-    response.set_grid_style( static_cast<uint32_t>( std::max( 0, grid.style ) ) );
-    response.set_grid_snap( static_cast<uint32_t>( std::max( 0, grid.snap ) ) );
+    response.set_grid_style( static_cast<uint32_t>( std::max( 0, static_cast<int>( grid.style ) ) ) );
+    response.set_grid_snap( static_cast<uint32_t>( std::max( 0, static_cast<int>( grid.snap ) ) ) );
 
     for( double factor : app->m_Window.zoom_factors )
         response.add_zoom_factors( factor );

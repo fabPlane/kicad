@@ -279,11 +279,11 @@ public:
     void RecomputeEffectiveNetclasses();
 
     /**
-     * Get a NETCLASS object from a given Netclass name string
+     * Get a NETCLASS object from a given Netclass name string.
      *
-     * @param aNetClassName the Netclass name to resolve
-     * @return shared pointer to the requested NETCLASS object, or the default NETCLASS
-    */
+     * @param aNetName the Netclass name to resolve.
+     * @return shared pointer to the requested NETCLASS object, or the default NETCLASS.
+     */
     std::shared_ptr<NETCLASS> GetNetClassByName( const wxString& aNetName ) const;
 
     /**
@@ -342,8 +342,8 @@ private:
      * to provide missing defaults. The netclasses vector will be sorted by priority 1st and then
      * name alphabetically
      */
-    void makeEffectiveNetclass( std::shared_ptr<NETCLASS>& effectiveNetclass,
-                                std::vector<NETCLASS*>&    netclasses ) const;
+    void makeEffectiveNetclass( std::shared_ptr<NETCLASS>&               effectiveNetclass,
+                                std::vector<std::shared_ptr<NETCLASS>>& netclasses ) const;
 
     /// @brief Adds any missing fields to the given netclass from the default netclass
     /// @returns true if any fields were added from the default netclass

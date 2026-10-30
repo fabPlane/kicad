@@ -133,7 +133,7 @@ public:
         append( std::move( aItem ), *sheet, aPosition );
     }
 
-    void Report( int aCode, const RC_ITEM::KIIDS& aItems, const KIID_PATH& aSheet, const VECTOR2I& aPosition,
+    void Report( int aCode, const std::vector<KIID>& aItems, const KIID_PATH& aSheet, const VECTOR2I& aPosition,
                  ITEM_PATHS aItemPaths = ITEM_PATHS::NONE, const wxString& aMessage = wxEmptyString )
     {
         auto item = ERC_ITEM::Create( aCode );
@@ -739,7 +739,10 @@ void ERC_TESTER::TestTextVars( DS_PROXY_VIEW_ITEM* aDrawingSheet )
                                       SCH_CONNECTIVITY::ExtractTextAssertions( text->GetText() ),
                                       text->GetPosition() ) )
                 {
-                    // Don't run unresolved test
+                    // Skip unresolved-variable test.
+                    // Yes, the assertion message could have an unresolved variable in it, but it's
+                    // going to end up in the ERC window anyway, so there's not much sense in double-
+                    // reporting it.
                 }
                 else if( varRefRegEx.Matches( text->GetShownText( FOR_ERC_DRC ) ) )
                 {
@@ -753,6 +756,58 @@ void ERC_TESTER::TestTextVars( DS_PROXY_VIEW_ITEM* aDrawingSheet )
             }
         }
     }
+}
+
+
+int ERC_TESTER::TestEmptyPowerValues()
+{
+    if( ADVANCED_CFG::GetCfg().m_ConnectivityEngine )
+    {
+        return reportSourceErrors( *m_schematic, ERCE_EMPTY_POWER_VALUE,
+                                   m_schematic->Connectivity().Engine().EmptyPowerValues() );
+    }
+
+    int errors = 0;
+
+    for( const SCH_SHEET_PATH& sheet : m_sheetList )
+    {
+        SCH_SCREEN* screen = sheet.LastScreen();
+
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+
+            for( SCH_PIN* pin : symbol->GetPins( &sheet ) )
+            {
+                if( !pin->IsGlobalPower() && !pin->IsLocalPower() )
+                    continue;
+
+                const SYMBOL* parent = pin->GetLibPin() ? pin->GetLibPin()->GetParentSymbol() : nullptr;
+
+                // A hidden power input on an ordinary symbol is named from the pin, not the value
+                if( !parent || ( !parent->IsGlobalPower() && !parent->IsLocalPower() ) )
+                    continue;
+
+                wxString name = symbol->GetValue( &sheet, FOR_NETNAME );
+
+                if( name.Trim( false ).Trim( true ).IsEmpty() )
+                {
+                    auto ercItem = ERC_ITEM::Create( ERCE_EMPTY_POWER_VALUE );
+                    ercItem->SetItems( pin );
+                    ercItem->SetItemsSheetPaths( sheet );
+                    ercItem->SetSheetSpecificPath( sheet );
+
+                    SCH_MARKER* marker = new SCH_MARKER( std::move( ercItem ), pin->GetPosition() );
+                    screen->Append( marker );
+                    errors++;
+                }
+
+                break;
+            }
+        }
+    }
+
+    return errors;
 }
 
 
@@ -2198,7 +2253,9 @@ int ERC_TESTER::TestMultUnitPinConflicts()
         }
     }
 
-    // Pick the reference net/pin deterministically, so the same conflict yields the same marker on every ERC run.
+    // Pick the reference net/pin deterministically, so the same conflict yields the same marker on every ERC
+    // run. While this won't necessarily match existing ERC exclusions, it will at least increase match fidelity
+    // on future saves/reads.
     std::vector<wxString> conflicted;
 
     for( const auto& [name, pins] : pinToNetMap )
@@ -2348,8 +2405,8 @@ int ERC_TESTER::TestConnectivity( SCHEMATIC& aSchematic )
                 continue;
 
             markers.Report( code,
-                            diagnostic.pin == niluuid ? RC_ITEM::KIIDS{ diagnostic.flag }
-                                                      : RC_ITEM::KIIDS{ diagnostic.pin, diagnostic.flag },
+                            diagnostic.pin == niluuid ? std::vector<KIID>{ diagnostic.flag }
+                                                      : std::vector<KIID>{ diagnostic.pin, diagnostic.flag },
                             diagnostic.sheet, diagnostic.position, ITEM_PATHS::MAIN );
         }
     }
@@ -3344,8 +3401,6 @@ void ERC_TESTER::RunTests( DS_PROXY_VIEW_ITEM* aDrawingSheet, SCH_EDIT_FRAME* aE
         m_screens.DeleteAllMarkers( MARKER_BASE::MARKER_ERC, true );
     }
 
-    m_sheetList.AnnotatePowerSymbols();
-
     if( aEditFrame )
     {
         if( ADVANCED_CFG::GetCfg().m_IncrementalConnectivity )
@@ -3482,6 +3537,14 @@ void ERC_TESTER::RunTests( DS_PROXY_VIEW_ITEM* aDrawingSheet, SCH_EDIT_FRAME* aE
             aProgressReporter->AdvancePhase( _( "Checking field names..." ) );
 
         TestFieldNameWhitespace();
+    }
+
+    if( m_settings.IsTestEnabled( ERCE_EMPTY_POWER_VALUE ) )
+    {
+        if( aProgressReporter )
+            aProgressReporter->AdvancePhase( _( "Checking for empty power symbol values..." ) );
+
+        TestEmptyPowerValues();
     }
 
     if( m_settings.IsTestEnabled( ERCE_EMPTY_LABEL_NAME ) )

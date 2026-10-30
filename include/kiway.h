@@ -163,14 +163,14 @@ struct KIFACE
         enum class KIND
         {
             FILE_KIND,    ///< Open the file at #path.
-            FPID_KIND,    ///< Open the library element named by #libId
+            LIBID_KIND,   ///< Open the library element named by #libId
             PROJECT_KIND, ///< Serve the project at #path (library access); since 11.0
             CREATE_KIND,  ///< Create a new document at #path and open it (in memory, not persisted)
         };
 
         KIND     kind = KIND::FILE_KIND;
-        wxString path;               ///< File path (KIND::FILE_KIND) or project path (KIND::FPID_KIND).
-        LIB_ID   libId;              ///< Library identifier; valid when kind == KIND::FPID_KIND.
+        wxString path;               ///< File path (KIND::FILE_KIND) or project path (KIND::LIBID_KIND).
+        LIB_ID   libId;              ///< Library identifier; valid when kind == KIND::LIBID_KIND.
     };
 
     // The order of functions establishes the vtable sequence, do not change the
@@ -186,6 +186,7 @@ struct KIFACE
 
     /**
      * Called just once shortly after the DSO is loaded.
+     *
      * It is the second function called, immediately after the KIFACE_GETTER().  However
      * before either of those, static C++ constructors are called.  The DSO implementation
      * should do process level initialization here, not project specific since there will
@@ -193,6 +194,7 @@ struct KIFACE
      *
      * @param aProgram is the process block: #PGM_BASE*.
      * @param aCtlBits consists of bit flags from the set of KFCTL_* \#defines above.
+     * @param aKiway
      * @return true if DSO initialized OK, false if not.  When returning false, the loader
      *         may optionally decide to terminate the process or not, but will not put out
      *         any UI because that is the duty of this function to say why it is returning
@@ -286,12 +288,15 @@ struct KIFACE
     }
 
     /**
-     * Close a document opened by HandleApiOpenDocument.  A FILE_KIND spec with an empty path, or
-     * an FPID_KIND spec with an invalid LIB_ID, closes whichever document of that kind is open.
+     * Close the document identified by \p aSpec.
+     *
+     * KIND::FILE_KIND and KIND::CREATE_KIND address the KIFACE's file-backed document
+     * (board or schematic); KIND::LIBID_KIND addresses a library item (footprint or
+     * symbol). For LIBID_KIND an invalid libId closes whichever library item is open,
+     * otherwise it must match the open library item; for the file kinds, an empty path
+     * means "whatever document is open".  KIND::PROJECT_KIND releases the project.
      */
-    virtual bool HandleApiCloseDocument( const DOCUMENT_SPEC& aSpec,
-                                         KICAD_API_SERVER* aServer,
-                                         wxString* aError )
+    virtual bool HandleApiCloseDocument( const DOCUMENT_SPEC& aSpec, KICAD_API_SERVER* aServer, wxString* aError )
     {
         if( aError )
             *aError = wxS( "CloseDocument is not implemented for this face" );
@@ -371,8 +376,6 @@ public:
         FACE_GERBVIEW,
         FACE_PL_EDITOR,
         FACE_PCB_CALCULATOR,
-        FACE_BMP2CMP,
-
         KIWAY_FACE_COUNT
     };
 
@@ -472,7 +475,7 @@ public:
     LOCAL_HISTORY& LocalHistory() { return *m_local_history; }
 
     /**
-     * Change the language and then calls ShowChangedLanguage() on all #KIWAY_PLAYERs.
+     * Change the language and then calls ShowChangedLanguage() on all #KIWAY_PLAYER objects.
      */
     virtual void SetLanguage( int aLanguage );
 
@@ -522,15 +525,14 @@ public:
 
     int  ProcessJob( KIWAY::FACE_T aFace, JOB* aJob, REPORTER* aReporter = nullptr,
                      PROGRESS_REPORTER* aProgressReporter = nullptr );
+    bool ProcessApiCloseDocument( KIWAY::FACE_T aFace, const KIFACE::DOCUMENT_SPEC& aSpec,
+                                  KICAD_API_SERVER* aServer,
+                                  wxString* aError = nullptr );
     bool ProcessJobConfigDialog( KIWAY::FACE_T aFace, JOB* aJob, wxWindow* aWindow );
 
     bool ProcessApiOpenDocument( KIWAY::FACE_T aFace, const KIFACE::DOCUMENT_SPEC& aSpec,
                                  KICAD_API_SERVER* aServer,
                                  wxString* aError = nullptr );
-
-    bool ProcessApiCloseDocument( KIWAY::FACE_T aFace, const KIFACE::DOCUMENT_SPEC& aSpec,
-                                  KICAD_API_SERVER* aServer,
-                                  wxString* aError = nullptr );
 
     /**
      * Gets the window pointer to the blocking dialog (to send it signals)

@@ -327,6 +327,7 @@ void SCH_PIN::swapData( SCH_ITEM* aItem )
     std::swap( m_nameTextSize, pin->m_nameTextSize );
     std::swap( m_alt, pin->m_alt );
     std::swap( m_operatingPoint, pin->m_operatingPoint );
+    std::swap( m_isDangling, pin->m_isDangling );
 
     // Not saved and purely render state, but they describe the geometry that was swapped
     std::swap( m_remappedFromNumber, pin->m_remappedFromNumber );
@@ -1845,6 +1846,14 @@ bool SCH_PIN::HasConnectivityChanges( const SCH_ITEM* aItem,
             return true;
     }
 
+    // Similarly, changing to/from PT_NC affects whether or not the pin participates
+    // in the connectivity graph.
+    if( GetType() == ELECTRICAL_PINTYPE::PT_NC || pin->GetType() == ELECTRICAL_PINTYPE::PT_NC )
+    {
+        if( GetType() != pin->GetType() )
+            return true;
+    }
+
     return false;
 }
 
@@ -2086,11 +2095,11 @@ int SCH_PIN::compare( const SCH_ITEM& aOther, int aCompareFlags ) const
     if( dynamic_cast<const LIB_SYMBOL*>( GetParentSymbol() ) )
     {
         const PIN_COMPARISON_VIEW lhs{ GetUnit(), GetBodyStyle(), IsPrivate(), m_position, m_number,
-                m_length, m_orientation, m_shape, m_type, m_hidden, m_numTextSize,
-                m_nameTextSize, m_alternates };
+                                       m_length, m_orientation, m_shape, m_type, m_hidden, m_numTextSize,
+                                       m_nameTextSize, m_alternates };
         const PIN_COMPARISON_VIEW rhs{ tmp->GetUnit(), tmp->GetBodyStyle(), tmp->IsPrivate(), tmp->m_position,
-                tmp->m_number, tmp->m_length, tmp->m_orientation, tmp->m_shape, tmp->m_type,
-                tmp->m_hidden, tmp->m_numTextSize, tmp->m_nameTextSize, tmp->m_alternates };
+                                       tmp->m_number, tmp->m_length, tmp->m_orientation, tmp->m_shape, tmp->m_type,
+                                       tmp->m_hidden, tmp->m_numTextSize, tmp->m_nameTextSize, tmp->m_alternates };
         return lhs.Compare( rhs, aCompareFlags );
     }
 
@@ -2098,6 +2107,16 @@ int SCH_PIN::compare( const SCH_ITEM& aOther, int aCompareFlags ) const
     {
         // StrNumCmp: sort the same as the pads in the footprint file
         return StrNumCmp( m_number, tmp->m_number );
+    }
+
+    if( m_name != tmp->m_name )
+    {
+        retv = StrNumCmp( m_name, tmp->m_name );
+
+        if( retv != 0 )
+            return retv;
+
+        return m_number.Cmp( tmp->m_name );
     }
 
     if( m_position.x != tmp->m_position.x )
@@ -2108,10 +2127,12 @@ int SCH_PIN::compare( const SCH_ITEM& aOther, int aCompareFlags ) const
 
     if( dynamic_cast<const SCH_SYMBOL*>( GetParentSymbol() ) )
     {
-        if( ( m_libPin == nullptr ) || ( tmp->m_libPin == nullptr ) )
+        if( m_libPin && !tmp->m_libPin )
+            return 1;
+        else if( !m_libPin && tmp->m_libPin )
             return -1;
-
-        retv = m_libPin->compare( *tmp->m_libPin, aCompareFlags );
+        else if( m_libPin )
+            retv = m_libPin->compare( *tmp->m_libPin, aCompareFlags );
 
         if( retv )
             return retv;
@@ -2122,8 +2143,78 @@ int SCH_PIN::compare( const SCH_ITEM& aOther, int aCompareFlags ) const
             return retv;
     }
 
-
     return 0;
+}
+
+
+bool SCH_PIN::operator==( const SCH_ITEM& aOther ) const
+{
+    if( Type() != aOther.Type() )
+        return false;
+
+    return *this == static_cast<const SCH_PIN&>( aOther );
+}
+
+
+bool SCH_PIN::operator==( const SCH_PIN& aPin ) const
+{
+    // Compare local positions below.  SCH_ITEM's position compare uses global coordinates
+    if( SCH_ITEM::compare( aPin, -1 & ~( COMPARE_FLAGS::UUID | COMPARE_FLAGS::POSITION ) ) != 0 )
+        return false;
+
+    if( m_libPin && aPin.m_libPin )
+    {
+        // Both have a libPin; pins are children of a SCH_SYMBOL.
+        if( !m_libPin->operator==( *aPin.m_libPin ) )
+            return false;
+
+        if( m_alt != aPin.m_alt )
+            return false;
+    }
+    else if( m_libPin != aPin.m_libPin )
+    {
+        // One has a libPin but the other doesn't.
+        return false;
+    }
+    else
+    {
+        // Both libPins are nullptr; pins are children of a LIB_SYMBOL.  Alternates are valid here.
+        if( m_alternates != aPin.m_alternates )
+            return false;
+    }
+
+    if( GetName() != aPin.GetName() )
+        return false;
+
+    if( GetNumber() != aPin.GetNumber() )
+        return false;
+
+    // Don't use GetPosition(); it will return the global coordinates rather than the local ones
+    if( m_position != aPin.m_position )
+        return false;
+
+    if( GetLength() != aPin.GetLength() )
+        return false;
+
+    if( GetOrientation() != aPin.GetOrientation() )
+        return false;
+
+    if( GetShape() != aPin.GetShape() )
+        return false;
+
+    if( GetType() != aPin.GetType() )       // Electrical type
+        return false;
+
+    if( IsVisible() != aPin.IsVisible() )
+        return false;
+
+    if( GetNumberTextSize() != aPin.GetNumberTextSize() )
+        return false;
+
+    if( GetNameTextSize() != aPin.GetNameTextSize() )
+        return false;
+
+    return true;
 }
 
 
@@ -2137,16 +2228,12 @@ double SCH_PIN::Similarity( const SCH_ITEM& aOther ) const
 
     const SCH_PIN* other = static_cast<const SCH_PIN*>( &aOther );
 
-    if( m_libPin )
-    {
-        if( m_number != other->m_number )
-            return 0.0;
-
-        if( m_position != other->m_position )
-            return 0.0;
-
+    if( m_libPin && !other->m_libPin )
+        return 0.0;
+    else if( !m_libPin && other->m_libPin )
+        return 0.0;
+    else if( m_libPin )
         return m_libPin->Similarity( *other->m_libPin );
-    }
 
     double similarity = SimilarityBase( aOther );
 

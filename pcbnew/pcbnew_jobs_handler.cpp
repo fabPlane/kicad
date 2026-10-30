@@ -19,7 +19,9 @@
  */
 
 #include <import_net_names.h>
+#include <diff_merge/merge_dispatch.h>
 #include <richio.h>
+#include <string_utils.h>
 #include <wx/crt.h>
 #include <wx/dir.h>
 #include <wx/zipstrm.h>
@@ -40,6 +42,7 @@
 #include <diff_merge/kicad_diff_types.h>
 #include <settings/json_settings_internals.h>
 #include <trace_helpers.h>
+#include <board_tables/generated_table_refresh.h>
 #include <pcb_drill_chart.h>
 #include <drc/drc_engine.h>
 #include <board_statistics_report.h>
@@ -53,8 +56,8 @@
 #include <jobs/job_fp_export_svg.h>
 #include <jobs/job_fp_upgrade.h>
 #include <jobs/job_export_pcb_ipc2581.h>
+#include <jobs/job_export_pcb_idf.h>
 #include <jobs/job_export_pcb_ipcd356.h>
-#include <jobs/job_export_pcb_specctra.h>
 #include <jobs/job_export_pcb_odb.h>
 #include <jobs/job_export_pcb_gerber.h>
 #include <jobs/job_export_pcb_gerbers.h>
@@ -62,6 +65,7 @@
 #include <jobs/job_export_pcb_drill.h>
 #include <jobs/job_export_pcb_dxf.h>
 #include <jobs/job_export_pcb_gencad.h>
+#include <jobs/job_export_pcb_specctra_dsn.h>
 #include <jobs/job_export_pcb_pdf.h>
 #include <jobs/job_export_pcb_png.h>
 #include <jobs/job_export_pcb_pos.h>
@@ -75,6 +79,10 @@
 #include <jobs/job_pcb_import.h>
 #include <jobs/job_import_utils.h>
 #include <jobs/job_pcb_upgrade.h>
+#include <jobs/job_pcb_downgrade.h>
+#include <downgrade/board_downgrade.h>
+#include <downgrade_scan.h>
+#include <downgrade_copy.h>
 #include <eda_units.h>
 #include <footprint_library_adapter.h>
 #include <lset.h>
@@ -96,6 +104,7 @@
 #include <pad.h>
 #include <pcb_marker.h>
 #include <project/project_file.h>
+#include <exporters/export_idf.h>
 #include <exporters/export_gencad_writer.h>
 #include <exporters/export_d356.h>
 #include <specctra_import_export/specctra.h>
@@ -126,10 +135,11 @@
 #include <settings/settings_manager.h>
 #include <dialogs/dialog_gendrill.h>
 #include <dialogs/dialog_gen_footprint_position.h>
-#include <exporters/export_ipc2581.h>
-#include <exporters/export_odbpp.h>
 #include <dialogs/dialog_export_2581.h>
+#include <dialogs/dialog_export_idf.h>
 #include <dialogs/dialog_export_odbpp.h>
+#include <pcb_io/ipc2581/ipc2581_export_job.h>
+#include <pcb_io/odbpp/odb_export_job.h>
 #include <dialogs/dialog_export_step.h>
 #include <dialogs/dialog_footprint_fields_table.h>
 #include <dialogs/dialog_plot.h>
@@ -146,6 +156,8 @@
 #include <fstream>
 #include <paths.h>
 #include <streamwrapper.h>
+
+#include <specctra_import_export/specctra.h>
 #include <tools/zone_filler_tool.h>
 
 #include <locale_io.h>
@@ -208,6 +220,11 @@ PCBNEW_JOBS_HANDLER::PCBNEW_JOBS_HANDLER( KIWAY* aKiway ) :
               {
                   return true;
               } );
+    Register( "downgrade", std::bind( &PCBNEW_JOBS_HANDLER::JobDowngrade, this, std::placeholders::_1 ),
+              []( JOB* job, wxWindow* aParent ) -> bool
+              {
+                  return true;
+              } );
     Register( "pcb_import", std::bind( &PCBNEW_JOBS_HANDLER::JobImport, this, std::placeholders::_1 ),
               []( JOB* job, wxWindow* aParent ) -> bool
               {
@@ -238,6 +255,12 @@ PCBNEW_JOBS_HANDLER::PCBNEW_JOBS_HANDLER( KIWAY* aKiway ) :
 
                   DIALOG_GENCAD_EXPORT_OPTIONS dlg( editFrame, gencadJob->GetSettingsDialogTitle(), gencadJob );
                   return dlg.ShowModal() == wxID_OK;
+              } );
+    Register( "specctra_dsn",
+              std::bind( &PCBNEW_JOBS_HANDLER::JobExportSpecctraDsn, this, std::placeholders::_1 ),
+              []( JOB* job, wxWindow* aParent ) -> bool
+              {
+                  return true;
               } );
     Register( "dxf", std::bind( &PCBNEW_JOBS_HANDLER::JobExportDxf, this, std::placeholders::_1 ),
               [aKiway]( JOB* job, wxWindow* aParent ) -> bool
@@ -452,11 +475,6 @@ PCBNEW_JOBS_HANDLER::PCBNEW_JOBS_HANDLER( KIWAY* aKiway ) :
               {
                   return true;
               } );
-    Register( "specctra", std::bind( &PCBNEW_JOBS_HANDLER::JobExportSpecctra, this, std::placeholders::_1 ),
-              []( JOB* job, wxWindow* aParent ) -> bool
-              {
-                  return true;
-              } );
     Register( "odb", std::bind( &PCBNEW_JOBS_HANDLER::JobExportOdb, this, std::placeholders::_1 ),
               [aKiway]( JOB* job, wxWindow* aParent ) -> bool
               {
@@ -469,6 +487,25 @@ PCBNEW_JOBS_HANDLER::PCBNEW_JOBS_HANDLER( KIWAY* aKiway ) :
 
                   DIALOG_EXPORT_ODBPP dlg( odbJob, editFrame, aParent );
                   return dlg.ShowModal() == wxID_OK;
+              } );
+    Register( "idf", std::bind( &PCBNEW_JOBS_HANDLER::JobExportIdf, this, std::placeholders::_1 ),
+              [aKiway]( JOB* job, wxWindow* aParent ) -> bool
+              {
+                  JOB_EXPORT_PCB_IDF* idfJob = dynamic_cast<JOB_EXPORT_PCB_IDF*>( job );
+
+                  PCB_EDIT_FRAME* editFrame =
+                          dynamic_cast<PCB_EDIT_FRAME*>( aKiway->Player( FRAME_PCB_EDITOR, false ) );
+
+                  wxCHECK( idfJob && editFrame, false );
+
+#ifndef KICAD_HEADLESS_API
+                  DIALOG_EXPORT_IDF3 dlg( idfJob, editFrame, aParent );
+                  return dlg.ShowModal() == wxID_OK;
+#else
+                  // There is never an editor frame headless, so the check above already
+                  // returned; this keeps the dialog's vtable out of the link.
+                  return false;
+#endif
               } );
 }
 
@@ -869,9 +906,7 @@ int PCBNEW_JOBS_HANDLER::JobExportBom( JOB* aJob )
 
             field.name = fieldName;
             field.show = !fieldName.StartsWith( wxT( "__" ), &field.name );
-
-            field.groupBy = alg::contains( aBomJob->m_fieldsGroupBy, field.name )
-                            || alg::contains( aBomJob->m_fieldsGroupBy, rawFieldName );
+            field.name = normalizeFieldName( field.name );
 
             if( ( aBomJob->m_fieldsLabels.size() > i ) && !aBomJob->m_fieldsLabels[i].IsEmpty() )
                 field.label = aBomJob->m_fieldsLabels[i];
@@ -882,6 +917,31 @@ int PCBNEW_JOBS_HANDLER::JobExportBom( JOB* aJob )
 
             preset.fieldsOrdered.emplace_back( field );
             i++;
+        }
+
+        for( const wxString& rawFieldName : aBomJob->m_fieldsGroupBy )
+        {
+            wxString fieldName = rawFieldName;
+            fieldName.StartsWith( wxT( "__" ), &fieldName );
+            fieldName = normalizeFieldName( fieldName );
+
+            if( fieldName.IsEmpty() )
+                continue;
+
+            bool fieldAlreadyPresent = false;
+
+            for( BOM_FIELD& field : preset.fieldsOrdered )
+            {
+                if( field.name == fieldName )
+                {
+                    field.groupBy = true;
+                    fieldAlreadyPresent = true;
+                    break;
+                }
+            }
+
+            if( !fieldAlreadyPresent )
+                preset.fieldsOrdered.push_back( { fieldName, GetGeneratedFieldDisplayName( fieldName ), false, true } );
         }
 
         preset.sortAsc = aBomJob->m_sortAsc;
@@ -975,8 +1035,7 @@ int PCBNEW_JOBS_HANDLER::JobExportBom( JOB* aJob )
 
         if( hasVariantPlaceholder )
         {
-            wxString variantPath = configuredPath;
-            variantPath.Replace( wxS( "${VARIANT}" ), variantName );
+            wxString variantPath = ExpandVariantOutputPath( configuredPath, variantName );
             aBomJob->SetConfiguredOutputPath( variantPath );
             outPath = aBomJob->GetFullOutputPath( board->GetProject() );
             aBomJob->SetConfiguredOutputPath( configuredPath );
@@ -1787,7 +1846,7 @@ int PCBNEW_JOBS_HANDLER::JobExportGerbers( JOB* aJob )
     for( PCB_LAYER_ID commonLayer : aGerberJob->m_plotOnAllLayersSequence )
         preflightLayers.set( commonLayer );
 
-    RefreshDrillCharts( *brd );
+    RefreshGeneratedTables( *brd );
 
     for( PCB_LAYER_ID layer : layersToPlot.UIOrder() )
     {
@@ -1936,6 +1995,52 @@ int PCBNEW_JOBS_HANDLER::JobExportGencad( JOB* aJob )
 }
 
 
+int PCBNEW_JOBS_HANDLER::JobExportSpecctraDsn( JOB* aJob )
+{
+    JOB_EXPORT_PCB_SPECCTRA_DSN* specctraJob = dynamic_cast<JOB_EXPORT_PCB_SPECCTRA_DSN*>( aJob );
+
+    if( !specctraJob )
+        return CLI::EXIT_CODES::ERR_UNKNOWN;
+
+    BOARD* brd = getBoard( specctraJob->m_filename );
+
+    if( !brd )
+        return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+
+    if( specctraJob->GetConfiguredOutputPath().IsEmpty() )
+    {
+        wxFileName fn = brd->GetFileName();
+        fn.SetExt( FILEEXT::SpecctraDsnFileExtension );
+
+        specctraJob->SetWorkingOutputPath( fn.GetFullName() );
+    }
+
+    wxString outPath = resolveJobOutputPath( aJob, brd );
+
+    if( !PATHS::EnsurePathExists( outPath, true ) )
+    {
+        m_reporter->Report( _( "Failed to create output directory\n" ), RPT_SEVERITY_ERROR );
+        return CLI::EXIT_CODES::ERR_INVALID_OUTPUT_CONFLICT;
+    }
+
+    try
+    {
+        DSN::ExportBoardToSpecctraFile( brd, outPath, m_reporter );
+    }
+    catch( const IO_ERROR& ioe )
+    {
+        m_reporter->Report( wxString::Format( _( "Export failed: %s\n" ), ioe.What() ),
+                            RPT_SEVERITY_ERROR );
+        return CLI::EXIT_CODES::ERR_UNKNOWN;
+    }
+
+    aJob->AddOutput( outPath );
+    m_reporter->Report( _( "Successfully created Specctra DSN file\n" ), RPT_SEVERITY_INFO );
+
+    return CLI::EXIT_CODES::OK;
+}
+
+
 int PCBNEW_JOBS_HANDLER::JobExportStats( JOB* aJob )
 {
     JOB_EXPORT_PCB_STATS* statsJob = dynamic_cast<JOB_EXPORT_PCB_STATS*>( aJob );
@@ -2067,8 +2172,8 @@ int PCBNEW_JOBS_HANDLER::JobExportStackup( JOB* aJob )
                 item->SetLayerName( brd->GetLayerName( item->GetBrdLayerId() ) );
         }
 
-        EDA_UNITS unitsForReport =
-                stackupJob->m_units == JOB_EXPORT_PCB_STACKUP::UNITS::MM ? EDA_UNITS::MM : EDA_UNITS::INCH;
+        EDA_UNITS unitsForReport = stackupJob->m_units == JOB_EXPORT_PCB_STACKUP::UNITS::MM ? EDA_UNITS::MM
+                                                                                            : EDA_UNITS::INCH;
 
         STACKUP_CSV_OPTIONS options;
         options.includeColor = stackupJob->m_includeColor;
@@ -2161,7 +2266,7 @@ int PCBNEW_JOBS_HANDLER::JobExportGerber( JOB* aJob )
         aGerberJob->SetWorkingOutputPath( fn.GetFullName() );
     }
 
-    wxString outPath = resolveJobOutputPath( aJob, brd );
+    wxString outPath = resolveJobOutputPath( aJob, brd, &aGerberJob->m_drawingSheet );
 
     if( aGerberJob->m_checkZonesBeforePlot )
     {
@@ -2206,17 +2311,19 @@ int PCBNEW_JOBS_HANDLER::JobExportGerber( JOB* aJob )
     {
         LSET preflightLayers( { aGerberJob->m_plotLayerSequence } );
 
-        RefreshDrillCharts( *brd );
+        RefreshGeneratedTables( *brd );
     }
 
     PLOTTER* plotter = StartPlotBoard( brd, &plotOpts, layer, layerName, outPath, sheetName, sheetPath );
+    bool     success = false;
 
     if( plotter )
     {
         PlotBoardLayers( brd, plotter, aGerberJob->m_plotLayerSequence, plotOpts );
-        plotter->EndPlot();
+        success = plotter->EndPlot();
     }
-    else
+
+    if( !success )
     {
         m_reporter->Report( wxString::Format( _( "Failed to plot to '%s'.\n" ), outPath ), RPT_SEVERITY_ERROR );
         exitCode = CLI::EXIT_CODES::ERR_INVALID_OUTPUT_CONFLICT;
@@ -2746,11 +2853,6 @@ int PCBNEW_JOBS_HANDLER::doFpExportSvg( JOB_FP_EXPORT_SVG* aSvgJob, const FOOTPR
     PCB_PLOT_PARAMS plotOpts;
     PCB_PLOTTER::PlotJobToPlotOpts( plotOpts, aSvgJob, *m_reporter );
 
-    if( plotOpts.GetSketchPadsOnFabLayers() )
-    {
-        plotOpts.SetPlotPadNumbers( true );
-    }
-
     if( !PlotFootprintToSVG( *aFootprint, *Pgm().GetSettingsManager().GetProject( "" ), &aSvgJob->GetVarOverrides(),
                              plotOpts, aSvgJob->m_plotLayerSequence, aSvgJob->m_plotOnAllLayersSequence,
                              outputFile.GetFullPath(), m_reporter ) )
@@ -3003,6 +3105,24 @@ int PCBNEW_JOBS_HANDLER::JobExportDrc( JOB* aJob )
 }
 
 
+void PCBNEW_JOBS_HANDLER::refillFabZones( const JOB_EXPORT_PCB_FAB& aJob, BOARD* aBoard )
+{
+    if( !aJob.m_checkZonesBeforeExport )
+    {
+        return;
+    }
+
+    TOOL_MANAGER* toolManager = getToolManager( aBoard );
+
+    if( !toolManager->FindTool( ZONE_FILLER_TOOL_NAME ) )
+    {
+        toolManager->RegisterTool( new ZONE_FILLER_TOOL );
+    }
+
+    toolManager->GetTool<ZONE_FILLER_TOOL>()->FillAllZones( nullptr, m_progressReporter, true );
+}
+
+
 int PCBNEW_JOBS_HANDLER::JobExportIpc2581( JOB* aJob )
 {
     JOB_EXPORT_PCB_IPC2581* job = dynamic_cast<JOB_EXPORT_PCB_IPC2581*>( aJob );
@@ -3015,8 +3135,16 @@ int PCBNEW_JOBS_HANDLER::JobExportIpc2581( JOB* aJob )
     if( !brd )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
 
-    if( !job->m_variant.IsEmpty() )
-        brd->SetCurrentVariant( job->m_variant );
+    struct VARIANT_RESTORE
+    {
+        BOARD*   m_board;
+        wxString m_variant;
+
+        ~VARIANT_RESTORE() { m_board->SetCurrentVariant( m_variant ); }
+    } restore{ brd, brd->GetCurrentVariant() };
+
+    if( !job->m_variantNames.empty() )
+        brd->SetCurrentVariant( job->m_variantNames.front() );
 
     if( job->GetConfiguredOutputPath().IsEmpty() )
     {
@@ -3034,7 +3162,9 @@ int PCBNEW_JOBS_HANDLER::JobExportIpc2581( JOB* aJob )
         return CLI::EXIT_CODES::ERR_INVALID_OUTPUT_CONFLICT;
     }
 
-    if( !ExportBoardToIpc2581( *job, brd, m_progressReporter, m_reporter ) )
+    refillFabZones( *job, brd );
+
+    if( !GenerateIpc2581File( *job, brd, m_progressReporter, m_reporter ) )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
 
     return CLI::EXIT_CODES::SUCCESS;
@@ -3088,9 +3218,9 @@ int PCBNEW_JOBS_HANDLER::JobExportIpcD356( JOB* aJob )
 }
 
 
-int PCBNEW_JOBS_HANDLER::JobExportSpecctra( JOB* aJob )
+int PCBNEW_JOBS_HANDLER::JobExportIdf( JOB* aJob )
 {
-    JOB_EXPORT_PCB_SPECCTRA* job = dynamic_cast<JOB_EXPORT_PCB_SPECCTRA*>( aJob );
+    JOB_EXPORT_PCB_IDF* job = dynamic_cast<JOB_EXPORT_PCB_IDF*>( aJob );
 
     if( job == nullptr )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
@@ -3103,13 +3233,12 @@ int PCBNEW_JOBS_HANDLER::JobExportSpecctra( JOB* aJob )
     if( job->GetConfiguredOutputPath().IsEmpty() )
     {
         wxFileName fn = brd->GetFileName();
-        fn.SetName( fn.GetName() );
-        fn.SetExt( FILEEXT::SpecctraDsnFileExtension );
+        fn.SetExt( FILEEXT::IdfV3BoardFileExtension );
 
         job->SetWorkingOutputPath( fn.GetFullName() );
     }
 
-    wxString outPath = resolveJobOutputPath( aJob, brd );
+    wxString outPath = resolveJobOutputPath( job, brd );
 
     if( !PATHS::EnsurePathExists( outPath, true ) )
     {
@@ -3117,20 +3246,30 @@ int PCBNEW_JOBS_HANDLER::JobExportSpecctra( JOB* aJob )
         return CLI::EXIT_CODES::ERR_INVALID_OUTPUT_CONFLICT;
     }
 
-    try
+#ifndef KICAD_HEADLESS_API
+    FILENAME_RESOLVER* resolver = PROJECT_PCB::Get3DFilenameResolver( brd->GetProject() );
+#else
+    // The project's resolver belongs to its 3D model cache, which the headless core does not
+    // build; the exporter only needs a resolver, so it gets its own.
+    FILENAME_RESOLVER headlessResolver;
+    headlessResolver.SetProgramBase( &Pgm() );
+    headlessResolver.SetProject( brd->GetProject() );
+    FILENAME_RESOLVER* resolver = &headlessResolver;
+#endif
+
+    if( !resolver )
     {
-        // Flips the back-side footprints while it writes and flips them back afterwards
-        DSN::ExportBoardToSpecctraFile( brd, outPath );
-    }
-    catch( const IO_ERROR& ioe )
-    {
-        m_reporter->Report( wxString::Format( _( "Failed to create Specctra DSN file: %s\n" ), ioe.What() ),
-                            RPT_SEVERITY_ERROR );
-        return CLI::EXIT_CODES::ERR_INVALID_OUTPUT_CONFLICT;
+        m_reporter->Report( _( "Internal error\n" ), RPT_SEVERITY_ERROR );
+        return CLI::EXIT_CODES::ERR_UNKNOWN;
     }
 
-    aJob->AddOutput( outPath );
-    m_reporter->Report( _( "Successfully created Specctra DSN file\n" ), RPT_SEVERITY_INFO );
+    IDF_EXPORTER exporter( brd, resolver, job, m_reporter );
+
+    if( !exporter.Export( outPath ) )
+        return CLI::EXIT_CODES::ERR_UNKNOWN;
+
+    m_reporter->Report( _( "Successfully created IDFv3 files\n" ), RPT_SEVERITY_INFO );
+
     return CLI::EXIT_CODES::SUCCESS;
 }
 
@@ -3146,9 +3285,6 @@ int PCBNEW_JOBS_HANDLER::JobExportOdb( JOB* aJob )
 
     if( !brd )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
-
-    if( !job->m_variant.IsEmpty() )
-        brd->SetCurrentVariant( job->m_variant );
 
     if( job->GetConfiguredOutputPath().IsEmpty() )
     {
@@ -3175,29 +3311,21 @@ int PCBNEW_JOBS_HANDLER::JobExportOdb( JOB* aJob )
         }
     }
 
-    wxString outPath = resolveJobOutputPath( job, brd );
+    resolveJobOutputPath( job, brd );
 
     // The helper handles output path creation, so hand it a job that already has fully-resolved
     // token context (title block and project overrides applied above).
-    CLI_REPORTER reporter;
+    refillFabZones( *job, brd );
 
-    if( !m_reporter )
-        m_reporter = &reporter;
+    ODB_EXPORT_RESULT result = ::GenerateODBPPFiles( *job, brd, nullptr, m_progressReporter, m_reporter );
 
-    if( job->m_checkZonesBeforeExport )
+    if( result.m_ok )
     {
-        TOOL_MANAGER* toolManager = getToolManager( brd );
-
-        if( !toolManager->FindTool( ZONE_FILLER_TOOL_NAME ) )
-            toolManager->RegisterTool( new ZONE_FILLER_TOOL );
-
-        toolManager->GetTool<ZONE_FILLER_TOOL>()->FillAllZones( nullptr, m_progressReporter, true );
+        for( const wxString& path : result.m_outputs )
+            aJob->AddOutput( path );
     }
 
-    ExportBoardToOdbpp( *job, brd, nullptr, m_progressReporter, m_reporter );
-    aJob->AddOutput( outPath );
-
-    if( m_reporter->HasMessageOfSeverity( RPT_SEVERITY_ERROR ) )
+    if( !result.m_ok || m_reporter->HasMessageOfSeverity( RPT_SEVERITY_ERROR ) )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
 
     return CLI::EXIT_CODES::SUCCESS;
@@ -3216,15 +3344,16 @@ int PCBNEW_JOBS_HANDLER::JobUpgrade( JOB* aJob )
     {
         IO_RELEASER<PCB_IO> pi( PCB_IO_MGR::FindPlugin( PCB_IO_MGR::KICAD_SEXP ) );
         BOARD*              brd = getBoard( job->m_filename );
+
+        if( !brd )
+            return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+
         if( brd->GetFileFormatVersionAtLoad() < SEXPR_BOARD_FILE_VERSION )
             shouldSave = true;
 
         // A chart is derived data, so the upgrade brings every one up to date and saves if
         // that changed anything
-        const uint64_t before = brd->GetDrillModelGeneration();
-        RefreshDrillCharts( *brd );
-
-        if( brd->GetDrillModelGeneration() != before )
+        if( RefreshGeneratedTables( *brd ) > 0 )
             shouldSave = true;
 
         if( shouldSave )
@@ -3247,6 +3376,348 @@ int PCBNEW_JOBS_HANDLER::JobUpgrade( JOB* aJob )
 
     return CLI::EXIT_CODES::SUCCESS;
 }
+
+
+// Classify library footprints so their losses appear in the report.
+static void classifyFootprintLibraries( const wxString& aDir, const DOWNGRADE_TARGET& aTarget,
+                                        COMPATIBILITY_REPORT& aReport, bool aDropInsteadOfApproximate )
+{
+    wxArrayString files;
+    wxDir::GetAllFiles( aDir, &files, wxT( "*.kicad_mod" ) );
+
+    for( const wxString& file : files )
+    {
+        if( IsDowngradeWorkingArtifact( file ) )
+            continue;
+
+        try
+        {
+            PCB_IO_KICAD_SEXPR         loader;
+            wxString                   nameOut;
+            std::unique_ptr<FOOTPRINT> fp = loader.ImportFootprint( file, nameOut );
+
+            if( !fp )
+                continue;
+
+            BOARD scratch;
+            scratch.Add( fp.release() );
+
+            aReport.Merge( ClassifyBoardForDowngrade( &scratch, aTarget, aDropInsteadOfApproximate ) );
+        }
+        catch( const IO_ERROR& )
+        {
+            // A footprint that fails to load is caught later by the downgrade pass itself.
+        }
+    }
+}
+
+
+// Downgrade every .kicad_mod under the folder in place. Returns the first file the target could
+// not open, or empty when all are safe.
+static wxString downgradeFootprintLibraries( const wxString& aDir, const DOWNGRADE_TARGET& aTarget,
+                                             bool                        aDropInsteadOfApproximate,
+                                             DOWNGRADE_FILE_TRANSACTION* aTransaction = nullptr,
+                                             wxString*                   aRecoveryError = nullptr )
+{
+    auto convert = [&]( const wxString& aFile, const wxString& aTmp ) -> DOWNGRADE_FILE_RESULT
+    {
+        return DowngradeFootprintFileToTemp( aFile, aTmp, aTarget, aDropInsteadOfApproximate );
+    };
+
+    return DowngradeLibraryFilesInPlace(
+            aDir, wxT( "*.kicad_mod" ), aTarget.m_boardVersion,
+            [&]( const wxString& aText )
+            {
+                return FindUnsupportedBoardToken( aText, aTarget );
+            },
+            convert, aTransaction, aRecoveryError );
+}
+
+
+static wxString footprintRefusedMessage( const wxString& aFile, const DOWNGRADE_TARGET& aTarget )
+{
+    return wxString::Format( _( "Cannot export: footprint '%s' uses a feature %s cannot open.\n" ), aFile,
+                             aTarget.m_name );
+}
+
+
+int PCBNEW_JOBS_HANDLER::JobDowngrade( JOB* aJob )
+{
+    JOB_PCB_DOWNGRADE* job = dynamic_cast<JOB_PCB_DOWNGRADE*>( aJob );
+
+    if( job == nullptr )
+        return CLI::EXIT_CODES::ERR_UNKNOWN;
+
+    const DOWNGRADE_TARGET* target =
+            job->m_target.IsEmpty() ? &GetDowngradeTargets().front() : FindDowngradeTarget( job->m_target );
+
+    if( target == nullptr )
+    {
+        m_reporter->Report( wxString::Format( _( "Unknown target version '%s'. Valid targets: %s\n" ), job->m_target,
+                                              DowngradeTargetNames() ),
+                            RPT_SEVERITY_ERROR );
+        return CLI::EXIT_CODES::ERR_ARGS;
+    }
+
+    if( !job->m_libraryDir.IsEmpty() && !wxDirExists( job->m_libraryDir ) )
+    {
+        m_reporter->Report( wxString::Format( _( "The library folder '%s' does not exist.\n" ), job->m_libraryDir ),
+                            RPT_SEVERITY_ERROR );
+        return CLI::EXIT_CODES::ERR_ARGS;
+    }
+
+    if( !job->m_variant.IsEmpty() && target->m_boardVersion >= FIRST_PCB_VARIANTS )
+    {
+        m_reporter->Report( _( "The target supports variants, so there is nothing to flatten.\n" ),
+                            RPT_SEVERITY_ERROR );
+        return CLI::EXIT_CODES::ERR_ARGS;
+    }
+
+    wxString pathError;
+    wxString libraryCopy;
+
+    if( !job->m_libraryDir.IsEmpty() && !ValidateDowngradeLibrarySource( job->m_libraryDir, pathError ) )
+    {
+        m_reporter->Report( pathError + wxT( "\n" ), RPT_SEVERITY_ERROR );
+        return CLI::EXIT_CODES::ERR_ARGS;
+    }
+
+    if( !job->m_inPlace && !job->m_dryRun )
+    {
+        wxFileName output( job->m_outputFile );
+
+        if( !job->m_outputFile.IsEmpty() && output.MakeAbsolute() )
+            job->m_outputFile = output.GetFullPath();
+
+        if( !ValidateFreshDowngradeOutput( job->m_outputFile, pathError ) )
+        {
+            m_reporter->Report( pathError + wxT( "\n" ), RPT_SEVERITY_ERROR );
+            return CLI::EXIT_CODES::ERR_ARGS;
+        }
+
+        if( !job->m_libraryDir.IsEmpty() )
+        {
+            libraryCopy = DowngradeLibraryCopyPath( job->m_libraryDir, output.GetPath() );
+
+            if( libraryCopy.IsEmpty() || !ValidateDowngradeLibraryCopy( job->m_libraryDir, libraryCopy, pathError ) )
+            {
+                m_reporter->Report( pathError + wxT( "\n" ), RPT_SEVERITY_ERROR );
+                return CLI::EXIT_CODES::ERR_ARGS;
+            }
+        }
+    }
+
+    try
+    {
+        if( !job->m_filename.IsEmpty() )
+        {
+            // Load a private copy, never the live editor board.
+            PCB_IO_KICAD_SEXPR     loader;
+            std::unique_ptr<BOARD> brd( loader.LoadBoard( job->m_filename, nullptr ) );
+
+            if( !brd )
+                return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+
+            if( !job->m_variant.IsEmpty() )
+            {
+                const std::vector<wxString>& names = brd->GetVariantNames();
+
+                if( names.empty() )
+                {
+                    // A board only learns variants from the netlist updater. Without any, the
+                    // flatten is vacuous, so a project export must not fail here after the
+                    // schematic side accepted the name.
+                    m_reporter->Report( _( "The board has no variant data. The base board is exported.\n" ),
+                                        RPT_SEVERITY_WARNING );
+                }
+                else if( std::find( names.begin(), names.end(), job->m_variant ) == names.end() )
+                {
+                    m_reporter->Report(
+                            wxString::Format( _( "The board has no variant named '%s'.\n" ), job->m_variant ),
+                            RPT_SEVERITY_ERROR );
+                    return CLI::EXIT_CODES::ERR_ARGS;
+                }
+                else
+                {
+                    FlattenBoardVariant( brd.get(), job->m_variant );
+                }
+            }
+
+            COMPATIBILITY_REPORT report =
+                    ClassifyBoardForDowngrade( brd.get(), *target, job->m_dropInsteadOfApproximate );
+
+            // Library losses belong in the report the user approves too.
+            if( !job->m_libraryDir.IsEmpty() )
+                classifyFootprintLibraries( job->m_libraryDir, *target, report, job->m_dropInsteadOfApproximate );
+
+            job->m_report = report;
+
+            report.Print( m_reporter );
+
+            if( job->m_dryRun )
+                return CLI::EXIT_CODES::SUCCESS;
+
+            if( report.IsBlocked() )
+            {
+                m_reporter->Report( _( "Cannot export: the board uses features the target cannot represent.\n" ),
+                                    RPT_SEVERITY_ERROR );
+                return CLI::EXIT_CODES::ERR_UNKNOWN;
+            }
+
+            if( report.IsLossy() && !job->m_force )
+            {
+                m_reporter->Report( _( "Export would lose data. Re-run with --force to export anyway.\n" ),
+                                    RPT_SEVERITY_ERROR );
+                return CLI::EXIT_CODES::ERR_UNKNOWN;
+            }
+
+            DOWNGRADE_OUTPUT_DIRECTORIES outputDirectories;
+            wxString                     libraryDir = job->m_libraryDir;
+
+            if( !job->m_inPlace )
+            {
+                wxFileName output( job->m_outputFile );
+                output.MakeAbsolute();
+
+                if( !outputDirectories.Create( output.GetPath() ) )
+                {
+                    m_reporter->Report( _( "Could not create the output folder.\n" ), RPT_SEVERITY_ERROR );
+                    return CLI::EXIT_CODES::ERR_INVALID_OUTPUT_CONFLICT;
+                }
+
+                if( !libraryDir.IsEmpty() )
+                {
+                    if( !CopyDowngradeLibraryDirectory( libraryDir, libraryCopy, outputDirectories, pathError ) )
+                    {
+                        m_reporter->Report( pathError + wxT( "\n" ), RPT_SEVERITY_ERROR );
+                        return CLI::EXIT_CODES::ERR_UNKNOWN;
+                    }
+
+                    libraryDir = libraryCopy;
+                }
+            }
+
+            DOWNGRADE_FILE_TRANSACTION transaction;
+            wxString                   stagedBoard = transaction.Stage( job->m_outputFile );
+
+            if( stagedBoard.IsEmpty() )
+            {
+                m_reporter->Report( _( "Could not export the downgraded board.\n" ), RPT_SEVERITY_ERROR );
+                return CLI::EXIT_CODES::ERR_UNKNOWN;
+            }
+
+            // The real export loads its own fresh copy and fails closed on any uncovered token.
+            wxString badToken;
+
+            if( !ExportBoardToOlderVersion( job->m_filename, stagedBoard, *target, report, &badToken, job->m_variant,
+                                            job->m_dropInsteadOfApproximate ) )
+            {
+                if( !badToken.IsEmpty() )
+                    m_reporter->Report( wxString::Format( _( "Cannot export: the result still uses '%s', which %s "
+                                                             "cannot open. This feature has no downgrade rule yet.\n" ),
+                                                          badToken, target->m_name ),
+                                        RPT_SEVERITY_ERROR );
+                else
+                    m_reporter->Report( _( "Could not export the downgraded board.\n" ), RPT_SEVERITY_ERROR );
+
+                return CLI::EXIT_CODES::ERR_UNKNOWN;
+            }
+
+            if( !job->m_libraryDir.IsEmpty() )
+            {
+                wxString badLib = downgradeFootprintLibraries( libraryDir, *target, job->m_dropInsteadOfApproximate,
+                                                               &transaction );
+
+                if( !badLib.IsEmpty() )
+                {
+                    m_reporter->Report( footprintRefusedMessage( badLib, *target ), RPT_SEVERITY_ERROR );
+                    return CLI::EXIT_CODES::ERR_UNKNOWN;
+                }
+            }
+
+            wxString failedDestination = transaction.Commit();
+
+            if( !failedDestination.IsEmpty() )
+            {
+                m_reporter->Report( wxString::Format( _( "Could not replace '%s'.\n" ), failedDestination ),
+                                    RPT_SEVERITY_ERROR );
+
+                if( !transaction.GetRecoveryError().IsEmpty() )
+                    m_reporter->Report( transaction.GetRecoveryError(), RPT_SEVERITY_ERROR );
+
+                return CLI::EXIT_CODES::ERR_UNKNOWN;
+            }
+
+            outputDirectories.Commit();
+            m_reporter->Report( wxString::Format( _( "Saved downgraded board to '%s'\n" ), job->m_outputFile ),
+                                RPT_SEVERITY_INFO );
+        }
+        // Library-only mode. Fails closed if any library still uses a token the target cannot open.
+        else if( !job->m_libraryDir.IsEmpty() )
+        {
+            if( !job->m_inPlace && !job->m_dryRun )
+            {
+                m_reporter->Report( _( "A board input is required for a library copy export.\n" ), RPT_SEVERITY_ERROR );
+                return CLI::EXIT_CODES::ERR_ARGS;
+            }
+
+            if( !job->m_variant.IsEmpty() )
+            {
+                m_reporter->Report( _( "Variants do not apply to a library downgrade.\n" ), RPT_SEVERITY_ERROR );
+                return CLI::EXIT_CODES::ERR_ARGS;
+            }
+
+            COMPATIBILITY_REPORT report;
+            classifyFootprintLibraries( job->m_libraryDir, *target, report, job->m_dropInsteadOfApproximate );
+            job->m_report = report;
+            report.Print( m_reporter );
+
+            if( job->m_dryRun )
+                return CLI::EXIT_CODES::SUCCESS;
+
+            if( report.IsBlocked() )
+            {
+                m_reporter->Report( _( "Cannot export: the libraries use features the target cannot represent.\n" ),
+                                    RPT_SEVERITY_ERROR );
+                return CLI::EXIT_CODES::ERR_UNKNOWN;
+            }
+
+            if( report.IsLossy() && !job->m_force )
+            {
+                m_reporter->Report( _( "Export would lose data. Re-run with --force to export anyway.\n" ),
+                                    RPT_SEVERITY_ERROR );
+                return CLI::EXIT_CODES::ERR_UNKNOWN;
+            }
+
+            wxString recoveryError;
+            wxString badLib = downgradeFootprintLibraries( job->m_libraryDir, *target, job->m_dropInsteadOfApproximate,
+                                                           nullptr, &recoveryError );
+
+            if( !badLib.IsEmpty() )
+            {
+                m_reporter->Report( footprintRefusedMessage( badLib, *target ), RPT_SEVERITY_ERROR );
+
+                if( !recoveryError.IsEmpty() )
+                    m_reporter->Report( recoveryError, RPT_SEVERITY_ERROR );
+
+                return CLI::EXIT_CODES::ERR_UNKNOWN;
+            }
+
+            m_reporter->Report( _( "Downgraded footprint libraries\n" ), RPT_SEVERITY_INFO );
+        }
+    }
+    catch( const IO_ERROR& ioe )
+    {
+        wxString where = job->m_filename.IsEmpty() ? _( "the footprint libraries" ) : job->m_filename;
+
+        m_reporter->Report( wxString::Format( _( "Error exporting '%s'.\n%s" ), where, ioe.What().GetData() ),
+                            RPT_SEVERITY_ERROR );
+        return CLI::EXIT_CODES::ERR_UNKNOWN;
+    }
+
+    return CLI::EXIT_CODES::SUCCESS;
+}
+
 
 // Most job handlers need to align the running job with the board before resolving any
 // output paths with variables in them like ${REVISION}.
@@ -3382,6 +3853,10 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
     case JOB_PCB_IMPORT::FORMAT::PCAD: fileType = PCB_IO_MGR::PCAD; break;
 
     case JOB_PCB_IMPORT::FORMAT::SOLIDWORKS: fileType = PCB_IO_MGR::SOLIDWORKS_PCB; break;
+
+    case JOB_PCB_IMPORT::FORMAT::EASYPC: fileType = PCB_IO_MGR::EASYPC; break;
+
+    case JOB_PCB_IMPORT::FORMAT::TARGET3001: fileType = PCB_IO_MGR::TARGET3001; break;
     }
 
     // FindPluginTypeFromBoardPath returns FILE_TYPE_NONE (not PCB_FILE_UNKNOWN) when no plugin
@@ -3396,7 +3871,31 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
     }
 
     if( job->m_probeOnly )
+    {
+        IO_RELEASER<PCB_IO> pi( PCB_IO_MGR::FindPlugin( fileType ) );
+
+        if( !pi )
+        {
+            m_reporter->Report( wxString::Format( _( "No plugin found for file type '%s'\n" ),
+                                                  PCB_IO_MGR::ShowType( fileType ) ),
+                                RPT_SEVERITY_ERROR );
+            return CLI::EXIT_CODES::ERR_UNKNOWN;
+        }
+
+        try
+        {
+            job->m_projectBoards = pi->EnumerateProjectBoards( job->m_inputFile );
+        }
+        catch( const IO_ERROR& ioe )
+        {
+            m_reporter->Report( wxString::Format( _( "Failed to inspect board project: %s\n" ), ioe.What() ),
+                                RPT_SEVERITY_ERROR );
+            return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+        }
+
         return CLI::EXIT_CODES::SUCCESS;
+    }
+
 
     // Determine output path
     wxString outputPath = job->GetConfiguredOutputPath();
@@ -3420,6 +3919,9 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
     {
         wxFileName projectFn( outputPath );
         projectFn.SetExt( FILEEXT::ProjectFileExtension );
+
+        // PROJECT requires an absolute path; -o may be relative to the working directory
+        projectFn.MakeAbsolute();
 
         mgr.LoadProject( projectFn.GetFullPath(), true );
         projectPtr = mgr.GetProject( projectFn.GetFullPath() );
@@ -3478,7 +3980,9 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
 
     try
     {
-        IO_RELEASER<PCB_IO> pi( PCB_IO_MGR::FindPlugin( fileType ) );
+        // Declared before the plugin so it outlives the plugin's pointer to it
+        IMPORT_MESSAGE_COLLECTOR importMessages( *m_reporter );
+        IO_RELEASER<PCB_IO>      pi( PCB_IO_MGR::FindPlugin( fileType ) );
 
         if( !pi )
         {
@@ -3486,6 +3990,9 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
                                 RPT_SEVERITY_ERROR );
             return CLI::EXIT_CODES::ERR_UNKNOWN;
         }
+
+        // Without this the importer's warnings never reach the import report
+        pi->SetReporter( &importMessages );
 
         // Replace the plugin's default best-guess callback so we can apply explicit overrides and
         // capture the resulting mapping.  Only mappable importers expose their source layers; for
@@ -3563,7 +4070,20 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
         // LoadBoard reports load failures and user cancellations by throwing.
         try
         {
-            board = pi->LoadBoard( job->m_inputFile );
+            // pcb_id selects a board only within an EasyEDA Pro project.  Other importers must
+            // continue receiving no properties so their existing design-settings import paths remain
+            // unchanged.
+            const std::map<std::string, UTF8>* importProperties = nullptr;
+            std::map<std::string, UTF8>        easyEdaProProperties;
+
+            if( !job->m_importPcbId.empty()
+                && ( fileType == PCB_IO_MGR::EASYEDAPRO || fileType == PCB_IO_MGR::EASYEDAPRO_V3 ) )
+            {
+                easyEdaProProperties.emplace( "pcb_id", std::string( job->m_importPcbId.ToUTF8() ) );
+                importProperties = &easyEdaProProperties;
+            }
+
+            board = pi->LoadBoard( job->m_inputFile, importProperties, projectPtr );
         }
         catch( const IO_CANCELLED& ioce )
         {
@@ -3579,19 +4099,21 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
             m_reporter->Report( wxString::Format( _( "Failed to load board: %s\n" ), ioe.What() ), RPT_SEVERITY_ERROR );
             return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
         }
+        board->SetProject( projectPtr, job->m_isPartOfMultiBoardProject );
 
-        // Constraints that land in the project need the project attached before they are read.
-        if( PCB_IO_MGR::ImportPopulatesProjectSettings( fileType ) )
-            board->SetProject( projectPtr );
+
 
         if( !ApplyImportedNetNameMap( *board, job->m_netNameMap, *m_reporter ) )
             return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
 
-        // Extract a project footprint library and re-link FPIDs, as the board editor's import
-        // does; without it the saved board references a nickname no library table row resolves.
+        // Extract a project footprint library and re-link FPIDs, as the board editor does.
+        // Each EasyEDA Pro project board needs a distinct cache; using the archive name makes
+        // every board compete to publish the same .pretty directory.
         if( PCB_IO_MGR::ImportGeneratesProjectLibrary( fileType ) )
         {
-            ReconcileImportedFootprints( *pi, *board, *projectPtr, job->m_inputFile, nullptr,
+            const wxString reconciliationPath =
+                    job->m_importPcbId.empty() ? job->m_inputFile : outputPath;
+            ReconcileImportedFootprints( *pi, *board, *projectPtr, reconciliationPath, nullptr,
                                          *m_reporter );
         }
 
@@ -3611,17 +4133,39 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
         }
 
         // Save as KiCad format
+
         IO_RELEASER<PCB_IO> kicadPlugin( PCB_IO_MGR::FindPlugin( PCB_IO_MGR::KICAD_SEXP ) );
         kicadPlugin->SaveBoard( outputPath, *board );
+        wxString importedRules = pi->GetImportedDesignRules();
+
+        if( !importedRules.IsEmpty() )
+        {
+            wxFileName rulesPath( outputPath );
+            rulesPath.SetExt( FILEEXT::DesignRulesFileExtension );
+
+            wxFile rulesFile( rulesPath.GetFullPath(), wxFile::write );
+
+            if( rulesFile.IsOpened() )
+            {
+                rulesFile.Write( importedRules );
+            }
+            else
+            {
+                m_reporter->Report( wxString::Format( _( "Could not write imported design rules to '%s'\n" ),
+                                                      rulesPath.GetFullPath() ),
+                                    RPT_SEVERITY_WARNING );
+            }
+        }
 
         m_reporter->Report( wxString::Format( _( "Successfully saved imported board to '%s'\n" ), outputPath ),
                             RPT_SEVERITY_INFO );
 
         // Generate report if requested
+        IMPORT_REPORT_DATA reportData;
+        importMessages.Flush( job->m_reportFormat, reportData );
+
         if( job->m_reportFormat != IMPORT_REPORT_FORMAT::NONE )
         {
-            IMPORT_REPORT_DATA reportData;
-
             reportData.m_sourceFile = wxFileName( job->m_inputFile ).GetFullName();
             reportData.m_sourceFormat = formatName;
             reportData.m_outputFile = wxFileName( outputPath ).GetFullName();
@@ -3677,9 +4221,10 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
             }
 
             reportData.m_extraJson["layer_mapping"] = layerMappings;
-            reportData.m_warnings = warnings;
+            reportData.m_warnings.insert( reportData.m_warnings.end(), warnings.begin(), warnings.end() );
 
-            WriteImportReport( m_reporter, job->m_reportFormat, job->m_reportFile, reportData );
+            if( !WriteImportReport( m_reporter, job->m_reportFormat, job->m_reportFile, reportData ) )
+                return CLI::EXIT_CODES::ERR_INVALID_OUTPUT_CONFLICT;
         }
         else
         {
@@ -3691,6 +4236,7 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
     catch( const IO_ERROR& ioe )
     {
         m_reporter->Report( wxString::Format( _( "Error during import: %s\n" ), ioe.What() ), RPT_SEVERITY_ERROR );
+
         return CLI::EXIT_CODES::ERR_UNKNOWN;
     }
 
@@ -3804,8 +4350,11 @@ int PCBNEW_JOBS_HANDLER::JobDiff( JOB* aJob )
 // ============================================================================
 #include <diff_merge/pcb_geometry_extractor.h>
 #include <diff_merge/pcb_merge_applier.h>
+#include <diff_merge/auto_resolution.h>
 #include <diff_merge/kicad_merge_engine.h>
+#include <diff_merge/pcb_diff_canvas_context.h>
 #include <dialogs/dialog_kicad_merge_3way.h>
+#include <widgets/widget_diff_canvas.h>
 
 
 int PCBNEW_JOBS_HANDLER::RunMerge( KICAD_DIFF::DOC_KIND aKind, const wxString& aAncestor,
@@ -3853,6 +4402,13 @@ int PCBNEW_JOBS_HANDLER::runPcbMerge( const wxString& aAncestor, const wxString&
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
     }
 
+    const wxString formatNotice =
+            KICAD_DIFF::OlderFormatNotice( ancestor->GetFileFormatVersionAtLoad(), ours->GetFileFormatVersionAtLoad(),
+                                           theirs->GetFileFormatVersionAtLoad(), SEXPR_BOARD_FILE_VERSION );
+
+    if( !formatNotice.IsEmpty() )
+        m_reporter->Report( formatNotice + wxS( "\n" ), RPT_SEVERITY_WARNING );
+
     KICAD_DIFF::PCB_DIFFER ourDiff( ancestor, ours );
     KICAD_DIFF::PCB_DIFFER theirDiff( ancestor, theirs );
 
@@ -3862,9 +4418,7 @@ int PCBNEW_JOBS_HANDLER::runPcbMerge( const wxString& aAncestor, const wxString&
     KICAD_DIFF::KICAD_MERGE_ENGINE engine;
     KICAD_DIFF::MERGE_PLAN         plan = engine.Plan( ourDocDiff, theirDocDiff );
 
-    // A cancelled dialog leaves plan unresolved and falls through to the
-    // marker flow below.
-    if( aInteractive && !plan.Resolved() )
+    if( aInteractive && !KICAD_DIFF::BuildConflictList( plan ).empty() )
     {
         if( !Pgm().IsGUI() )
         {
@@ -3878,6 +4432,7 @@ int PCBNEW_JOBS_HANDLER::runPcbMerge( const wxString& aAncestor, const wxString&
         // boards behind the conflict bbox highlight.
         const KICAD_DIFF::DIFF_COLOR_THEME        theme;
         DIALOG_KICAD_MERGE_3WAY::CONFLICT_CONTEXT ctx;
+        ctx.formatNotice = formatNotice;
         ctx.ancestorGeometry = KICAD_DIFF::ExtractBoardGeometry( *ancestor, theme.reference );
         ctx.oursGeometry = KICAD_DIFF::ExtractBoardGeometry( *ours, theme.reference );
         ctx.theirsGeometry = KICAD_DIFF::ExtractBoardGeometry( *theirs, theme.comparison );
@@ -3887,10 +4442,55 @@ int PCBNEW_JOBS_HANDLER::runPcbMerge( const wxString& aAncestor, const wxString&
         KICAD_DIFF::CollectChangeBBoxes( ourDocDiff, ctx.oursBBoxes );
         KICAD_DIFF::CollectChangeBBoxes( theirDocDiff, ctx.theirsBBoxes );
 
+        ctx.describeItem = [ours, theirs, ancestor]( const KIID_PATH& aId ) -> wxString
+        {
+            if( aId.empty() )
+                return wxEmptyString;
+
+            UNITS_PROVIDER units( pcbIUScale, EDA_UNITS::MM );
+
+            for( BOARD* board : { ours, theirs, ancestor } )
+            {
+                if( !board )
+                    continue;
+
+                if( BOARD_ITEM* item = board->ResolveItem( aId.back(), true ) )
+                    return item->GetItemDescription( &units, false );
+            }
+
+            return wxEmptyString;
+        };
+
+        ctx.drawSide = [ancestor, ours, theirs, theme]( WIDGET_DIFF_CANVAS&           aCanvas,
+                                                        DIALOG_KICAD_MERGE_3WAY::SIDE aSide,
+                                                        const std::optional<KIID_PATH>& )
+        {
+            BOARD*         board = nullptr;
+            KIGFX::COLOR4D colour = theme.reference;
+
+            switch( aSide )
+            {
+            case DIALOG_KICAD_MERGE_3WAY::SIDE::OURS: board = ours; break;
+
+            case DIALOG_KICAD_MERGE_3WAY::SIDE::THEIRS:
+                board = theirs;
+                colour = theme.comparison;
+                break;
+
+            case DIALOG_KICAD_MERGE_3WAY::SIDE::ANCESTOR: board = ancestor; break;
+            }
+
+            if( board )
+                KICAD_DIFF::ConfigurePcbDiffCanvasContext( aCanvas, board, nullptr, colour );
+        };
+
         DIALOG_KICAD_MERGE_3WAY dlg( wxTheApp->GetTopWindow(), plan, std::move( ctx ) );
 
-        if( dlg.ShowModal() == wxID_APPLY )
-            plan = dlg.GetResolvedPlan();
+        // Cancelling leaves the conflicts unresolved and the files untouched.
+        if( dlg.ShowModal() != wxID_APPLY )
+            return CLI::EXIT_CODES::ERR_CANCELLED;
+
+        plan = dlg.GetResolvedPlan();
     }
 
     // Snapshot of the plan before the applier moves it; drives the
@@ -4192,8 +4792,105 @@ int PCBNEW_JOBS_HANDLER::JobFpDiff( JOB* aJob )
 // ============================================================================
 #include <dialogs/dialog_kicad_diff.h>
 #include <diff_merge/pcb_diff_canvas_context.h>
+#include <widgets/widget_diff_canvas.h>
 #include <diff_merge/pcb_geometry_extractor.h>
 #include <jobs/scratch_doc.h>
+
+
+// Both boards of a diff, kept while the caller draws them.
+struct PCB_DIFF_SIDES
+{
+    SCRATCH_DOC<BOARD>        a;
+    SCRATCH_DOC<BOARD>        b;
+    BOARD                     emptyA;
+    BOARD                     emptyB;
+    BOARD*                    boardA = nullptr;
+    BOARD*                    boardB = nullptr;
+    KICAD_DIFF::DOCUMENT_DIFF diff;
+};
+
+
+static int loadPcbDiffSides( SETTINGS_MANAGER& aMgr, REPORTER& aReporter, const wxString& aFileA,
+                             const wxString& aFileB, PCB_DIFF_SIDES& aSides )
+{
+    aSides.a = loadScratchBoard( aMgr, aFileA, /* aInitializeAfterLoad */ false );
+    aSides.b = loadScratchBoard( aMgr, aFileB, /* aInitializeAfterLoad */ false );
+
+    if( !aSides.a.doc && !aFileA.IsEmpty() )
+    {
+        aReporter.Report( wxString::Format( _( "Failed to load %s\n" ), aFileA ), RPT_SEVERITY_ERROR );
+        return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+    }
+
+    if( !aSides.b.doc && !aFileB.IsEmpty() )
+    {
+        aReporter.Report( wxString::Format( _( "Failed to load %s\n" ), aFileB ), RPT_SEVERITY_ERROR );
+        return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+    }
+
+    // An ADDED or REMOVED side is an empty board, so the differ still produces a per-item
+    // list rather than failing on an empty input file.
+    aSides.boardA = aSides.a.doc ? aSides.a.doc.get() : &aSides.emptyA;
+    aSides.boardB = aSides.b.doc ? aSides.b.doc.get() : &aSides.emptyB;
+
+    KICAD_DIFF::PCB_DIFFER differ( aSides.boardA, aSides.boardB, aFileB );
+    aSides.diff = differ.Diff();
+
+    return CLI::EXIT_CODES::SUCCESS;
+}
+
+
+// The two boards a window outside the kiface shows, taken off their canvases before they go.
+class PCB_DIFF_CANVAS_CONTEXT : public KICAD_DIFF::DIFF_CANVAS_CONTEXT
+{
+public:
+    PCB_DIFF_CANVAS_CONTEXT( WIDGET_DIFF_CANVAS* aBefore, WIDGET_DIFF_CANVAS* aAfter ) :
+            m_before( aBefore ),
+            m_after( aAfter )
+    {
+    }
+
+    ~PCB_DIFF_CANVAS_CONTEXT() override
+    {
+        m_before->SetContextItems( {} );
+        m_after->SetContextItems( {} );
+    }
+
+    PCB_DIFF_SIDES m_sides;
+
+private:
+    WIDGET_DIFF_CANVAS* m_before;
+    WIDGET_DIFF_CANVAS* m_after;
+};
+
+
+KICAD_DIFF::DIFF_CANVAS_CONTEXT*
+PCBNEW_JOBS_HANDLER::AttachDiffCanvases( KICAD_DIFF::DOC_KIND aKind, const wxString& aFileA, const wxString& aFileB,
+                                         WIDGET_DIFF_CANVAS* aBefore, WIDGET_DIFF_CANVAS* aAfter,
+                                         KICAD_DIFF::DOCUMENT_DIFF& aDiff, REPORTER* aReporter )
+{
+    SCOPED_SET_RESET<REPORTER*> reporterGuard( m_reporter, aReporter ? aReporter : m_reporter );
+
+    if( aKind != KICAD_DIFF::DOC_KIND::PCB )
+        return nullptr;
+
+    auto context = std::make_unique<PCB_DIFF_CANVAS_CONTEXT>( aBefore, aAfter );
+
+    if( loadPcbDiffSides( Pgm().GetSettingsManager(), *m_reporter, aFileA, aFileB, context->m_sides )
+        != CLI::EXIT_CODES::SUCCESS )
+    {
+        return nullptr;
+    }
+
+    const KICAD_DIFF::DIFF_COLOR_THEME theme;
+
+    KICAD_DIFF::ConfigurePcbDiffCanvasContext( *aBefore, context->m_sides.boardA, nullptr, theme.reference, {}, {},
+                                               {} );
+    KICAD_DIFF::ConfigurePcbDiffCanvasContext( *aAfter, nullptr, context->m_sides.boardB, theme.reference, {}, {}, {} );
+
+    aDiff = context->m_sides.diff;
+    return context.release();
+}
 
 
 int PCBNEW_JOBS_HANDLER::OpenDiffDialog( KICAD_DIFF::DOC_KIND aKind, const wxString& aFileA,
@@ -4209,11 +4906,6 @@ int PCBNEW_JOBS_HANDLER::OpenDiffDialog( KICAD_DIFF::DOC_KIND aKind, const wxStr
     wxWindow* parent = aParent ? aParent : ( wxTheApp ? wxTheApp->GetTopWindow() : nullptr );
 
     SETTINGS_MANAGER& mgr = Pgm().GetSettingsManager();
-
-    auto loadBoardScratch = [&]( const wxString& aPath )
-    {
-        return loadScratchBoard( mgr, aPath, /* aInitializeAfterLoad */ false );
-    };
 
     KICAD_DIFF::DOCUMENT_DIFF     result;
     KICAD_DIFF::DOCUMENT_GEOMETRY refGeometry;
@@ -4240,36 +4932,17 @@ int PCBNEW_JOBS_HANDLER::OpenDiffDialog( KICAD_DIFF::DOC_KIND aKind, const wxStr
     {
     case KICAD_DIFF::DOC_KIND::PCB:
     {
-        SCRATCH_DOC<BOARD> a = loadBoardScratch( aFileA );
-        SCRATCH_DOC<BOARD> b = loadBoardScratch( aFileB );
+        PCB_DIFF_SIDES sides;
 
-        // Synthesize empty boards for ADDED / REMOVED sides so the differ
-        // can still produce a meaningful per-item list rather than failing
-        // on an empty input file.
-        BOARD emptyA;
-        BOARD emptyB;
+        if( int rc = loadPcbDiffSides( mgr, *m_reporter, aFileA, aFileB, sides ); rc != CLI::EXIT_CODES::SUCCESS )
+            return rc;
 
-        if( !a.doc && !aFileA.IsEmpty() )
-        {
-            m_reporter->Report( wxString::Format( _( "Failed to load %s\n" ), aFileA ), RPT_SEVERITY_ERROR );
-            return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
-        }
+        BOARD* boardA = sides.boardA;
+        BOARD* boardB = sides.boardB;
+        result = std::move( sides.diff );
 
-        if( !b.doc && !aFileB.IsEmpty() )
-        {
-            m_reporter->Report( wxString::Format( _( "Failed to load %s\n" ), aFileB ), RPT_SEVERITY_ERROR );
-            return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
-        }
-
-        BOARD* boardA = a.doc ? a.doc.get() : &emptyA;
-        BOARD* boardB = b.doc ? b.doc.get() : &emptyB;
-
-        KICAD_DIFF::PCB_DIFFER differ( boardA, boardB, aFileB );
-        result = differ.Diff();
-
-        // Extract background geometry so the dialog's canvas shows the
-        // actual board outline + footprint footprints beneath the diff
-        // bbox rectangles. Theme defaults: muted blue (ref) / gold (comp).
+        // Background geometry, so the dialog's canvas shows the board outline and footprints
+        // beneath the change rectangles.
         const KICAD_DIFF::DIFF_COLOR_THEME theme;
         refGeometry = KICAD_DIFF::ExtractBoardGeometry( *boardA, theme.reference );
         compGeometry = KICAD_DIFF::ExtractBoardGeometry( *boardB, theme.comparison );

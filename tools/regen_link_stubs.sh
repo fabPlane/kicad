@@ -26,7 +26,9 @@ fi
 if [ -n "$DEVSYMS_CACHE" ] && [ -s "$DEVSYMS_CACHE" ]; then
     cp "$DEVSYMS_CACHE" "$TMP/devsyms.txt"
 else
-    find "$REF" -name '*.cpp.o' -print0 | xargs -0 -n 200 nm -gU > "$TMP/devsyms.txt" 2>/dev/null
+    # Every object, not just *.cpp.o: KICAD_UNITY_BUILD_WXFB compiles the wxFormBuilder dialog
+    # bases into unity_*.cxx.o, and the Apple kiplatform sources are *.mm.o.
+    find "$REF" -name '*.o' -print0 | xargs -0 -n 200 nm -gU > "$TMP/devsyms.txt" 2>/dev/null
 
     if [ -n "$DEVSYMS_CACHE" ]; then
         cp "$TMP/devsyms.txt" "$DEVSYMS_CACHE"

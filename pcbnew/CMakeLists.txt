@@ -70,6 +70,8 @@ set( PCBNEW_DIALOGS
     dialogs/dialog_footprint_properties_base.cpp
     dialogs/dialog_footprint_properties_fp_editor.cpp
     dialogs/dialog_footprint_properties_fp_editor_base.cpp
+    dialogs/dialog_footprint_users.cpp
+    dialogs/dialog_footprint_users_base.cpp
     dialogs/dialog_enum_pads.cpp
     dialogs/dialog_enum_pads_base.cpp
     dialogs/dialog_exchange_footprints.cpp
@@ -78,6 +80,8 @@ set( PCBNEW_DIALOGS
     dialogs/dialog_export_2581_base.cpp
     dialogs/dialog_export_2581_bom.cpp
     dialogs/dialog_export_2581_bom_base.cpp
+    dialogs/panel_fab_export_content.cpp
+    dialogs/panel_fab_export_content_base.cpp
     dialogs/dialog_export_idf.cpp
     dialogs/dialog_export_idf_base.cpp
     dialogs/dialog_export_step.cpp
@@ -159,12 +163,14 @@ set( PCBNEW_DIALOGS
     dialogs/dialog_render_job.cpp
     dialogs/dialog_swap_layers.cpp
     dialogs/dialog_swap_layers_base.cpp
-    dialogs/dialog_drill_chart_properties.cpp
+    dialogs/dialog_generated_table_properties.cpp
+    dialogs/dialog_generated_table_properties_base.cpp
     dialogs/dialog_drill_groups.cpp
     dialogs/dialog_drill_groups_base.cpp
+    dialogs/panel_drill_chart_options.cpp
+    dialogs/panel_drill_chart_options_base.cpp
     dialogs/panel_setup_drill_chart.cpp
     dialogs/panel_setup_drill_chart_base.cpp
-    dialogs/dialog_drill_chart_properties_base.cpp
     dialogs/dialog_table_properties.cpp
     dialogs/dialog_table_properties_base.cpp
     dialogs/dialog_tablecell_properties.cpp
@@ -296,8 +302,6 @@ set( PCBNEW_EXPORTERS
     exporters/u3d/context_manager.cpp
     exporters/u3d/data_block.cpp
     exporters/u3d/writer.cpp
-    exporters/export_ipc2581.cpp
-    exporters/export_odbpp.cpp
     exporters/exporter_vrml.cpp
     exporters/place_file_exporter.cpp
     exporters/gendrill_excellon_writer.cpp
@@ -437,6 +441,9 @@ set( PCBNEW_CLASS_SRCS
     cleanup_item.cpp
     convert_shape_list_to_polygon.cpp
     cross-probing.cpp
+    downgrade/board_downgrade.cpp
+    pcb_io/kicad_sexpr/writers/pcb_writer_v9.cpp
+    pcb_io/kicad_sexpr/writers/pcb_writer_v10.cpp
     edit_track_width.cpp
     files.cpp
     footprint_info_impl.cpp
@@ -456,6 +463,9 @@ set( PCBNEW_CLASS_SRCS
     graphics_cleaner.cpp
     grid_layer_box_helpers.cpp
     grid_layer_box_helpers.h
+    import_design_rules.cpp
+    import_local_footprint_libs.cpp
+    import_net_reconciler.cpp
     initpcb.cpp
     layer_pairs.cpp
     load_select_footprint.cpp
@@ -587,7 +597,6 @@ set( PCBNEW_DIFF_MERGE_SRCS
 set( PCBNEW_SRCS
     ${PCBNEW_MICROWAVE_SRCS}
     ${PCBNEW_CLASS_SRCS}
-    ${PCBNEW_DIALOGS}
     ${PCBNEW_GIT_SRCS}
     ${PCBNEW_DIFF_MERGE_SRCS}
     )
@@ -791,6 +800,10 @@ if( KICAD_HEADLESS_API )
 
     list( APPEND PCBNEW_SRCS ${PCBNEW_HEADLESS_KEEP} )
 
+    # 3d-viewer is not built headless, but the IDF exporter outlines extruded 3D bodies with
+    # GetExtrusionOutline(), which is footprint geometry only.
+    list( APPEND PCBNEW_SRCS ${CMAKE_SOURCE_DIR}/3d-viewer/3d_rendering/3d_placeholder_utils.cpp )
+
     # The KIFACE itself.  In the dynamic build pcbnew.cpp is compiled separately into
     # the .kiface module; here it joins the object set, with its GUI half compiled out
     # by the KICAD_HEADLESS_API guards inside it.  The Kiface/KIFACE_GETTER renaming
@@ -912,9 +925,11 @@ add_subdirectory( pcb_io/odbpp )
 add_subdirectory( pcb_io/pads )
 add_subdirectory( pcb_io/sprint_layout )
 add_subdirectory( pcb_io/diptrace )
+add_subdirectory( pcb_io/easypc )
 add_subdirectory( pcb_io/autotrax )
+add_subdirectory( pcb_io/target3001 )
 
-set( PCBNEW_IO_LIBRARIES pcad2kicadpcb allegro2pcbnew altium2pcbnew cadstar2pcbnew easyeda easyedapro fabmaster ipc2581 odbpp pads2pcbnew sprint_layout2pcbnew diptrace2pcbnew autotrax2pcbnew CACHE INTERNAL "")
+set( PCBNEW_IO_LIBRARIES pcad2kicadpcb allegro2pcbnew altium2pcbnew cadstar2pcbnew easyeda easyedapro fabmaster ipc2581 odbpp pads2pcbnew sprint_layout2pcbnew diptrace2pcbnew easypc2pcbnew autotrax2pcbnew target30012pcbnew CACHE INTERNAL "")
 
 if( NOT KICAD_HEADLESS_API )
 
@@ -1032,7 +1047,6 @@ set( PCBNEW_KIFACE_LIBRARIES
     common
     gal
     core
-    idf3
     markdown_lib
     ${PCBNEW_IO_LIBRARIES}
     ${wxWidgets_LIBRARIES}

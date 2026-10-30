@@ -36,6 +36,7 @@
 #include <compoundfilereader.h>
 
 #include <board.h>
+#include <convert_shape_list_to_polygon.h>
 #include <board_design_settings.h>
 #include <footprint.h>
 #include <board_stackup_manager/board_stackup.h>
@@ -318,6 +319,77 @@ BOOST_AUTO_TEST_CASE( BoardLoadNoAssertions )
     // Basic sanity checks
     BOOST_CHECK( board->GetNetCount() > 0 );
     BOOST_CHECK( board->Footprints().size() > 0 );
+}
+
+
+// A courtyard must be one closed outline, so stray open pieces cannot stay on the courtyard layer
+BOOST_AUTO_TEST_CASE( CourtyardsAreClosed )
+{
+    int closed = 0;
+
+    for( const char* name : { "HiFive/HiFive1.B01.PcbDoc", "eDP_adapter_dvt1_source/eDP_adapter_dvt1.PcbDoc",
+                              "issue24456/Fastino_Ground_Isolator.PcbDoc", "issue25362/OpenRex_V1I1_PCB_reduced.PcbDoc" } )
+    {
+        std::unique_ptr<BOARD> board = m_altiumPlugin.LoadBoard( KI_TEST::GetPcbnewTestDataDir() + "plugins/altium/" + name,
+                                                                  nullptr );
+
+        BOOST_REQUIRE( board );
+
+        int open = 0;
+
+        for( FOOTPRINT* footprint : board->Footprints() )
+        {
+            OUTLINE_ERROR_HANDLER onError = [&]( const wxString&, BOARD_ITEM*, BOARD_ITEM*, const VECTOR2I& )
+            {
+                open++;
+            };
+
+            footprint->BuildCourtyardCaches( &onError );
+
+            closed += footprint->GetCourtyard( F_CrtYd ).OutlineCount();
+            closed += footprint->GetCourtyard( B_CrtYd ).OutlineCount();
+        }
+
+        BOOST_TEST_CONTEXT( name ) { BOOST_CHECK_EQUAL( open, 0 ); }
+    }
+
+    // An outline moved off the layer would also report no error, so closed outlines must remain
+    BOOST_CHECK_GT( closed, 0 );
+}
+
+
+// A board outline with jogs from rounding in the file must still build into one closed shape
+BOOST_AUTO_TEST_CASE( OutlineBuilds )
+{
+    for( const char* name : { "HiFive/HiFive1.B01.PcbDoc", "eDP_adapter_dvt1_source/eDP_adapter_dvt1.PcbDoc",
+                              "issue13750/altium2kicad_region_soldermask_expansion.PcbDoc",
+                              "issue24456/Fastino_Ground_Isolator.PcbDoc", "issue24654/PCB1.PcbDoc",
+                              "issue24847/PCB1.PcbDoc", "issue25362/OpenRex_V1I1_PCB_reduced.PcbDoc" } )
+    {
+        std::unique_ptr<BOARD> board = m_altiumPlugin.LoadBoard( KI_TEST::GetPcbnewTestDataDir() + "plugins/altium/" + name,
+                                                                  nullptr );
+
+        BOOST_REQUIRE( board );
+
+        int            errors = 0;
+        SHAPE_POLY_SET outline;
+
+        OUTLINE_ERROR_HANDLER onError = [&]( const wxString&, BOARD_ITEM*, BOARD_ITEM*, const VECTOR2I& )
+        {
+            errors++;
+        };
+
+        // An inferred outline would hide an import that lost the edge shapes
+        const bool built = BuildBoardPolygonOutlines( board.get(), outline, pcbIUScale.mmToIU( 0.05 ),
+                                                      board->GetOutlinesChainingEpsilon(), false, &onError );
+
+        BOOST_TEST_CONTEXT( name )
+        {
+            BOOST_CHECK( built );
+            BOOST_CHECK_GT( outline.OutlineCount(), 0 );
+            BOOST_CHECK_EQUAL( errors, 0 );
+        }
+    }
 }
 
 
@@ -1422,7 +1494,8 @@ BOOST_AUTO_TEST_CASE( ComponentCopperRegionNets )
         {
             PCB_LAYER_ID copperLayer = pad->IsOnLayer( F_Cu ) ? F_Cu : B_Cu;
 
-            if( pad->GetShape( copperLayer ) != PAD_SHAPE::CUSTOM || !pad->GetNumber().IsEmpty() )
+            // Region pads sit on a 1 IU anchor, and one that touches its pad takes that number
+            if( pad->GetShape( copperLayer ) != PAD_SHAPE::CUSTOM || pad->GetSize( copperLayer ).x > 1 )
                 continue;
 
             regionCount++;
@@ -1437,6 +1510,35 @@ BOOST_AUTO_TEST_CASE( ComponentCopperRegionNets )
 
     BOOST_REQUIRE_GT( regionCount, 0 );
     BOOST_CHECK_GT( connectedCount, 0 );
+}
+
+
+// Netted component copper must join the pad it touches, or it is left behind when the part moves
+BOOST_AUTO_TEST_CASE( ComponentCopperJoinsItsPad )
+{
+    std::string dataPath =
+            KI_TEST::GetPcbnewTestDataDir() + "plugins/altium/issue24456/Fastino_Ground_Isolator.PcbDoc";
+
+    std::unique_ptr<BOARD> board = m_altiumPlugin.LoadBoard( dataPath, nullptr );
+
+    int joined = 0;
+
+    for( FOOTPRINT* footprint : board->Footprints() )
+    {
+        for( PAD* pad : footprint->Pads() )
+        {
+            PCB_LAYER_ID copperLayer = pad->IsOnLayer( F_Cu ) ? F_Cu : B_Cu;
+
+            if( pad->GetShape( copperLayer ) == PAD_SHAPE::CUSTOM && pad->GetSize( copperLayer ).x <= 1
+                && pad->GetNetCode() > 0 && !pad->GetNumber().IsEmpty() )
+            {
+                joined++;
+            }
+        }
+    }
+
+    BOOST_TEST_MESSAGE( "joined " << joined );
+    BOOST_CHECK_GT( joined, 0 );
 }
 
 

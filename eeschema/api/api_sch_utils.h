@@ -18,8 +18,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#ifndef KICAD_API_SCH_UTILS_H
-#define KICAD_API_SCH_UTILS_H
+#pragma once
 
 #include <memory>
 #include <unordered_map>
@@ -29,6 +28,7 @@
 #include <core/typeinfo.h>
 #include <kiid.h>
 #include <api/common/envelope.pb.h>
+#include <api/common/commands/editor_commands.pb.h>
 #include <api/schematic/schematic_types.pb.h>
 #include <pin_map.h>
 #include <kiid.h>
@@ -91,7 +91,7 @@ bool ReuseUnchangedLibSymbol( SCH_SYMBOL* aTarget, SCH_SYMBOL* aExisting,
  * Variant names are registered with @a aSchematic so that the UI offers them for selection.
  * @a aSymbol must already be in the schematic; the other placements of the symbol are untouched.
  */
-void ApplySymbolInstance( SCH_SYMBOL* aSymbol,
+bool ApplySymbolInstance( kiapi::common::commands::ItemStatus* aStatus, SCH_SYMBOL* aSymbol,
                           const kiapi::schematic::types::SchematicSymbolInstance& aInput,
                           const SCH_SHEET_PATH& aPath, SCHEMATIC* aSchematic );
 
@@ -107,7 +107,8 @@ bool PackSheet( kiapi::schematic::types::SheetSymbol* aOutput, const SCH_SHEET* 
 /**
  * Unpack the every placement data from the input. Placement data is applied separately by #ApplySheetInstance.
  */
-tl::expected<bool, kiapi::common::ApiResponseStatus> UnpackSheet( SCH_SHEET* aOutput, const kiapi::schematic::types::SheetSymbol& aInput );
+tl::expected<bool, kiapi::common::ApiResponseStatus> UnpackSheet( SCH_SHEET* aOutput,
+                                                                  const kiapi::schematic::types::SheetSymbol& aInput );
 
 /**
  * Apply the placement data in a sheet message to @a aSheet: page number and the variants the
@@ -116,7 +117,8 @@ tl::expected<bool, kiapi::common::ApiResponseStatus> UnpackSheet( SCH_SHEET* aOu
  * @a aParentPath is the path of the sheet that contains @a aSheet, which is how a sheet's
  * placement records are keyed.
  */
-void ApplySheetInstance( SCH_SHEET* aSheet, const kiapi::schematic::types::SheetSymbol& aInput,
+bool ApplySheetInstance( kiapi::common::commands::ItemStatus* aStatus, SCH_SHEET* aSheet,
+                         const kiapi::schematic::types::SheetSymbol& aInput,
                          const SCH_SHEET_PATH& aParentPath, SCHEMATIC* aSchematic );
 
 /// Specialization of PackSheetPath that includes the human-readable path
@@ -136,4 +138,7 @@ struct SCH_FOCUS_TARGET
 tl::expected<SCH_FOCUS_TARGET, kiapi::common::ApiResponseStatus>
 ResolveFocusItems( SCHEMATIC& aSchematic, const std::vector<KIID>& aIds, const std::optional<KIID_PATH>& aSheetPath );
 
-#endif //KICAD_API_SCH_UTILS_H
+/**
+ * Variant names are stored and compared exactly, but SCHEMATIC::HasVariant matches case-insensitively
+ */
+std::optional<wxString> FindVariantNoCase( const SCHEMATIC* aSchematic, const wxString& aName );

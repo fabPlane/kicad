@@ -226,7 +226,7 @@ std::vector<int> SCH_REFERENCE_LIST::GetUnitsMatchingRef( const SCH_REFERENCE& a
         if( ref.CompareValue( aRef ) != 0 )
             continue;
 
-        if( ref.CompareLibName( aRef ) != 0 )
+        if( ref.CompareLibId( aRef ) != 0 )
             continue;
 
         // Split if needed before comparing ref and number
@@ -556,7 +556,7 @@ void SCH_REFERENCE_LIST::Annotate( bool aUseSheetNum, int aSheetIntervalId, int 
                 if( lockedRef.CompareValue( ref_unit ) != 0 )
                     continue;
 
-                if( lockedRef.CompareLibName( ref_unit ) != 0 )
+                if( lockedRef.CompareLibId( ref_unit ) != 0 )
                     continue;
 
                 // Find the matching symbol
@@ -801,7 +801,8 @@ SCH_REFERENCE::SCH_REFERENCE( SCH_SYMBOL* aSymbol, const SCH_SHEET_PATH& aSheetP
 
     m_numRef = -1;
 
-    wxString value = aSymbol->GetValue( &aSheetPath, RESOLVED );
+    // Unresolved so building a reference list never re-enters text resolution
+    wxString value = aSymbol->GetValue( &aSheetPath, RAW_VALUE );
 
     if( value.IsEmpty() )
         value = wxT( "~" );
@@ -883,14 +884,14 @@ void SCH_REFERENCE::Split()
 }
 
 
-bool SCH_REFERENCE::IsSplitNeeded()
+bool SCH_REFERENCE::IsSplitNeeded() const
 {
     std::string refText = GetRefStr();
 
     if( refText.empty() )
         return false;
 
-    int ll = refText.length() - 1;
+    int ll = (int) refText.length() - 1;
 
     return ( refText[ll] == '?' ) || isdigit( refText[ll] );
 }

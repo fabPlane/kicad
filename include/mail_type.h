@@ -51,12 +51,20 @@ enum MAIL_T
     MAIL_LIB_EDIT,
     MAIL_FP_EDIT,               // SCH->FP_EDITOR open the footprint with the given file path
     MAIL_FP_EDIT_LIBID,         // SCH->FP_EDITOR open the footprint with this LIB_ID
+    MAIL_SCH_EDIT_LIBID,        // PCB->SYMBOL_EDITOR open the symbol with this LIB_ID
     MAIL_RELOAD_LIB,            // Reload Library List if one was added
     MAIL_RELOAD_PLUGINS,        // Reload python plugins
     MAIL_REFRESH_SYMBOL,        // Refresh symbol in symbol viewer
     MAIL_SCH_NAVIGATE_TO_SHEET, // Navigate to sheet by filename if in hierarchy
     MAIL_SCH_SHEET_CHANGED,     // Schematic editor current sheet changed
     MAIL_CALC_SHOW,             // Show the PCB calculator window
+    MAIL_SCH_RELOAD,            // Reload the schematic from disk (for example after a git pull)
+    MAIL_PCB_RELOAD,            // Reload the board from disk (for example after a git pull)
+    MAIL_SCH_PROJECT_SETTINGS_CHANGED, // Project settings changed on disk without a document reload
+    MAIL_PCB_PROJECT_SETTINGS_CHANGED, // Project settings changed on disk without a document reload
+    MAIL_PCB_GET_FOOTPRINT_IDS, // Fetch each footprint reference and LIB_ID from the PCB layout
+    MAIL_PCB_RECONCILE_NETS,    // Name the PCB nets after the schematic nets they match
+    MAIL_SCH_LINK_FOOTPRINTS,   // Fill empty symbol footprint fields from footprint references and LIB_IDs
 };
 
 /**

@@ -45,6 +45,7 @@
 
 #include <chrono>
 #include <memory>
+#include <set>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -66,9 +67,8 @@ class PCB_TEXT;
 class PCB_TEXTBOX;
 class PCB_TRACK;
 class PCB_TABLE;
-class PCB_DRILL_CHART;
+class PCB_GENERATED_TABLE;
 class PCB_DRILL_MAP;
-class PCB_DRILL_CHART;
 class PCB_TABLECELL;
 class FOOTPRINT;
 class PCB_GROUP;
@@ -210,8 +210,8 @@ private:
         std::map<wxString, wxString>   customProperties;
     };
 
-    ///< Convert net code using the mapping table if available,
-    ///< otherwise returns unchanged net code if < 0 or if it's out of range
+    /// Convert net code using the mapping table if available,
+    /// otherwise returns unchanged net code if < 0 or if it's out of range
     inline int getNetCode( int aNetCode )
     {
         if( ( aNetCode >= 0 ) && ( aNetCode < (int) m_netCodes.size() ) )
@@ -293,7 +293,7 @@ private:
 
     PCB_SHAPE*           parsePCB_SHAPE( BOARD_ITEM* aParent );
     PCB_TEXT*            parsePCB_TEXT( BOARD_ITEM* aParent, PCB_TEXT* aBaseText = nullptr );
-    void                 parsePCB_TEXT_effects( PCB_TEXT* aText, PCB_TEXT* aBaseText = nullptr );
+    bool                 parsePCB_TEXT_effects( PCB_TEXT* aText, PCB_TEXT* aBaseText = nullptr );
     PCB_REFERENCE_IMAGE* parsePCB_REFERENCE_IMAGE( BOARD_ITEM* aParent );
     PCB_TEXTBOX*         parsePCB_TEXTBOX( BOARD_ITEM* aParent );
     PCB_BARCODE*         parsePCB_BARCODE( BOARD_ITEM* aParent );
@@ -308,7 +308,18 @@ private:
     bool                 parseTableBodyToken( PCB_TABLE* aTable, PCB_KEYS_T::T aToken,
                                               bool aAllowIdentity );
     void                 parseTableBody( PCB_TABLE* aTable, bool aAllowIdentity );
-    PCB_DRILL_CHART*     parsePCB_DRILL_CHART( BOARD_ITEM* aParent );
+
+    /**
+     * The body every generated table shares. Takes a new table of the kind being read and
+     * leaves what only that kind carries to parseGeneratedTableExtra.
+     */
+    PCB_GENERATED_TABLE* parseGeneratedTable( std::unique_ptr<PCB_GENERATED_TABLE> aTable );
+
+    /**
+     * One token only aTable's kind carries. False when the token is not one of them.
+     */
+    bool                 parseGeneratedTableExtra( PCB_GENERATED_TABLE* aTable, PCB_KEYS_T::T aToken );
+
     DRILL_SPAN           parseDrillSpanBody();
     PCB_DRILL_MAP*       parsePCB_DRILL_MAP( BOARD_ITEM* aParent );
     PCB_DIMENSION_BASE*  parseDIMENSION( BOARD_ITEM* aParent );
@@ -323,7 +334,7 @@ private:
     void        parsePostMachining( PADSTACK::POST_MACHINING_PROPS& aProps );
     void        parsePadstack( PAD* aPad );
 
-    PCB_ARC*       parseARC();
+    PCB_TRACK*     parseARC();
     PCB_TRACK*     parsePCB_TRACK();
     PCB_VIA*       parsePCB_VIA();
     void           parseViastack( PCB_VIA* aVia );
@@ -396,7 +407,7 @@ private:
 
     void parseMargins( int& aLeft, int& aTop, int& aRight, int& aBottom );
 
-    void parseZoneDefaults( ZONE_SETTINGS& aZoneSettings );
+    void parseZoneDefaults( std::map<PCB_LAYER_ID, ZONE_LAYER_PROPERTIES>& aProperties );
 
     void parseZoneLayerProperty( std::map<PCB_LAYER_ID, ZONE_LAYER_PROPERTIES>& aProperties );
 
@@ -429,9 +440,9 @@ private:
      * Parse the render cache for any object derived from #EDA_TEXT.
      *
      * @param aText A pointer to the #EDA_TEXT object to save the parsed settings into.
-     * @throw PARSE_ERROR if the text syntax is not valid.
+     * @throw #PARSE_ERROR if the text syntax is not valid.
      */
-    void parseRenderCache( EDA_TEXT* text );
+    void parseRenderCache( EDA_TEXT* aText );
 
     FP_3DMODEL* parse3DModel( bool aFileNameAlreadyParsed = false );
 
@@ -501,13 +512,13 @@ private:
     void resolveGroups( BOARD_ITEM* aParent );
     void resolveConstraints( BOARD_ITEM* aParent );
 
-    ///< The type of progress bar timeout
+    /// The type of progress bar timeout
     using TIMEOUT = std::chrono::milliseconds;
 
-    ///< The clock used for the timestamp (guaranteed to be monotonic).
+    /// The clock used for the timestamp (guaranteed to be monotonic).
     using CLOCK = std::chrono::steady_clock;
 
-    ///< The type of the time stamps.
+    /// The type of the time stamps.
     using TIME_PT = std::chrono::time_point<CLOCK>;
 
     BOARD*              m_board;
@@ -522,8 +533,9 @@ private:
     bool                m_preserveDestinationStackup; ///< append keeps destination stackup
     LAYER_MAPPING_HANDLER m_layerMappingHandler;        ///< optional remap of appended layers onto dest
 
-    ///< if resetting UUIDs, record new ones to update groups with.
+    /// if resetting UUIDs, record new ones to update groups with.
     KIID_MAP            m_resetKIIDMap;
+    std::set<KIID>      m_linkedZones;       ///< Zones read with a link set or anchor
 
     bool                m_showLegacySegmentZoneWarning;
     bool                m_showLegacy5ZoneWarning;

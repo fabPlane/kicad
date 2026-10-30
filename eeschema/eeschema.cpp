@@ -25,12 +25,13 @@
 #include <api/api_handler_symbol.h>
 #include <api/api_job_registry.h>
 #include <api/api_handler_sch_libraries.h>
+#include <api/api_handler_symbol.h>
 #include <api/api_server.h>
 #include <api/api_utils.h>
 #include <api/cross_probe_client.h>
 #include <api/api_handler_symbol_library.h>
 #include <api/headless_sch_context.h>
-#include <api/headless_symbol_context.h>
+#include <api/headless_symbol_editor_context.h>
 #include <core/json_serializers.h>
 #include <pgm_base.h>
 #include <kiface_base.h>
@@ -48,6 +49,7 @@
 #include <git/kigit_driver_registry.h>
 #endif
 #include <eeschema_settings.h>
+#include <footprint_filter.h>
 #include <sch_edit_frame.h>
 #include <libraries/symbol_library_adapter.h>
 #include <symbol_edit_frame.h>
@@ -69,6 +71,7 @@
 #include <trace_helpers.h>
 #include <thread_pool.h>
 #include <kiface_ids.h>
+#include <symbol_library_query.h>
 #include <widgets/kistatusbar.h>
 #include <netlist_exporters/netlist_exporter_kicad.h>
 #include <wx/ffile.h>
@@ -112,13 +115,16 @@ static int eeschemaMergeExport( int aKind, const wxString& aAncestor, const wxSt
 static int eeschemaOpenDiffDialogExport( int aKind, const wxString& aFileA, const wxString& aFileB,
                                          const wxString& aLabelA, const wxString& aLabelB,
                                          wxWindow* aParent, REPORTER* aReporter );
-
+static KICAD_DIFF::DIFF_CANVAS_CONTEXT*
+eeschemaAttachDiffCanvasesExport( int aKind, const wxString& aFileA, const wxString& aFileB,
+                                  WIDGET_DIFF_CANVAS* aBefore, WIDGET_DIFF_CANVAS* aAfter,
+                                  KICAD_DIFF::DOCUMENT_DIFF* aDiff, REPORTER* aReporter );
 
 
 // TODO: This should move out of this file
 static std::unique_ptr<SCHEMATIC> readSchematicFromFile( const std::string& aFilename )
 {
-    SCH_IO* pi = SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD );
+    IO_RELEASER<SCH_IO> pi( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
     std::unique_ptr<SCHEMATIC> schematic = std::make_unique<SCHEMATIC>( nullptr );
 
     SETTINGS_MANAGER& manager = Pgm().GetSettingsManager();
@@ -170,8 +176,6 @@ static std::unique_ptr<SCHEMATIC> readSchematicFromFile( const std::string& aFil
     for( SCH_SCREEN* screen = screens.GetFirst(); screen; screen = screens.GetNext() )
         screen->MigrateSimModels();
 
-    sheets.AnnotatePowerSymbols();
-
     // NOTE: This is required for multi-unit symbols to be correct
     for( SCH_SHEET_PATH& sheet : sheets )
         sheet.UpdateAllScreenReferences();
@@ -192,13 +196,320 @@ static std::unique_ptr<SCHEMATIC> readSchematicFromFile( const std::string& aFil
 bool generateSchematicNetlist( const wxString& aFilename, std::string& aNetlist, KIWAY* aKiway )
 {
     std::unique_ptr<SCHEMATIC> schematic = readSchematicFromFile( aFilename.ToStdString() );
+
+    if( !schematic )
+        return false;
+
     NETLIST_EXPORTER_KICAD exporter( schematic.get(), aKiway );
-    STRING_FORMATTER formatter;
+    STRING_FORMATTER       formatter;
 
     exporter.Format( &formatter, GNL_ALL | GNL_OPT_KICAD );
     aNetlist = formatter.GetString();
 
     return true;
+}
+
+
+/**
+ * Return the project whose symbol libraries the kiface-level symbol services work with.
+ */
+static PROJECT* symbolLibraryProject()
+{
+    PROJECT* project = nullptr;
+
+    if( wxTheApp )
+    {
+        wxWindow* focus = wxWindow::FindFocus();
+        wxWindow* top = focus ? wxGetTopLevelParent( focus ) : wxTheApp->GetTopWindow();
+
+        if( top )
+        {
+            if( KIWAY_HOLDER* holder = dynamic_cast<KIWAY_HOLDER*>( top ) )
+                project = &holder->Prj();
+        }
+    }
+
+    if( !project )
+        project = &Pgm().GetSettingsManager().Prj();
+
+    return project;
+}
+
+
+/**
+ * Whether a footprint reference names @a aFootprint.
+ *
+ * The library item names must agree:
+ *
+ * If both sides have a nickname it must match.
+ * If the reference has no nickname it matches any footprint nickname.
+ *
+ * Matching is case-insensitive, like the rest of the library item name comparisons.
+ */
+static bool footprintReferenceMatches( const LIB_ID& aReference, const LIB_ID& aFootprint )
+{
+    if( !aReference.GetUniStringLibItemName().IsSameAs( aFootprint.GetUniStringLibItemName(), false ) )
+        return false;
+
+    if( !aReference.GetLibNickname().empty() && !aFootprint.GetLibNickname().empty()
+        && !aReference.GetUniStringLibNickname().IsSameAs( aFootprint.GetUniStringLibNickname(), false ) )
+    {
+        return false;
+    }
+
+    return true;
+}
+
+
+/**
+ * Whether any footprint filter of a symbol selects a given footprint.
+ *
+ * If it does, the matching filter is stored in @a aMatch.
+ */
+static bool symbolFilterMatchesFootprint( const LIB_SYMBOL& aSymbol, const LIB_ID& aFootprint,
+                                          FOOTPRINT_USER_MATCH& aMatch )
+{
+    for( const wxString& filter : aSymbol.GetFPFilters() )
+    {
+        if( filter.IsEmpty() )
+            continue;
+
+        EDA_PATTERN_MATCH_WILDCARD_ANCHORED matcher;
+        matcher.SetPattern( filter.Lower() );
+
+        if( FootprintFilterMatchesName( matcher, aFootprint.GetUniStringLibNickname(),
+                                        aFootprint.GetUniStringLibItemName() ) )
+        {
+            aMatch.m_MatchedFilter = filter;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+
+/**
+ * Return the footprint field text in effect for a symbol.
+ *
+ * As in LIB_SYMBOL::Flatten(), the nearest non-empty footprint field in the inheritance
+ * chain wins.
+ */
+static wxString effectiveFootprintText( const LIB_SYMBOL& aSymbol )
+{
+    if( const SCH_FIELD* field = aSymbol.GetField( FIELD_T::FOOTPRINT ) )
+    {
+        if( !field->GetText().IsEmpty() )
+            return field->GetText();
+    }
+
+    if( std::shared_ptr<LIB_SYMBOL> parent = aSymbol.GetParent().lock() )
+        return effectiveFootprintText( *parent );
+
+    return wxEmptyString;
+}
+
+
+/**
+ * Whether one of the pin maps of @a aSymbol is bound to @a aFootprint; collects the names of
+ * the bound maps in @a aMatch.
+ *
+ * The pin maps and the associated footprints are a coupled bundle: each association pairs a
+ * footprint with the named map that resolves the symbol's pins onto its pads.  A symbol that
+ * binds a map to the footprint uses that footprint even when its footprint field names
+ * something else, or nothing at all.
+ */
+static bool symbolPinMapsBindFootprint( const LIB_SYMBOL& aSymbol, const LIB_ID& aFootprint,
+                                        FOOTPRINT_USER_MATCH& aMatch )
+{
+    for( const ASSOCIATED_FOOTPRINT& associated : aSymbol.GetEffectiveAssociatedFootprints() )
+    {
+        // A symbol can bind several maps, to the same footprint or to different ones.
+        if( footprintReferenceMatches( associated.m_FootprintLibId, aFootprint ) )
+            aMatch.m_MatchedPinMaps.push_back( associated.m_MapName );
+    }
+
+    return !aMatch.m_MatchedPinMaps.empty();
+}
+
+
+/**
+ * Whether the footprint field of @a aSymbol names @a aFootprint; sets the footprint field flag
+ * in @a aMatch.
+ */
+static bool symbolFootprintFieldNamesFootprint( const LIB_SYMBOL& aSymbol, const LIB_ID& aFootprint,
+                                                FOOTPRINT_USER_MATCH& aMatch )
+{
+    LIB_ID fieldId;
+
+    if( fieldId.Parse( effectiveFootprintText( aSymbol ) ) == -1
+        && footprintReferenceMatches( fieldId, aFootprint ) )
+    {
+        aMatch.m_MatchesFootprintField = true;
+        return true;
+    }
+
+    return false;
+}
+
+
+/**
+ * Return how @a aSymbol uses @a aFootprint, or nothing when it doesn't.
+ *
+ * A symbol can use a footprint in three independent ways: a footprint filter selects it, its
+ * footprint field names it, or one of its pin maps is bound to it.  The match reports every
+ * way that applies, so that the caller can list a symbol for one of them and still say which
+ * others it has.
+ */
+static std::optional<FOOTPRINT_USER_MATCH> symbolUsesFootprint( const LIB_SYMBOL& aSymbol,
+                                                                const LIB_ID& aFootprint )
+{
+    FOOTPRINT_USER_MATCH match;
+    match.m_Symbol = aSymbol.GetLibId();
+
+    // Every predicate is evaluated: the match feeds the filter and the two flags alike.
+    const bool byFilter = symbolFilterMatchesFootprint( aSymbol, aFootprint, match );
+    const bool byField = symbolFootprintFieldNamesFootprint( aSymbol, aFootprint, match );
+    const bool byPinMap = symbolPinMapsBindFootprint( aSymbol, aFootprint, match );
+
+    if( !byFilter && !byField && !byPinMap )
+        return std::nullopt;
+
+    match.m_PinCount = aSymbol.GetPinCount();
+    match.m_IsDerived = aSymbol.IsDerived();
+
+    return match;
+}
+
+
+/**
+ * Find the symbols that select a given footprint somehow (but FP field,
+ * filters or pin maps)
+ *
+ * Input JSON format: the object written by FOOTPRINT_USERS_QUERY::ToJsonStr()
+ *
+ * Output JSON format: the object written by FOOTPRINT_USERS_RESULT::ToJsonStr()
+ *
+ * Refer to #FOOTPRINT_USERS_QUERY and #FOOTPRINT_USERS_RESULT for semantics of
+ * the query and result fields.
+ *
+ * @param aQueryJson JSON string with the query parameters
+ * @return JSON string describing the matching symbol LIB_IDs
+ */
+static wxString filterFootprintUsers( const wxString& aQueryJson )
+{
+    FOOTPRINT_USERS_RESULT result;
+    result.m_Success = false;
+
+    try
+    {
+        const FOOTPRINT_USERS_QUERY query = FOOTPRINT_USERS_QUERY::FromJsonStr( aQueryJson );
+
+        // A footprint with no item name cannot be referred to by a filter, field or
+        // association, so the query is a successful, empty one.
+        if( query.m_Footprint.GetLibItemName().empty() )
+        {
+            result.m_Success = true;
+            return result.ToJsonStr();
+        }
+
+        // No enabled way of using the footprint can match anything, so the query is a
+        // successful, empty one.
+        if( !query.m_MatchFilters && !query.m_MatchFootprintField && !query.m_MatchPinMaps )
+        {
+            result.m_Success = true;
+            return result.ToJsonStr();
+        }
+
+        SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( symbolLibraryProject() );
+
+        if( !adapter )
+            return result.ToJsonStr();
+
+        adapter->AsyncLoad();
+        adapter->BlockUntilLoaded();
+
+        for( const wxString& nickname : adapter->GetLibraryNames() )
+        {
+            for( LIB_SYMBOL* symbol : adapter->GetSymbols( nickname ) )
+            {
+                if( !symbol )
+                    continue;
+
+                std::optional<FOOTPRINT_USER_MATCH> match = symbolUsesFootprint( *symbol, query.m_Footprint );
+
+                if( !match )
+                    continue;
+
+                const bool byFilter = query.m_MatchFilters && !match->m_MatchedFilter.IsEmpty();
+                const bool byField = query.m_MatchFootprintField && match->m_MatchesFootprintField;
+                const bool byPinMap = query.m_MatchPinMaps && !match->m_MatchedPinMaps.empty();
+
+                if( !byFilter && !byField && !byPinMap )
+                    continue;
+
+                if( query.m_MaxResults > 0 && static_cast<int>( result.m_Matches.size() ) >= query.m_MaxResults )
+                {
+                    result.m_IsLimited = true;
+                    break;
+                }
+
+                result.m_Matches.push_back( std::move( *match ) );
+            }
+
+            if( result.m_IsLimited )
+                break;
+        }
+
+        result.m_Success = true;
+
+        return result.ToJsonStr();
+    }
+    catch( const std::exception& )
+    {
+        // A failure carries no matches, even if the scan had already collected some.
+        result.m_Matches.clear();
+        result.m_Success = false;
+        return result.ToJsonStr();
+    }
+}
+
+
+/**
+ * Start loading the symbol libraries in the background. Never blocks.
+ */
+static bool startSymbolLibraryLoad()
+{
+    SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( symbolLibraryProject() );
+
+    if( adapter )
+    {
+        adapter->AsyncLoad();
+        return true;
+    }
+
+    return false;
+}
+
+
+/**
+ * Return how far a background load has got.
+ *
+ * Never blocks: callers can poll this while showing a loading indication, and only run
+ * #filterFootprintUsers() (which does wait for the load) after it returns 1.0.
+ */
+static float symbolLibraryLoadProgress()
+{
+    SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( symbolLibraryProject() );
+
+    if( !adapter )
+        return 1.0f;
+
+    // Nothing to report means there is nothing to wait for.
+    if( std::optional<float> progress = adapter->AsyncLoadProgress() )
+        return *progress;
+
+    return 1.0f;
 }
 
 
@@ -444,12 +755,23 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
             case KIFACE_NETLIST_SCHEMATIC:
                 return (void*) generateSchematicNetlist;
 
+            case KIFACE_FILTER_FOOTPRINT_USERS:
+                return reinterpret_cast<void*>( &filterFootprintUsers );
+
+            case KIFACE_TRIGGER_SYMBOLS_LOAD:
+                return reinterpret_cast<void*>( &startSymbolLibraryLoad );
+
+            case KIFACE_SYMBOLS_LOAD_PROGRESS:
+                return reinterpret_cast<void*>( &symbolLibraryLoadProgress );
+
             case KIFACE_MERGE_DOCUMENT:
                 return reinterpret_cast<void*>( &eeschemaMergeExport );
 
             case KIFACE_OPEN_DIFF_DIALOG:
                 return reinterpret_cast<void*>( &eeschemaOpenDiffDialogExport );
-        }
+
+            case KIFACE_ATTACH_DIFF_CANVASES: return reinterpret_cast<void*>( &eeschemaAttachDiffCanvasesExport );
+            }
 
         return nullptr;
     }
@@ -494,22 +816,23 @@ private:
     std::atomic_bool                       m_libraryPreloadInProgress;
     std::atomic_bool                       m_libraryPreloadAbort;
 
-    void closeCurrentDocument( KICAD_API_SERVER* aServer );
-    void closeCurrentSymbol( KICAD_API_SERVER* aServer );
+    void closeSchematic( KICAD_API_SERVER* aServer );
+    void closeSymbol( KICAD_API_SERVER* aServer );
     void closeCurrentProject( KICAD_API_SERVER* aServer );
 
     /// Serve the symbol library commands for the project at aProjectPath.  Since 11.0.
     bool handleOpenProject( const wxString& aProjectPath, KICAD_API_SERVER* aServer, wxString* aError );
 
+    /// Open a library symbol headless; an empty project path uses the global libraries only
     bool handleOpenSymbol( const wxString& aProjectPath, const LIB_ID& aLibId, KICAD_API_SERVER* aServer,
                            wxString* aError );
 
     KIWAY*                                    m_kiway = nullptr;
     SCHEMATIC*                                m_openSchematic = nullptr;
     std::shared_ptr<HEADLESS_SCH_CONTEXT>     m_openContext;
+    std::shared_ptr<HEADLESS_SYMBOL_EDITOR_CONTEXT> m_openSymbolContext;
+    std::unique_ptr<API_HANDLER_SYMBOL>             m_openSymbolHandler;
     std::unique_ptr<API_HANDLER_SCH>          m_openHandler;
-    std::shared_ptr<HEADLESS_SYMBOL_CONTEXT>  m_openSymbolContext;
-    std::unique_ptr<API_HANDLER_SYMBOL>       m_openSymbolHandler;
     std::unique_ptr<API_HANDLER_SYMBOL_LIBRARY> m_openLibraryHandler;
     std::unique_ptr<API_HANDLER_SCH_LIBRARIES> m_apiHandlerSchLibs;
 
@@ -532,6 +855,17 @@ int eeschemaOpenDiffDialogExport( int aKind, const wxString& aFileA, const wxStr
 {
     return kiface.JobHandler()->OpenDiffDialog( static_cast<KICAD_DIFF::DOC_KIND>( aKind ), aFileA,
                                                 aFileB, aLabelA, aLabelB, aParent, aReporter );
+}
+
+
+KICAD_DIFF::DIFF_CANVAS_CONTEXT* eeschemaAttachDiffCanvasesExport( int aKind, const wxString& aFileA,
+                                                                   const wxString& aFileB, WIDGET_DIFF_CANVAS* aBefore,
+                                                                   WIDGET_DIFF_CANVAS*        aAfter,
+                                                                   KICAD_DIFF::DOCUMENT_DIFF* aDiff,
+                                                                   REPORTER*                  aReporter )
+{
+    return kiface.JobHandler()->AttachDiffCanvases( static_cast<KICAD_DIFF::DOC_KIND>( aKind ), aFileA, aFileB, aBefore,
+                                                    aAfter, *aDiff, aReporter );
 }
 
 } // namespace
@@ -601,14 +935,14 @@ void IFACE::Reset()
 {
     if( m_jobHandler )
         m_jobHandler->ClearCachedSchematic();
+
+    closeSchematic( nullptr );
+    closeSymbol( nullptr );
 }
 
 
 void IFACE::PreloadLibraries( KIWAY* aKiway )
 {
-    constexpr static int interval = 150;
-    constexpr static int timeLimit = 120000;
-
     wxCHECK( aKiway, /* void */ );
 
     // Use compare_exchange to atomically check and set the flag to prevent race conditions
@@ -632,51 +966,8 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
 
             SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &aKiway->Prj() );
 
-            int  elapsed = 0;
-            bool aborted = false;
-
             reporter->Report( _( "Loading Symbol Libraries" ) );
-            adapter->AsyncLoad();
-
-            while( true )
-            {
-                if( m_libraryPreloadAbort.load() )
-                {
-                    m_libraryPreloadAbort.store( false );
-                    aborted = true;
-                    break;
-                }
-
-                std::this_thread::sleep_for( std::chrono::milliseconds( interval ) );
-
-                if( std::optional<float> loadStatus = adapter->AsyncLoadProgress() )
-                {
-                    float progress = *loadStatus;
-                    reporter->SetCurrentProgress( progress );
-
-                    if( progress >= 1 )
-                        break;
-                }
-                else
-                {
-                    reporter->SetCurrentProgress( 1 );
-                    break;
-                }
-
-                elapsed += interval;
-
-                if( elapsed > timeLimit )
-                    break;
-            }
-
-            // AbortAsyncLoad() sets the adapter's worker abort flag and then blocks,
-            // so workers exit at their next checkpoint. BlockUntilLoaded() alone just
-            // waits for each future to complete naturally, which can hang indefinitely
-            // if a worker is stuck on a stalled network or filesystem operation.
-            if( aborted )
-                adapter->AbortAsyncLoad();
-            else
-                adapter->BlockUntilLoaded();
+            bool aborted = !adapter->RunPreload( *reporter, m_libraryPreloadAbort );
 
             // If aborted, skip operations that use the adapter since the project may have changed
             // and the adapter's project reference could be stale. This prevents use-after-free
@@ -693,7 +984,6 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
 
             Pgm().GetBackgroundJobMonitor().Remove( m_libraryPreloadBackgroundJob );
             m_libraryPreloadBackgroundJob.reset();
-            m_libraryPreloadInProgress.store( false );
 
             // Only send reload notifications if we weren't aborted
             if( !aborted )
@@ -703,6 +993,10 @@ void IFACE::PreloadLibraries( KIWAY* aKiway )
                 aKiway->ExpressMail( FRAME_SCH_SYMBOL_EDITOR, MAIL_RELOAD_LIB, payload, nullptr, true );
                 aKiway->ExpressMail( FRAME_SCH_VIEWER, MAIL_RELOAD_LIB, payload, nullptr, true );
             }
+
+            // A cancel that came after the loop left the flag set, and it would end the next preload at once
+            m_libraryPreloadAbort.store( false );
+            m_libraryPreloadInProgress.store( false );
         };
 
     std::future<void> preloadFuture = std::async( std::launch::async, preload );
@@ -717,7 +1011,12 @@ void IFACE::CancelPreload( bool aBlock )
         m_libraryPreloadAbort.store( true );
 
         if( aBlock )
+        {
             m_libraryPreloadReturn.wait();
+
+            // The preload has ended, so a flag it never read can only stop the next one
+            m_libraryPreloadAbort.store( false );
+        }
     }
 }
 
@@ -731,6 +1030,8 @@ void IFACE::ProjectChanged()
 
 void IFACE::OnKifaceEnd()
 {
+    CancelPreload( true );
+
     if( m_apiHandlerSchLibs )
     {
         if( Pgm().ApiServerOrNull() )
@@ -901,7 +1202,7 @@ bool IFACE::HandleJobConfig( JOB* aJob, wxWindow* aParent )
 
 
 // TODO(JE) some of the below methods can probably be factored out and shared between sch/pcb
-void IFACE::closeCurrentDocument( KICAD_API_SERVER* aServer )
+void IFACE::closeSchematic( KICAD_API_SERVER* aServer )
 {
     if( m_openHandler )
     {
@@ -920,7 +1221,23 @@ void IFACE::closeCurrentDocument( KICAD_API_SERVER* aServer )
     // uses the schematic from the newly opened document rather than a stale copy.
     // An asynchronous API job may still be reading it.
     API_JOB_REGISTRY::Instance().WaitForIdle();
-    m_jobHandler->ClearCachedSchematic();
+
+    if( m_jobHandler )
+        m_jobHandler->ClearCachedSchematic();
+}
+
+
+void IFACE::closeSymbol( KICAD_API_SERVER* aServer )
+{
+    if( m_openSymbolHandler )
+    {
+        if( aServer )
+            aServer->DeregisterHandler( m_openSymbolHandler.get() );
+
+        m_openSymbolHandler.reset();
+    }
+
+    m_openSymbolContext.reset();
 }
 
 
@@ -968,20 +1285,6 @@ bool IFACE::handleOpenProject( const wxString& aProjectPath, KICAD_API_SERVER* a
 }
 
 
-void IFACE::closeCurrentSymbol( KICAD_API_SERVER* aServer )
-{
-    if( m_openSymbolHandler )
-    {
-        if( aServer )
-            aServer->DeregisterHandler( m_openSymbolHandler.get() );
-
-        m_openSymbolHandler.reset();
-    }
-
-    m_openSymbolContext.reset();
-}
-
-
 bool IFACE::handleOpenSymbol( const wxString& aProjectPath, const LIB_ID& aLibId, KICAD_API_SERVER* aServer,
                               wxString* aError )
 {
@@ -1025,7 +1328,7 @@ bool IFACE::handleOpenSymbol( const wxString& aProjectPath, const LIB_ID& aLibId
         return false;
     }
 
-    std::shared_ptr<HEADLESS_SYMBOL_CONTEXT> newContext;
+    std::shared_ptr<HEADLESS_SYMBOL_EDITOR_CONTEXT> newContext;
 
     try
     {
@@ -1047,7 +1350,9 @@ bool IFACE::handleOpenSymbol( const wxString& aProjectPath, const LIB_ID& aLibId
         std::unique_ptr<LIB_SYMBOL> symbol = std::make_unique<LIB_SYMBOL>( *loaded );
         symbol->SetLibId( aLibId );
 
-        newContext = std::make_shared<HEADLESS_SYMBOL_CONTEXT>( std::move( symbol ), aLibId, project, m_kiway );
+        newContext = std::make_shared<HEADLESS_SYMBOL_EDITOR_CONTEXT>(
+                std::move( symbol ), aLibId, project, GetAppSettings<SYMBOL_EDITOR_SETTINGS>( "symbol_editor" ),
+                m_kiway );
     }
     catch( const IO_ERROR& ioe )
     {
@@ -1066,10 +1371,16 @@ bool IFACE::handleOpenSymbol( const wxString& aProjectPath, const LIB_ID& aLibId
     }
 
     // One symbol at a time; the schematic (if any) stays open
-    closeCurrentSymbol( aServer );
+    closeSymbol( aServer );
     m_openSymbolContext = std::move( newContext );
 
-    m_openSymbolHandler = std::make_unique<API_HANDLER_SYMBOL>( m_openSymbolContext );
+    if( !m_apiHandlerSchLibs )
+    {
+        m_apiHandlerSchLibs = std::make_unique<API_HANDLER_SCH_LIBRARIES>();
+        aServer->RegisterHandler( m_apiHandlerSchLibs.get() );
+    }
+
+    m_openSymbolHandler = std::make_unique<API_HANDLER_SYMBOL>( m_openSymbolContext, nullptr );
     aServer->RegisterHandler( m_openSymbolHandler.get() );
 
     return true;
@@ -1081,7 +1392,7 @@ bool IFACE::HandleApiOpenDocument( const DOCUMENT_SPEC& aSpec,
 {
     wxCHECK( aServer, false );
 
-    if( aSpec.kind == DOCUMENT_SPEC::KIND::FPID_KIND )
+    if( aSpec.kind == DOCUMENT_SPEC::KIND::LIBID_KIND )
         return handleOpenSymbol( aSpec.path, aSpec.libId, aServer, aError );
 
     if( aSpec.kind == DOCUMENT_SPEC::KIND::PROJECT_KIND )
@@ -1109,7 +1420,7 @@ bool IFACE::HandleApiOpenDocument( const DOCUMENT_SPEC& aSpec,
 
     // We currently only support one document per type (and each needs to come from
     // the same project).  This will need evolution once we support MDI and multi-project.
-    closeCurrentDocument( aServer );
+    closeSchematic( aServer );
 
     SETTINGS_MANAGER& settingsManager = Pgm().GetSettingsManager();
 
@@ -1201,7 +1512,7 @@ bool IFACE::handleCreateSchematic( const wxString& aPath, KICAD_API_SERVER* aSer
         }
     }
 
-    closeCurrentDocument( aServer );
+    closeSchematic( aServer );
 
     SETTINGS_MANAGER& settingsManager = Pgm().GetSettingsManager();
 
@@ -1256,7 +1567,7 @@ bool IFACE::HandleApiCloseDocument( const DOCUMENT_SPEC& aSpec, KICAD_API_SERVER
         return true;
     }
 
-    if( aSpec.kind == DOCUMENT_SPEC::KIND::FPID_KIND )
+    if( aSpec.kind == DOCUMENT_SPEC::KIND::LIBID_KIND )
     {
         if( !m_openSymbolContext )
         {
@@ -1269,12 +1580,12 @@ bool IFACE::HandleApiCloseDocument( const DOCUMENT_SPEC& aSpec, KICAD_API_SERVER
         if( aSpec.libId.IsValid() && m_openSymbolContext->GetLoadedLibId() != aSpec.libId )
         {
             if( aError )
-                *aError = wxS( "Requested symbol does not match the open symbol" );
+                *aError = wxS( "Requested document does not match the open document" );
 
             return false;
         }
 
-        closeCurrentSymbol( aServer );
+        closeSymbol( aServer );
         return true;
     }
 
@@ -1299,7 +1610,7 @@ bool IFACE::HandleApiCloseDocument( const DOCUMENT_SPEC& aSpec, KICAD_API_SERVER
         }
     }
 
-    closeCurrentDocument( aServer );
+    closeSchematic( aServer );
     return true;
 }
 

@@ -29,10 +29,12 @@
 #include <fmt/core.h>
 #include <ki_exception.h>
 #include <macros.h>
+#include <core/kicad_algo.h>
 #include <string_utils.h>
 #include <widgets/kistatusbar.h>
 #include <wx_filename.h>
 #include <fmt/chrono.h>
+#include <harfbuzz/hb.h>
 #include <wx/log.h>
 #include <wx/regex.h>
 #include <wx/tokenzr.h>
@@ -181,6 +183,85 @@ bool ConvertSmartQuotesAndDashes( wxString* aString )
 }
 
 
+/// The code point at aPos in aText, joining a UTF-16 surrogate pair. aUnits receives how many units it spans
+static wxUint32 codePointAt( const wxString& aText, size_t aPos, size_t& aUnits )
+{
+    const wxUint32 high = aText[aPos].GetValue();
+
+    if( high >= 0xD800 && high <= 0xDBFF && aPos + 1 < aText.length() )
+    {
+        const wxUint32 low = aText[aPos + 1].GetValue();
+
+        if( low >= 0xDC00 && low <= 0xDFFF )
+        {
+            aUnits = 2;
+            return 0x10000 + ( ( high - 0xD800 ) << 10 ) + ( low - 0xDC00 );
+        }
+    }
+
+    aUnits = 1;
+    return high;
+}
+
+
+/// True for a code point drawn as part of the one before it
+static bool extendsCluster( wxUint32 aCodePoint )
+{
+    // Variation selectors, including the ideographic ones used in CJK names
+    if( ( aCodePoint >= 0xFE00 && aCodePoint <= 0xFE0F ) || ( aCodePoint >= 0xE0100 && aCodePoint <= 0xE01EF ) )
+        return true;
+
+    switch( hb_unicode_general_category( hb_unicode_funcs_get_default(), aCodePoint ) )
+    {
+    case HB_UNICODE_GENERAL_CATEGORY_NON_SPACING_MARK:
+    case HB_UNICODE_GENERAL_CATEGORY_SPACING_MARK:
+    case HB_UNICODE_GENERAL_CATEGORY_ENCLOSING_MARK: return true;
+    default: return false;
+    }
+}
+
+
+static bool isVirama( wxUint32 aCodePoint )
+{
+    return hb_unicode_combining_class( hb_unicode_funcs_get_default(), aCodePoint )
+           == HB_UNICODE_COMBINING_CLASS_VIRAMA;
+}
+
+
+std::vector<wxString> SplitGraphemeClusters( const wxString& aText )
+{
+    std::vector<wxString> clusters;
+    size_t                pos = 0;
+
+    while( pos < aText.length() )
+    {
+        const size_t start = pos;
+        size_t       units = 0;
+        bool         joinNext = false;
+
+        codePointAt( aText, pos, units );
+        pos += units;
+
+        while( pos < aText.length() )
+        {
+            const wxUint32 next = codePointAt( aText, pos, units );
+            const bool     extender = extendsCluster( next );
+
+            if( !joinNext && !extender )
+                break;
+
+            // A virama binds the next base, carried through any marks before it
+            joinNext = isVirama( next ) || ( joinNext && extender );
+            pos += units;
+        }
+
+        clusters.push_back( aText.Mid( start, pos - start ) );
+    }
+
+    return clusters;
+}
+
+
 wxString EscapeString( const wxString& aSource, ESCAPE_CONTEXT aContext )
 {
     wxString converted;
@@ -295,6 +376,15 @@ wxString EscapeString( const wxString& aSource, ESCAPE_CONTEXT aContext )
                 converted += wxT( "{return}" );
             else
                 converted += c;
+        }
+        else if( aContext == CTX_REGEX )
+        {
+            const wxString regExCtrlChars = wxT( ".^$*+?{}()[]~|\\" );
+
+            if( regExCtrlChars.Contains( c ) )
+                converted += wxT( "\\" );
+
+            converted += c;
         }
         else
         {
@@ -1481,6 +1571,26 @@ std::string FormatDouble2Str( double aValue )
 }
 
 
+wxString FormatTrimmedDecimal( double aValue, int aPrecision )
+{
+    wxString str = wxString::FromCDouble( aValue, aPrecision );
+    int      dot = str.Find( '.' );
+
+    // Keep one zero after the last significant digit and never trim the integer part
+    while( dot != wxNOT_FOUND && (int) str.length() - dot > 2 && str.EndsWith( wxT( "00" ) ) )
+        str.RemoveLast();
+
+    // Rounded zero has no meaningful sign
+    if( str.StartsWith( wxS( "-" ) )
+        && str.find_first_not_of( wxS( "0." ), 1 ) == wxString::npos )
+    {
+        str.Remove( 0, 1 );
+    }
+
+    return str;
+}
+
+
 std::string UIDouble2Str( double aValue )
 {
     char    buf[50];
@@ -1962,6 +2072,25 @@ int CountStackedPinNotation( const wxString& aPinName, bool* aValid )
 wxString GetDefaultVariantName()
 {
     return wxString( defaultVariantName );
+}
+
+
+wxString GetVariantFileToken( const wxString& aVariantName )
+{
+    if( aVariantName.IsEmpty() || aVariantName.CmpNoCase( GetDefaultVariantName() ) == 0 )
+        return wxString();
+
+    wxString token = aVariantName;
+    ReplaceIllegalFileNameChars( token, '_' );
+    return token;
+}
+
+
+wxString ExpandVariantOutputPath( const wxString& aPath, const wxString& aVariantToken )
+{
+    wxString expanded = aPath;
+    expanded.Replace( wxS( "${VARIANT}" ), aVariantToken );
+    return expanded;
 }
 
 

@@ -37,6 +37,9 @@
 #include <core/typeinfo.h>
 #include <geometry/shape_poly_set.h>
 #include <layer_ids.h>
+#include <reporter.h>
+
+#include <wx/log.h>
 
 // all outside the DSN namespace:
 class BOARD;
@@ -81,11 +84,26 @@ class SPECCTRA_DB;
 
 
 /**
+ * Report a warning through the given reporter when available, otherwise fall back to the
+ * legacy wxLogWarning channel so callers without a reporter behave as before.
+ */
+inline void ReportWarning( REPORTER* aReporter, const wxString& aMessage )
+{
+    if( aReporter )
+        aReporter->Report( aMessage, RPT_SEVERITY_WARNING );
+    else
+        wxLogWarning( aMessage );
+}
+
+
+/**
  * @brief Helper method to export board to DSN file
  * @param aBoard board object
  * @param aFullFilename specctra file name
+ * @param aReporter optional reporter for warnings; wxLogWarning is used when null
  */
-void ExportBoardToSpecctraFile( BOARD* aBoard, const wxString& aFullFilename );
+void ExportBoardToSpecctraFile( BOARD* aBoard, const wxString& aFullFilename,
+                                REPORTER* aReporter = nullptr );
 
 
 /**
@@ -1269,7 +1287,7 @@ private:
     DSN_T                    layer_type; ///< one of: T_signal, T_power, T_mixed, T_jumper
     int                      direction;
 
-    ///< [forbidden | high | medium | low | free | \<positive_integer\> | -1]
+    /// [forbidden | high | medium | low | free | \<positive_integer\> | -1]
     int                      cost;
     int                      cost_type;  ///< T_length | T_way
     RULE*                    rules;
@@ -3623,7 +3641,12 @@ public:
         m_sessionBoard = nullptr;
         m_top_via_layer = 0;
         m_bot_via_layer = 0;
+        m_reporter = nullptr;
+        m_skippedCount = 0;
     }
+
+    void SetReporter( REPORTER* aReporter ) { m_reporter = aReporter; }
+
 
     virtual ~SPECCTRA_DB()
     {
@@ -3715,6 +3738,12 @@ public:
     void FromBOARD( BOARD* aBoard );
 
     /**
+     * Return the number of session items skipped during the last FromSESSION() call due to
+     * unresolved reference, layer, or padstack.
+     */
+    int GetSkippedCount() const { return m_skippedCount; }
+
+    /**
      * Add the entire #SESSION info to a #BOARD but does not write it out.
      *
      * The #BOARD given to this function will have all its unlocked tracks and vias replaced
@@ -3725,14 +3754,13 @@ public:
      *                undo/redo and view updates. The caller is responsible for Push().
      * @param aReplaceTracks Remove the board's unlocked tracks, arcs and vias before adding the
      *                       session's; otherwise the session's items are added to what is there.
-     * @param aWarnings Collects the problems that did not abort the import (items that could not
-     *                  be resolved); when null they go to wxLogWarning instead.
+     *
+     * Problems that do not abort the import go to the reporter set by SetReporter().
      */
-    void FromSESSION( BOARD* aBoard, COMMIT& aCommit, bool aReplaceTracks = true,
-                      std::vector<wxString>* aWarnings = nullptr );
+    void FromSESSION( BOARD* aBoard, COMMIT& aCommit, bool aReplaceTracks = true );
 
     /**
-     * Write the internal #SESSION instance out as a #SPECTRA DSN format file.
+     * Write the internal #SESSION instance out as a SPECCTRA DSN format file.
      *
      * @param aFilename The file to save to.
      */
@@ -3908,7 +3936,7 @@ private:
      * @param aVia The #VIA to build the padstack from.
      * @return The padstack, which is on the heap only, user must save or delete it.
      */
-    PADSTACK* makeVia( const ::PCB_VIA* aVia );
+    PADSTACK* makeVia( const PCB_VIA* aVia );
 
     /**
      * Delete all the NETs that may be in here.
@@ -3954,6 +3982,8 @@ private:
 
     PCB*              m_pcb;
     SHAPE_POLY_SET    m_brd_outlines;       // the board outlines for DSN export
+    REPORTER*         m_reporter;
+
     SESSION*          m_session;
     wxString          m_filename;
     std::string       m_quote_char;
@@ -3969,6 +3999,9 @@ private:
 
     /// used during FromSESSION() only, memory for it is not owned here.
     UNIT_RES*                m_routeResolution;
+
+    /// count of session items skipped during the last FromSESSION() call.
+    int                      m_skippedCount;
 
     /// a copy to avoid passing as an argument, memory for it is not owned here.
     BOARD*                   m_sessionBoard;
@@ -3993,21 +4026,23 @@ private:
  * @param aBoard board object
  * @param fullFileName specctra session file name
  * @param aCommit commit for undo/redo and view updates
+ * @param aReporter optional reporter for warnings
+ * @param aSkippedCount optional output for the number of session items skipped
  * @param aReplaceTracks remove the board's unlocked tracks and vias first (the editor's behavior)
- * @param aWarnings collects non-fatal problems; when null they go to wxLogWarning
  */
-
 bool ImportSpecctraSession( BOARD* aBoard, const wxString& fullFileName, COMMIT& aCommit,
-                            bool aReplaceTracks = true, std::vector<wxString>* aWarnings = nullptr );
+                            REPORTER* aReporter = nullptr, int* aSkippedCount = nullptr,
+                            bool aReplaceTracks = true );
 
 /**
  * @brief Import a session that is already in memory.  Since 11.0
  *
  * @param aReader supplies the session text (a STRING_LINE_READER, for instance)
- * @see ImportSpecctraSession( BOARD*, const wxString&, COMMIT&, bool, std::vector<wxString>* )
+ * @see ImportSpecctraSession( BOARD*, const wxString&, COMMIT&, REPORTER*, int*, bool )
  */
 bool ImportSpecctraSession( BOARD* aBoard, LINE_READER& aReader, COMMIT& aCommit,
-                            bool aReplaceTracks = true, std::vector<wxString>* aWarnings = nullptr );
+                            REPORTER* aReporter = nullptr, int* aSkippedCount = nullptr,
+                            bool aReplaceTracks = true );
 
 }           // namespace DSN
 

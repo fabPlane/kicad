@@ -34,6 +34,7 @@
 #include <embedded_files.h>
 #include <footprint.h>
 #include <pcb_barcode.h>
+#include <pcb_3d_body.h>
 #include <pcb_dimension.h>
 #include <pcb_drill_chart.h>
 #include <pcb_drill_map.h>
@@ -232,8 +233,8 @@ BOOST_AUTO_TEST_CASE( FileFormatStateRoundTrip )
         BOOST_CHECK_EQUAL( copy.GetLibTextAngle().AsDegrees(), 315.0 );
         BOOST_CHECK_EQUAL( copy.GetLibTextAngle().AsDegrees(), text->GetLibTextAngle().AsDegrees() );
         BOOST_CHECK_EQUAL( copy.GetTextAngle().AsDegrees(), text->GetTextAngle().AsDegrees() );
-        BOOST_CHECK_EQUAL( copy.GetAttributes().m_Angle.AsDegrees(),
-                           text->GetAttributes().m_Angle.AsDegrees() );
+        BOOST_CHECK_EQUAL( copy.GetAttributes().m_Angle.GetAngle().AsDegrees(),
+                           text->GetAttributes().m_Angle.GetAngle().AsDegrees() );
     }
 
     // A board-level text keeps its rotation
@@ -346,7 +347,7 @@ BOOST_FIXTURE_TEST_CASE( DrillChartColumnWidths, PROTO_TEST_FIXTURE )
     BOOST_REQUIRE_GT( proto.columns_size(), 0 );
     BOOST_CHECK_EQUAL( proto.columns( 0 ).width().value_nm(), 16000000 );
 
-    for( int64_t width : { int64_t( 0 ), int64_t( DRILL_CHART_MAX_COLUMN_WIDTH ) } )
+    for( int64_t width : { int64_t( 0 ), int64_t( GENERATED_TABLE_MAX_COLUMN_WIDTH ) } )
     {
         proto.mutable_columns( 0 )->mutable_width()->set_value_nm( width );
         any.PackFrom( proto );
@@ -355,7 +356,7 @@ BOOST_FIXTURE_TEST_CASE( DrillChartColumnWidths, PROTO_TEST_FIXTURE )
         BOOST_CHECK_EQUAL( restored.Columns().front().m_Width, width );
     }
 
-    for( int64_t width : { int64_t( -1 ), int64_t( DRILL_CHART_MAX_COLUMN_WIDTH ) + 1,
+    for( int64_t width : { int64_t( -1 ), int64_t( GENERATED_TABLE_MAX_COLUMN_WIDTH ) + 1,
                           std::numeric_limits<int64_t>::max() } )
     {
         proto.mutable_columns( 0 )->mutable_width()->set_value_nm( width );
@@ -363,7 +364,7 @@ BOOST_FIXTURE_TEST_CASE( DrillChartColumnWidths, PROTO_TEST_FIXTURE )
         PCB_DRILL_CHART restored( m_board.get() );
         BOOST_REQUIRE( restored.Deserialize( any ) );
         BOOST_CHECK_EQUAL( restored.Columns().front().m_Width,
-                           width < 0 ? 0 : DRILL_CHART_MAX_COLUMN_WIDTH );
+                           width < 0 ? 0 : GENERATED_TABLE_MAX_COLUMN_WIDTH );
     }
 }
 
@@ -479,7 +480,7 @@ BOOST_FIXTURE_TEST_CASE( CopperThievingZoneRoundTrip, PROTO_TEST_FIXTURE )
     BOOST_CHECK_EQUAL( loaded.gap, thieving.gap );
     BOOST_CHECK_EQUAL( loaded.line_width, thieving.line_width );
     BOOST_CHECK_EQUAL( loaded.stagger, true );
-    BOOST_CHECK( loaded.orientation == EDA_ANGLE( 15.0, DEGREES_T ) );
+    BOOST_CHECK( loaded.orientation.GetAngle() == EDA_ANGLE( 15.0, DEGREES_T ) );
 }
 
 
@@ -535,6 +536,74 @@ BOOST_AUTO_TEST_CASE( GridItems )
     BOOST_CHECK_EQUAL( roundTripped->IsLocked(), false );
 }
 
+
+BOOST_AUTO_TEST_CASE( Body3D )
+{
+    const auto makeBody =
+            []()
+            {
+                return std::make_unique<PCB_3D_BODY>();
+            };
+
+    // Populated body, including both layer sentinels
+    PCB_3D_BODY populated;
+    EXTRUDED_3D_BODY& extruded = *populated.MutableExtruded();
+    extruded.m_height = pcbIUScale.mmToIU( 2.5 );
+    extruded.m_standoff = pcbIUScale.mmToIU( 0.1 );
+    extruded.m_layer = F_CrtYd;
+    extruded.m_material = EXTRUSION_MATERIAL::METAL;
+    extruded.m_color = KIGFX::COLOR4D( 0.8, 0.4, 0.0, 0.9 );
+    extruded.m_offset = VECTOR3D( 1.0, -0.5, 0.2 );
+    extruded.m_scale = VECTOR3D( 1.5, 0.8, 2.0 );
+    extruded.m_rotation = VECTOR3D( 10.0, 20.0, 45.0 );
+    extruded.m_show = false;
+
+    testProtoFromKiCadObject<kiapi::board::types::Body3D>( &populated, makeBody );
+
+    PCB_3D_BODY autoLayer;
+    autoLayer.MutableExtruded()->m_layer = UNDEFINED_LAYER;
+
+    testProtoFromKiCadObject<kiapi::board::types::Body3D>( &autoLayer, makeBody );
+
+    PCB_3D_BODY padBBox;
+    padBBox.MutableExtruded()->m_layer = UNSELECTED_LAYER;
+
+    testProtoFromKiCadObject<kiapi::board::types::Body3D>( &padBBox, makeBody );
+
+    // No color set: the optional must stay absent across the round trip
+    google::protobuf::Any any;
+    autoLayer.Serialize( any );
+
+    kiapi::board::types::Body3D msg;
+    BOOST_REQUIRE( any.UnpackTo( &msg ) );
+    BOOST_CHECK( !msg.extruded().has_color() );
+
+    // A model-kind body is reserved and must be rejected on deserialize
+    msg.set_kind( kiapi::board::types::BDK_MODEL );
+    any.PackFrom( msg );
+
+    std::unique_ptr<PCB_3D_BODY> modelBody = makeBody();
+    BOOST_CHECK( !modelBody->Deserialize( any ) );
+
+    // A body whose parent names a different footprint is still imported as a child
+    BOARD    board;
+    FOOTPRINT target( &board );
+
+    kiapi::board::types::Footprint definition;
+
+    msg.Clear();
+    msg.set_kind( kiapi::board::types::BDK_EXTRUDED );
+    msg.mutable_id()->set_value( KIID().AsStdString() );
+    msg.mutable_parent()->set_value( "00000000-0000-0000-0000-000000000001" );
+    msg.mutable_extruded()->mutable_height()->set_value_nm( pcbIUScale.mmToIU( 2 ) );
+    any.PackFrom( msg );
+    *definition.add_items() = any;
+
+    BOOST_CHECK( target.DeserializeDefinition( definition ) );
+    BOOST_CHECK( target.HasBody() );
+    BOOST_CHECK_EQUAL( target.GetBody()->GetParentFootprint(), &target );
+
+}
 
 BOOST_AUTO_TEST_CASE( PadCustomShapeProxyItems )
 {

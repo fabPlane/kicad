@@ -37,6 +37,7 @@
 #include <trace_helpers.h>
 #include <tool/tool_manager.h>
 #include <tools/sch_navigate_tool.h>
+#include <font/glyph_types.h>
 #include <font/outline_font.h>
 #include "sim/sim_lib_mgr.h"
 #include <properties/property.h>
@@ -145,7 +146,7 @@ SCH_FIELD::SCH_FIELD( SCH_ITEM* aParent, FIELD_T aFieldId, const wxString& aName
     else
         SetName( GetDefaultFieldName( aFieldId, TRANSLATED ) );
 
-    setId( aFieldId ); // will also set the layer
+    setId( aFieldId ); // will also set the layer; call only AFTER SetName()
     SetVisible( true );
 
     if( aParent && aParent->Schematic() )
@@ -156,6 +157,8 @@ SCH_FIELD::SCH_FIELD( SCH_ITEM* aParent, FIELD_T aFieldId, const wxString& aName
 
     if( aFieldId == FIELD_T::USER && aParent )
     {
+        wxASSERT_MSG( aParent->Type() != SCH_SHEET_T, wxT( "Sheets use FIELD_T::SHEET_USER, not FIELD_T::USER!" ) );
+
         if( aParent->Type() == SCH_SYMBOL_T )
             m_ordinal = static_cast<SCH_SYMBOL*>( aParent )->GetNextFieldOrdinal();
         else if( aParent->Type() == LIB_SYMBOL_T )
@@ -184,9 +187,9 @@ SCH_FIELD::SCH_FIELD( const SCH_FIELD& aField ) :
         EDA_TEXT( aField )
 {
     m_private = aField.m_private;
-    setId( aField.m_id ); // will also set the layer
-    m_ordinal = aField.m_ordinal;
     m_name = aField.m_name;
+    setId( aField.m_id ); // will also set the layer; call only AFTER setting m_name
+    m_ordinal = aField.m_ordinal;
     m_showName = aField.m_showName;
     m_allowAutoPlace = aField.m_allowAutoPlace;
     m_isGeneratedField = aField.m_isGeneratedField;
@@ -237,6 +240,7 @@ bool SCH_FIELD::Deserialize( const kiapi::schematic::types::SchematicField& fiel
     if( m_parent && m_parent->Type() == SCH_SYMBOL_T )
         SetPosition( kiapi::common::UnpackVector2( field.text().position(), aScale ) );
 
+    kiapi::common::UnpackCustomProperties( field.custom_properties(), *this );
     return result;
 }
 
@@ -257,9 +261,9 @@ SCH_FIELD& SCH_FIELD::operator=( const SCH_FIELD& aField )
     EDA_TEXT::operator=( aField );
 
     m_private = aField.m_private;
-    setId( aField.m_id ); // will also set the layer
-    m_ordinal = aField.m_ordinal;
     m_name = aField.m_name;
+    setId( aField.m_id ); // will also set the layer; call only AFTER setting m_name
+    m_ordinal = aField.m_ordinal;
     m_showName = aField.m_showName;
     m_allowAutoPlace = aField.m_allowAutoPlace;
     m_isGeneratedField = aField.m_isGeneratedField;
@@ -314,9 +318,6 @@ wxString SCH_FIELD::GetShownText( const SCH_SHEET_PATH* aPath, RESOLUTION_CONTEX
         text = ResolveText( text, aPath, aDepth, aVariantName );
         FinalizeTextVarExpansion( text, aContext );
     }
-
-    if( m_id == FIELD_T::SHEET_FILENAME && aContext == FOR_CANVAS && !IsNameShown() )
-        text = _( "File:" ) + wxS( " " ) + text;
 
     return text;
 }
@@ -796,7 +797,7 @@ void SCH_FIELD::OnScintillaCharAdded( SCINTILLA_TRICKS* aScintillaTricks, wxStyl
                 SCH_REFERENCE_LIST refs;
                 SCH_SYMBOL*        refSymbol = nullptr;
 
-                schematic->Hierarchy().GetSymbols( refs, SYMBOL_FILTER_ALL );
+                schematic->Hierarchy().GetSymbols( refs, SYMBOL_FILTER_NON_POWER );
 
                 for( size_t jj = 0; jj < refs.GetCount(); jj++ )
                 {
@@ -867,12 +868,21 @@ bool SCH_FIELD::IsLocked() const
             return true;
     }
 
+    if( const SCH_LABEL_BASE* parentLabel = dynamic_cast<const SCH_LABEL_BASE*>( m_parent ) )
+    {
+        if( parentLabel->IsLocked() )
+            return true;
+    }
+
     return SCH_ITEM::IsLocked();
 }
 
 
 bool SCH_FIELD::Replace( const EDA_SEARCH_DATA& aSearchData, void* aAuxData )
 {
+    if( m_isGeneratedField )
+        return false;
+
     bool replaceReferences = false;
 
     try
@@ -1166,7 +1176,11 @@ void SCH_FIELD::SetText( const wxString& aText, const SCH_SHEET_PATH* aPath, con
     {
         SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( m_parent );
         wxCHECK( symbol, /* void */ );
-        symbol->SetFieldText( GetName( false ), text, aPath, aVariantName );
+
+        // Just because we _have_ a parent, doesn't mean we've been added to it yet.  Make sure to
+        // use the version of SetFieldText() which gives our parent a pointer to us.
+        symbol->SetFieldText( this, GetName( false ), text, aPath, aVariantName );
+
         break;
     }
 
@@ -1174,7 +1188,11 @@ void SCH_FIELD::SetText( const wxString& aText, const SCH_SHEET_PATH* aPath, con
     {
         SCH_SHEET* sheet = static_cast<SCH_SHEET*>( m_parent );
         wxCHECK( sheet, /* void */ );
-        sheet->SetFieldText( GetName( false ), text, aPath, aVariantName );
+
+        // Just because we _have_ a parent, doesn't mean we've been added to it yet.  Make sure to
+        // use the version of SetFieldText() which gives our parent a pointer to us.
+        sheet->SetFieldText( this, GetName( false ), text, aPath, aVariantName );
+
         break;
     }
 
@@ -1197,7 +1215,11 @@ wxString SCH_FIELD::GetText( const SCH_SHEET_PATH* aPath, const wxString& aVaria
     {
         SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( m_parent );
         wxCHECK( symbol, retv );
-        retv = symbol->GetFieldText( GetName(), aPath, aVariantName );
+
+        // Just because we _have_ a parent, doesn't mean we've been added to it yet.  Make sure to
+        // use the version of SetFieldText() which gives our parent a pointer to us.
+        retv = symbol->GetFieldText( this, GetName( false ), aPath, aVariantName );
+
         break;
     }
 
@@ -1205,7 +1227,11 @@ wxString SCH_FIELD::GetText( const SCH_SHEET_PATH* aPath, const wxString& aVaria
     {
         SCH_SHEET* sheet = static_cast<SCH_SHEET*>( m_parent );
         wxCHECK( sheet, retv );
-        retv = sheet->GetFieldText( GetName(), aPath, aVariantName );
+
+        // Just because we _have_ a parent, doesn't mean we've been added to it yet.  Make sure to
+        // use the version of SetFieldText() which gives our parent a pointer to us.
+        retv = sheet->GetFieldText( this, GetName( false ), aPath, aVariantName );
+
         break;
     }
 
@@ -1780,6 +1806,21 @@ wxString SCH_FIELD::getUnescapedText( const SCH_SHEET_PATH* aPath, const wxStrin
             break;
 
         case SCH_SHEET_T:
+            if( const SCH_SHEET* sheet = static_cast<const SCH_SHEET*>( m_parent ) )
+            {
+                if( !aVariantName.IsEmpty() )
+                {
+                    const SCH_SHEET_INSTANCE* instance = sheet->GetInstance( aPath->Path() );
+
+                    if( instance
+                            && instance->m_Variants.contains( aVariantName )
+                            && instance->m_Variants.at( aVariantName ).m_Fields.contains( GetName() ) )
+                    {
+                        return instance->m_Variants.at( aVariantName ).m_Fields.at( GetName() );
+                    }
+                }
+            }
+
             break;
 
         default:

@@ -51,9 +51,7 @@ std::string trim( const std::string& aStr )
 
 std::vector<std::string> exportD356( const std::string& aBoardFile )
 {
-    std::unique_ptr<BOARD> board = KI_TEST::ReadBoardFromFileOrStream(
-            ( std::filesystem::path( KI_TEST::GetPcbnewTestDataDir() ) / aBoardFile ).string() );
-    BOOST_REQUIRE( board );
+    std::unique_ptr<BOARD> board = KI_TEST::RequireBoardFromPcbnewQAData( aBoardFile );
 
     const std::filesystem::path outputPath = std::filesystem::temp_directory_path() / ( aBoardFile + ".d356" );
 
@@ -66,6 +64,7 @@ std::vector<std::string> exportD356( const std::string& aBoardFile )
     for( std::string line; std::getline( in, line ); )
         lines.push_back( line );
 
+    in.close();
     std::filesystem::remove( outputPath );
     return lines;
 }
@@ -84,8 +83,7 @@ BOOST_AUTO_TEST_CASE( ExportD356MidpointFlag )
 
     BOOST_REQUIRE( std::filesystem::exists( boardPath ) );
 
-    std::unique_ptr<BOARD> board = KI_TEST::ReadBoardFromFileOrStream( boardPath.string() );
-    BOOST_REQUIRE( board );
+    std::unique_ptr<BOARD> board = KI_TEST::RequireBoardFromPcbnewQAData( "issue3812.kicad_pcb" );
 
     const std::filesystem::path outputPath =
             std::filesystem::temp_directory_path() / "kicad_d356_midpoint_test.d356";
@@ -157,6 +155,7 @@ BOOST_AUTO_TEST_CASE( ExportD356MidpointFlag )
     BOOST_CHECK_GT( unnamedPads, 0 );
     BOOST_CHECK_GT( vias, 0 );
 
+    in.close();
     std::filesystem::remove( outputPath );
 }
 

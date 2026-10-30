@@ -119,6 +119,12 @@ void API_SERVER_HOST::Install()
                 return ensureAppSettings( aApp, aError );
             } );
 
+    m_server.SetRenameListener(
+            [this]( types::DocumentType aType, const wxString& aOldPath, const wxString& aNewPath )
+            {
+                onDocumentRenamed( aType, aOldPath, aNewPath );
+            } );
+
     m_server.RegisterHandler( &m_commonHandler );
 
     m_designBlockLibrariesHandler = std::make_unique<API_HANDLER_LIBRARIES>( LIBRARY_TABLE_TYPE::DESIGN_BLOCK );
@@ -140,6 +146,7 @@ void API_SERVER_HOST::Shutdown()
         return;
 
     closeAllDocuments( commands::CloseAllDocuments() );
+    m_server.SetRenameListener( nullptr );
     m_server.DeregisterHandler( &m_commonHandler );
 
     if( m_designBlockLibrariesHandler )
@@ -239,13 +246,40 @@ void API_SERVER_HOST::notifyProjectFaces( const wxFileName& aProjectPath, bool a
 }
 
 
+void API_SERVER_HOST::onDocumentRenamed( types::DocumentType aType, const wxString& aOldPath,
+                                         const wxString& aNewPath )
+{
+    auto it = std::ranges::find_if( m_openDocuments,
+                                    [&]( const OPEN_DOCUMENT& d )
+                                    {
+                                        return d.type == aType && d.specPath == aOldPath;
+                                    } );
+
+    if( it == m_openDocuments.end() )
+        return;
+
+    wxFileName newFile( aNewPath );
+    newFile.MakeAbsolute();
+
+    it->fileName = newFile.GetFullName();
+    it->specPath = newFile.GetFullPath();
+
+    if( m_openProjectPath )
+    {
+        wxFileName newProject( newFile );
+        newProject.SetExt( FILEEXT::ProjectFileExtension );
+        m_openProjectPath = newProject;
+    }
+}
+
+
 KIFACE::DOCUMENT_SPEC API_SERVER_HOST::closeSpec( const OPEN_DOCUMENT& aDoc, bool aExact )
 {
     KIFACE::DOCUMENT_SPEC spec;
 
     if( aDoc.type == types::DOCTYPE_FOOTPRINT || aDoc.type == types::DOCTYPE_SYMBOL )
     {
-        spec.kind = KIFACE::DOCUMENT_SPEC::KIND::FPID_KIND;
+        spec.kind = KIFACE::DOCUMENT_SPEC::KIND::LIBID_KIND;
 
         if( aExact )
             spec.libId = aDoc.libId;
@@ -255,7 +289,7 @@ KIFACE::DOCUMENT_SPEC API_SERVER_HOST::closeSpec( const OPEN_DOCUMENT& aDoc, boo
         spec.kind = KIFACE::DOCUMENT_SPEC::KIND::FILE_KIND;
 
         if( aExact )
-            spec.path = aDoc.fileName;
+            spec.path = aDoc.specPath.IsEmpty() ? aDoc.fileName : aDoc.specPath;
     }
 
     return spec;
@@ -335,7 +369,7 @@ HANDLER_RESULT<commands::OpenDocumentResponse> API_SERVER_HOST::openDocument(
         }
 
         KIFACE::DOCUMENT_SPEC spec;
-        spec.kind = KIFACE::DOCUMENT_SPEC::KIND::FPID_KIND;
+        spec.kind = KIFACE::DOCUMENT_SPEC::KIND::LIBID_KIND;
         spec.libId = fpid;
 
         if( m_openProjectPath )
@@ -488,6 +522,7 @@ HANDLER_RESULT<commands::OpenDocumentResponse> API_SERVER_HOST::openDocument(
     OPEN_DOCUMENT doc;
     doc.type = requestType;
     doc.fileName = docFile.GetFullName();
+    doc.specPath = docFile.GetFullPath();
     m_openDocuments.push_back( doc );
 
     // Opening a board or schematic implicitly opens its project
@@ -638,6 +673,7 @@ API_SERVER_HOST::createDocument( const commands::CreateDocument& aRequest )
     OPEN_DOCUMENT doc;
     doc.type = requestType;
     doc.fileName = docPath.GetFullName();
+    doc.specPath = docPath.GetFullPath();
     m_openDocuments.push_back( doc );
 
     // Creating a board or schematic implicitly opens (or creates) its project

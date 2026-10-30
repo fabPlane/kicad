@@ -141,6 +141,7 @@ public:
         int   search_panel_dock_direction;
         bool  show_layer_manager;
         bool  show_properties;
+        bool  show_git_commit_pane;
         bool  show_search;
         bool  show_net_inspector;
         bool  design_blocks_show;
@@ -258,7 +259,7 @@ public:
     bool      m_ShowPageLimits;
     bool      m_ShowCourtyardCollisions;
 
-    ///<@todo Implement real auto zone filling (not just after zone properties are edited)
+    /// @todo Implement real auto zone filling (not just after zone properties are edited)
     bool      m_AutoRefillZones; // Fill zones after editing the zone using the Zone Properties dialog
 
     bool      m_AllowFreePads;  // True: unlocked pads can be moved freely with respect to the footprint.

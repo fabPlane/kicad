@@ -56,6 +56,11 @@ public:
         return wxT( "PCB_TABLE" );
     }
 
+    /**
+     * True when the cells' text comes from the board, so only their formatting is the user's
+     */
+    bool IsGenerated() const { return IsGeneratedTableType( Type() ); }
+
     void SetStrokeExternal( bool aDoStroke ) { m_strokeExternal = aDoStroke; }
     bool StrokeExternal() const              { return m_strokeExternal; }
 
@@ -254,6 +259,7 @@ public:
      * Convert the TABLE shape to a polyset. details will be included.
      *
      * @param aBuffer a buffer to store the polygon.
+     * @param aLayer is the ID of the layer the table exists on.
      * @param aClearance the clearance around the pad.
      * @param aError the maximum deviation from true circle.
      * @param aErrorLoc should the approximation error be placed outside or inside the polygon?
@@ -334,6 +340,20 @@ protected:
     std::map<int, int>          m_rowHeights;
     std::vector<PCB_TABLECELL*> m_cells;
 };
+
+
+/**
+ * True for a cell whose text is generated from the board, so only its formatting is the user's.
+ */
+inline bool IsGeneratedTableCell( const EDA_ITEM* aItem )
+{
+    if( !aItem || aItem->Type() != PCB_TABLECELL_T )
+        return false;
+
+    const PCB_TABLE* table = dynamic_cast<const PCB_TABLE*>( aItem->GetParent() );
+
+    return table && table->IsGenerated();
+}
 
 
 #endif /* PCB_TABLE_H */

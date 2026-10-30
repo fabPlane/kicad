@@ -23,6 +23,7 @@
 #include <wx/string.h>
 
 class BOARD;
+struct FAB_TEST_POINT;
 class wxWindow;
 
 
@@ -61,7 +62,6 @@ public:
     /**
      * Constructs an IPC-356D file writer
      * @param aPcb is the board to extract a netlist from
-     * @param aParent will be used as the parent for any warning dialogs
      */
     IPC356D_WRITER( BOARD* aPcb ) :
             m_pcb( aPcb ),
@@ -92,7 +92,8 @@ private:
     /// Writes a list of records to the given output stream
     void write_D356_records( std::vector<D356_RECORD> &aRecords, FILE* aFile );
 
-    void build_pad_testpoints( BOARD *aPcb, std::vector <D356_RECORD>& aRecords );
+    void appendPadRecords( BOARD* aPcb, const std::vector<FAB_TEST_POINT>& aPoints,
+                           std::vector<D356_RECORD>& aRecords );
 
     bool m_doNotExportUnconnectedPads;
 };

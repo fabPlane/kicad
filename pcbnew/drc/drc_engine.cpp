@@ -27,6 +27,7 @@
 #include <progress_reporter.h>
 #include <string_utils.h>
 #include <board_design_settings.h>
+#include <board_design_settings_defaults.h>
 #include <project/net_settings.h>
 #include <component_classes/component_class_manager.h>
 #include <drc/drc_engine.h>
@@ -34,6 +35,7 @@
 #include <drc/drc_rule_parser.h>
 #include <drc/drc_rule.h>
 #include <drc/drc_rule_condition.h>
+#include <libeval_compiler/libeval_compiler.h>
 #include <drc/drc_test_provider.h>
 #include <drc/drc_item.h>
 #include <drc/drc_cache_generator.h>
@@ -265,8 +267,13 @@ void DRC_ENGINE::loadImplicitRules()
     auto makeNetclassRules =
             [&]( const std::shared_ptr<NETCLASS>& nc, bool isDefault )
             {
-                ncName = nc->GetName();
-                ncName.Replace( "'", "\\'" );
+                std::optional<wxString> literal = LIBEVAL::EscapeStringLiteral( nc->GetName() );
+
+                // DRC_TEST_PROVIDER_MISC reports the class, since a rule here cannot be compiled
+                if( !literal )
+                    return;
+
+                ncName = *literal;
 
                 if( nc->HasClearance() )
                 {
@@ -277,6 +284,7 @@ void DRC_ENGINE::loadImplicitRules()
 
                     expr = wxString::Format( wxT( "A.hasExactNetclass('%s')" ), ncName );
                     netclassRule->m_Condition = new DRC_RULE_CONDITION( expr );
+                    netclassRule->m_ImplicitNetclass = nc->GetName();
                     netclassClearanceRules.push_back( netclassRule );
 
                     DRC_CONSTRAINT constraint( CLEARANCE_CONSTRAINT );
@@ -285,7 +293,7 @@ void DRC_ENGINE::loadImplicitRules()
 
                     {
                         std::unique_lock<std::shared_mutex> writeLock( m_clearanceCacheMutex );
-                        m_netclassClearances[nc->GetName()] = nc->GetClearance();
+                        m_netclassClearances[nc->GetName()] = netclassRule.get();
                     }
                 }
 
@@ -298,6 +306,7 @@ void DRC_ENGINE::loadImplicitRules()
 
                     expr = wxString::Format( wxT( "A.hasExactNetclass('%s')" ), ncName );
                     netclassRule->m_Condition = new DRC_RULE_CONDITION( expr );
+                    netclassRule->m_ImplicitNetclass = nc->GetName();
                     netclassClearanceRules.push_back( netclassRule );
 
                     DRC_CONSTRAINT constraint( TRACK_WIDTH_CONSTRAINT );
@@ -315,6 +324,7 @@ void DRC_ENGINE::loadImplicitRules()
 
                     expr = wxString::Format( wxT( "A.hasExactNetclass('%s') && A.inDiffPair('*')" ), ncName );
                     netclassRule->m_Condition = new DRC_RULE_CONDITION( expr );
+                    netclassRule->m_ImplicitNetclass = nc->GetName();
                     netclassItemSpecificRules.push_back( netclassRule );
 
                     DRC_CONSTRAINT constraint( TRACK_WIDTH_CONSTRAINT );
@@ -332,6 +342,7 @@ void DRC_ENGINE::loadImplicitRules()
 
                     expr = wxString::Format( wxT( "A.hasExactNetclass('%s')" ), ncName );
                     netclassRule->m_Condition = new DRC_RULE_CONDITION( expr );
+                    netclassRule->m_ImplicitNetclass = nc->GetName();
                     netclassItemSpecificRules.push_back( netclassRule );
 
                     DRC_CONSTRAINT constraint( DIFF_PAIR_GAP_CONSTRAINT );
@@ -349,6 +360,7 @@ void DRC_ENGINE::loadImplicitRules()
 
                         expr = wxString::Format( wxT( "A.hasExactNetclass('%s') && AB.isCoupledDiffPair()" ), ncName );
                         netclassRule->m_Condition = new DRC_RULE_CONDITION( expr );
+                        netclassRule->m_ImplicitNetclass = nc->GetName();
                         netclassItemSpecificRules.push_back( netclassRule );
 
                         DRC_CONSTRAINT min_clearanceConstraint( CLEARANCE_CONSTRAINT );
@@ -368,6 +380,7 @@ void DRC_ENGINE::loadImplicitRules()
 
                     expr = wxString::Format( wxT( "A.hasExactNetclass('%s') && A.Via_Type != 'Micro'" ), ncName );
                     netclassRule->m_Condition = new DRC_RULE_CONDITION( expr );
+                    netclassRule->m_ImplicitNetclass = nc->GetName();
                     netclassItemSpecificRules.push_back( netclassRule );
 
                     DRC_CONSTRAINT constraint( VIA_DIAMETER_CONSTRAINT );
@@ -385,6 +398,7 @@ void DRC_ENGINE::loadImplicitRules()
 
                     expr = wxString::Format( wxT( "A.hasExactNetclass('%s') && A.Via_Type != 'Micro'" ), ncName );
                     netclassRule->m_Condition = new DRC_RULE_CONDITION( expr );
+                    netclassRule->m_ImplicitNetclass = nc->GetName();
                     netclassItemSpecificRules.push_back( netclassRule );
 
                     DRC_CONSTRAINT constraint( HOLE_SIZE_CONSTRAINT );
@@ -402,11 +416,12 @@ void DRC_ENGINE::loadImplicitRules()
 
                     expr = wxString::Format( wxT( "A.hasExactNetclass('%s') && A.Via_Type == 'Micro'" ), ncName );
                     netclassRule->m_Condition = new DRC_RULE_CONDITION( expr );
+                    netclassRule->m_ImplicitNetclass = nc->GetName();
                     netclassItemSpecificRules.push_back( netclassRule );
 
                     DRC_CONSTRAINT constraint( VIA_DIAMETER_CONSTRAINT );
                     constraint.Value().SetMin( bds.m_MicroViasMinSize );
-                    constraint.Value().SetMin( nc->GetuViaDiameter() );
+                    constraint.Value().SetOpt( nc->GetuViaDiameter() );
                     netclassRule->AddConstraint( constraint );
                 }
 
@@ -419,6 +434,7 @@ void DRC_ENGINE::loadImplicitRules()
 
                     expr = wxString::Format( wxT( "A.hasExactNetclass('%s') && A.Via_Type == 'Micro'" ), ncName );
                     netclassRule->m_Condition = new DRC_RULE_CONDITION( expr );
+                    netclassRule->m_ImplicitNetclass = nc->GetName();
                     netclassItemSpecificRules.push_back( netclassRule );
 
                     DRC_CONSTRAINT constraint( HOLE_SIZE_CONSTRAINT );
@@ -483,7 +499,7 @@ void DRC_ENGINE::loadImplicitRules()
 
     auto addTuningDifferentialRules =
             [&]( const DELAY_PROFILE_TRACK_PROPAGATION_ENTRY& aLayerEntry, const wxString& aProfileName,
-                 const NETCLASS* aNetclass )
+                 const NETCLASS* aNetclass, const wxString& aNetclassName )
             {
                 if( aLayerEntry.GetWidth() <= 0 || aLayerEntry.GetDiffPairGap() <= 0 )
                     return;
@@ -494,7 +510,7 @@ void DRC_ENGINE::loadImplicitRules()
                 tuningRule->SetImplicitSource( DRC_IMPLICIT_SOURCE::TUNING_PROFILE );
 
                 expr = wxString::Format( wxT( "A.hasExactNetclass('%s') && A.Layer == '%s' && A.inDiffPair('*')" ),
-                                         aNetclass->GetName(),
+                                         aNetclassName,
                                          LSET::Name( aLayerEntry.GetSignalLayer() ) );
                 tuningRule->m_Condition = new DRC_RULE_CONDITION( expr );
 
@@ -512,7 +528,7 @@ void DRC_ENGINE::loadImplicitRules()
                 tuningRule2->SetImplicitSource( DRC_IMPLICIT_SOURCE::TUNING_PROFILE );
 
                 expr2 = wxString::Format( wxT( "A.hasExactNetclass('%s') && A.Layer == '%s' && A.inDiffPair('*')" ),
-                                          aNetclass->GetName(),
+                                          aNetclassName,
                                           LSET::Name( aLayerEntry.GetSignalLayer() ) );
                 tuningRule2->m_Condition = new DRC_RULE_CONDITION( expr2 );
 
@@ -534,7 +550,7 @@ void DRC_ENGINE::loadImplicitRules()
 
                     expr = wxString::Format(
                             wxT( "A.hasExactNetclass('%s') && A.Layer == '%s' && AB.isCoupledDiffPair()" ),
-                            aNetclass->GetName(), LSET::Name( aLayerEntry.GetSignalLayer() ) );
+                            aNetclassName, LSET::Name( aLayerEntry.GetSignalLayer() ) );
                     diffPairClearanceRule->m_Condition = new DRC_RULE_CONDITION( expr );
 
                     DRC_CONSTRAINT min_clearanceConstraint( CLEARANCE_CONSTRAINT );
@@ -552,7 +568,9 @@ void DRC_ENGINE::loadImplicitRules()
         auto addNetclassTuningProfileRules =
                 [&tuningParams, &addTuningSingleRule, &addTuningDifferentialRules]( NETCLASS* aNetclass )
                 {
-                    if( aNetclass->HasTuningProfile() )
+                    std::optional<wxString> literal = LIBEVAL::EscapeStringLiteral( aNetclass->GetName() );
+
+                    if( aNetclass->HasTuningProfile() && literal )
                     {
                         const wxString        delayProfileName = aNetclass->GetTuningProfile();
                         const TUNING_PROFILE& profile = tuningParams->GetTuningProfile( delayProfileName );
@@ -563,9 +581,9 @@ void DRC_ENGINE::loadImplicitRules()
                                 continue;
 
                             if( profile.m_Type == TUNING_PROFILE::PROFILE_TYPE::SINGLE )
-                                addTuningSingleRule( entry, delayProfileName, aNetclass->GetName() );
+                                addTuningSingleRule( entry, delayProfileName, *literal );
                             else
-                                addTuningDifferentialRules( entry, delayProfileName, aNetclass );
+                                addTuningDifferentialRules( entry, delayProfileName, aNetclass, *literal );
                         }
                     }
                 };
@@ -812,6 +830,12 @@ void DRC_ENGINE::InitEngine( const std::shared_ptr<DRC_RULE>& rule )
 
     m_constraintMap.clear();
 
+    // The netclass clearance cache points at the rules just destroyed
+    {
+        std::unique_lock<std::shared_mutex> writeLock( m_clearanceCacheMutex );
+        m_netclassClearances.clear();
+    }
+
     m_board->IncrementTimeStamp(); // Clear board-level caches
 
     try
@@ -909,8 +933,7 @@ void DRC_ENGINE::InitEngine( const wxFileName& aRulePath )
 }
 
 
-void DRC_ENGINE::RunTests( EDA_UNITS aUnits, bool aReportAllTrackErrors, bool aTestFootprints,
-                           BOARD_COMMIT* aCommit )
+void DRC_ENGINE::RunTests( EDA_UNITS aUnits, bool aReportAllTrackErrors, bool aTestFootprints, BOARD_COMMIT* aCommit )
 {
     PROF_TIMER timer;
 
@@ -977,8 +1000,8 @@ void DRC_ENGINE::RunTests( EDA_UNITS aUnits, bool aReportAllTrackErrors, bool aT
 
 #define REPORT( s ) { if( aReporter ) { aReporter->Report( s ); } }
 
-DRC_CONSTRAINT DRC_ENGINE::EvalZoneConnection( const BOARD_ITEM* a, const BOARD_ITEM* b,
-                                               PCB_LAYER_ID aLayer, REPORTER* aReporter )
+DRC_CONSTRAINT DRC_ENGINE::EvalZoneConnection( const BOARD_ITEM* a, const BOARD_ITEM* b, PCB_LAYER_ID aLayer,
+                                               REPORTER* aReporter )
 {
     DRC_CONSTRAINT constraint = EvalRules( ZONE_CONNECTION_CONSTRAINT, a, b, aLayer, aReporter );
 
@@ -1021,6 +1044,8 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
 
     const BOARD_CONNECTED_ITEM* ac = a && a->IsConnected() ? static_cast<const BOARD_CONNECTED_ITEM*>( a ) : nullptr;
     const BOARD_CONNECTED_ITEM* bc = b && b->IsConnected() ? static_cast<const BOARD_CONNECTED_ITEM*>( b ) : nullptr;
+    const NETCLASS*             acNetclass = ac ? ac->GetEffectiveNetClass() : nullptr;
+    const NETCLASS*             bcNetclass = bc ? bc->GetEffectiveNetClass() : nullptr;
 
     bool a_is_non_copper = a && ( !a->IsOnCopperLayer() || isKeepoutZone( a, false ) );
     bool b_is_non_copper = b && ( !b->IsOnCopperLayer() || isKeepoutZone( b, false ) );
@@ -1056,6 +1081,11 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
     auto applyConstraint =
             [&]( const DRC_ENGINE_CONSTRAINT* c )
             {
+                DRC_RULE* rule = c->constraint.GetParentRule();
+                DRC_RULE* minRule = constraint.GetMinRule();
+                DRC_RULE* optRule = constraint.GetOptRule();
+                DRC_RULE* maxRule = constraint.GetMaxRule();
+
                 if( c->constraint.m_Value.HasMin() )
                 {
                     if( c->parentRule && c->parentRule->IsImplicit() )
@@ -1064,13 +1094,20 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
                         constraint.m_ImplicitMin = false;
 
                     constraint.m_Value.SetMin( c->constraint.m_Value.Min() );
+                    minRule = rule;
                 }
 
                 if( c->constraint.m_Value.HasOpt() )
+                {
                     constraint.m_Value.SetOpt( c->constraint.m_Value.Opt() );
+                    optRule = rule;
+                }
 
                 if( c->constraint.m_Value.HasMax() )
-                    constraint .m_Value.SetMax( c->constraint.m_Value.Max() );
+                {
+                    constraint.m_Value.SetMax( c->constraint.m_Value.Max() );
+                    maxRule = rule;
+                }
 
                 switch( c->constraint.m_Type )
                 {
@@ -1097,7 +1134,8 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
 
                 constraint.m_ZoneConnection = c->constraint.m_ZoneConnection;
 
-                constraint.SetParentRule( c->constraint.GetParentRule() );
+                constraint.SetParentRule( rule );
+                constraint.SetValueRules( minRule, optRule, maxRule );
 
                 constraint.SetOptionsFromOther( c->constraint );
             };
@@ -1462,8 +1500,8 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
                                               MessageTextFromUnscaledValue( c->constraint.m_Value.Max() ) ) )
                     break;
 
-                case MICROVIA_ASPECT_RATIO_CONSTRAINT:
-                    REPORT( wxString::Format( _( "Checking %s max microvia aspect ratio: %.3f." ),
+                case HOLE_ASPECT_RATIO_CONSTRAINT:
+                    REPORT( wxString::Format( _( "Checking %s max hole aspect ratio: %.3f." ),
                                               EscapeHTML( c->constraint.GetName() ),
                                               c->constraint.m_Value.Max() / 1000.0 ) )
                     break;
@@ -1645,6 +1683,17 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
                             REPORT( _( "Netclass clearances apply only between copper items." ) )
                             return;
                         }
+                    }
+
+                    // The condition starts with A.hasExactNetclass( tag ) and is tried both ways round, so
+                    // it cannot match unless one of the items is in that netclass
+                    const wxString& netclassName = c->parentRule->m_ImplicitNetclass;
+
+                    if( !netclassName.empty()
+                        && !( acNetclass && acNetclass->NameEquals( netclassName ) )
+                        && !( bcNetclass && bcNetclass->NameEquals( netclassName ) ) )
+                    {
+                        return;
                     }
 
                     if( !checkCondition( c, nullptr ) )
@@ -1888,7 +1937,8 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
         && !a_is_non_copper
         && ( !b || !b_is_non_copper ) )
     {
-        int clearance = 0;
+        DRC_RULE* netclassRule = nullptr;
+        int       clearance = 0;
 
         // Get netclass names outside of the lock to minimize critical section
         wxString ncNameA;
@@ -1920,15 +1970,21 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
                 auto it = m_netclassClearances.find( ncNameA );
 
                 if( it != m_netclassClearances.end() )
-                    clearance = it->second;
+                {
+                    netclassRule = it->second;
+                    clearance = netclassRule->m_Constraints[0].m_Value.Min();
+                }
             }
 
             if( !ncNameB.empty() )
             {
                 auto it = m_netclassClearances.find( ncNameB );
 
-                if( it != m_netclassClearances.end() )
-                    clearance = std::max( clearance, it->second );
+                if( it != m_netclassClearances.end() && it->second->m_Constraints[0].m_Value.Min() > clearance )
+                {
+                    netclassRule = it->second;
+                    clearance = netclassRule->m_Constraints[0].m_Value.Min();
+                }
             }
         }
 
@@ -1936,6 +1992,7 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
         {
             constraint.m_Value.SetMin( clearance );
             constraint.m_ImplicitMin = true;
+            constraint.SetParentRule( netclassRule );
         }
     }
     else
@@ -1958,7 +2015,11 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
                                       MessageTextFromValue( clearanceConstraint.m_Value.Min() ) ) )
 
             if( constraint.m_Value.Min() < clearanceConstraint.m_Value.Min() )
+            {
                 constraint.m_Value.SetMin( clearanceConstraint.m_Value.Min() );
+                constraint.SetValueRules( clearanceConstraint.GetMinRule(), constraint.GetOptRule(),
+                                          constraint.GetMaxRule() );
+            }
 
             return constraint;
         }
@@ -2183,8 +2244,7 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
 }
 
 
-DRC_CLEARANCE_BATCH DRC_ENGINE::EvalClearanceBatch( const BOARD_ITEM* a, const BOARD_ITEM* b,
-                                                     PCB_LAYER_ID aLayer )
+DRC_CLEARANCE_BATCH DRC_ENGINE::EvalClearanceBatch( const BOARD_ITEM* a, const BOARD_ITEM* b, PCB_LAYER_ID aLayer )
 {
     DRC_CLEARANCE_BATCH result;
     DRC_CONSTRAINT c;
@@ -2218,8 +2278,7 @@ DRC_CLEARANCE_BATCH DRC_ENGINE::EvalClearanceBatch( const BOARD_ITEM* a, const B
 }
 
 
-void DRC_ENGINE::ProcessAssertions( const BOARD_ITEM* a,
-                                    std::function<void( const DRC_CONSTRAINT* )> aFailureHandler,
+void DRC_ENGINE::ProcessAssertions( const BOARD_ITEM* a, std::function<void( const DRC_CONSTRAINT* )> aFailureHandler,
                                     REPORTER* aReporter )
 {
     /*
@@ -2233,8 +2292,7 @@ void DRC_ENGINE::ProcessAssertions( const BOARD_ITEM* a,
                 REPORT( wxString::Format( _( "Checking rule assertion '%s'." ),
                                           EscapeHTML( c->constraint.m_Test->GetExpression() ) ) )
 
-                if( c->constraint.m_Test->EvaluateFor( a, nullptr, c->constraint.m_Type,
-                                                       a->GetLayer(), aReporter ) )
+                if( c->constraint.m_Test->EvaluateFor( a, nullptr, c->constraint.m_Type, a->GetLayer(), aReporter ) )
                 {
                     REPORT( _( "Assertion passed." ) )
                 }
@@ -2267,8 +2325,7 @@ void DRC_ENGINE::ProcessAssertions( const BOARD_ITEM* a,
                     REPORT( wxString::Format( _( "Checking rule condition '%s'." ),
                                               EscapeHTML( c->condition->GetExpression() ) ) )
 
-                    if( c->condition->EvaluateFor( a, nullptr, c->constraint.m_Type,
-                                                   a->GetLayer(), aReporter ) )
+                    if( c->condition->EvaluateFor( a, nullptr, c->constraint.m_Type, a->GetLayer(), aReporter ) )
                     {
                         REPORT( _( "Rule applied." ) )
                         testAssertion( c );
@@ -2455,10 +2512,27 @@ bool DRC_ENGINE::HasConditionalConstraint( DRC_CONSTRAINT_T aConstraintId )
 }
 
 
+bool DRC_ENGINE::HasUserDefinedConstraint( DRC_CONSTRAINT_T aConstraintId )
+{
+    auto it = m_constraintMap.find( aConstraintId );
+
+    if( it != m_constraintMap.end() )
+    {
+        for( DRC_ENGINE_CONSTRAINT* c : *it->second )
+        {
+            if( c->parentRule && !c->parentRule->IsImplicit() )
+                return true;
+        }
+    }
+
+    return false;
+}
+
+
 bool DRC_ENGINE::HasUserDefinedPhysicalConstraint()
 {
-    return HasConditionalConstraint( PHYSICAL_CLEARANCE_CONSTRAINT )
-           || HasConditionalConstraint( PHYSICAL_HOLE_CLEARANCE_CONSTRAINT );
+    return HasUserDefinedConstraint( PHYSICAL_CLEARANCE_CONSTRAINT )
+           || HasUserDefinedConstraint( PHYSICAL_HOLE_CLEARANCE_CONSTRAINT );
 }
 
 
@@ -2622,9 +2696,11 @@ bool isShowMatchSkippable( const BOARD_ITEM* aItem )
     {
     case PCB_NETINFO_T:
     case PCB_GENERATOR_T:
-    case PCB_GROUP_T: return true;
+    case PCB_GROUP_T:
+        return true;
 
-    default: return false;
+    default:
+        return false;
     }
 }
 
@@ -2636,9 +2712,11 @@ bool matchesShowMatchDomain( const BOARD_ITEM* aItem, SHOWMATCH_DOMAIN aDomain )
 
     switch( aDomain )
     {
-    case SHOWMATCH_DOMAIN::ALL_ITEMS: return true;
+    case SHOWMATCH_DOMAIN::ALL_ITEMS:
+        return true;
 
-    case SHOWMATCH_DOMAIN::COPPER_ITEMS: return aItem->IsOnCopperLayer();
+    case SHOWMATCH_DOMAIN::COPPER_ITEMS:
+        return aItem->IsOnCopperLayer();
 
     case SHOWMATCH_DOMAIN::EDGE_ITEMS:
         if( aItem->IsOnLayer( Edge_Cuts ) || aItem->IsOnLayer( Margin ) )
@@ -2652,9 +2730,11 @@ bool matchesShowMatchDomain( const BOARD_ITEM* aItem, SHOWMATCH_DOMAIN aDomain )
 
         return false;
 
-    case SHOWMATCH_DOMAIN::FOOTPRINTS: return aItem->Type() == PCB_FOOTPRINT_T;
+    case SHOWMATCH_DOMAIN::FOOTPRINTS:
+        return aItem->Type() == PCB_FOOTPRINT_T;
 
-    case SHOWMATCH_DOMAIN::HOLE_ITEMS: return aItem->HasHole();
+    case SHOWMATCH_DOMAIN::HOLE_ITEMS:
+        return aItem->HasHole();
 
     case SHOWMATCH_DOMAIN::MASK_EXPANSION_ITEMS:
         switch( aItem->Type() )
@@ -2664,18 +2744,24 @@ bool matchesShowMatchDomain( const BOARD_ITEM* aItem, SHOWMATCH_DOMAIN aDomain )
         case PCB_ARC_T:
         case PCB_VIA_T:
         case PCB_SHAPE_T:
-        case PCB_ZONE_T: return true;
+        case PCB_ZONE_T:
+            return true;
 
-        default: return false;
+        default:
+            return false;
         }
 
-    case SHOWMATCH_DOMAIN::MASK_ITEMS: return aItem->IsOnLayer( F_Mask ) || aItem->IsOnLayer( B_Mask );
+    case SHOWMATCH_DOMAIN::MASK_ITEMS:
+        return aItem->IsOnLayer( F_Mask ) || aItem->IsOnLayer( B_Mask );
 
-    case SHOWMATCH_DOMAIN::PADS: return aItem->Type() == PCB_PAD_T;
+    case SHOWMATCH_DOMAIN::PADS:
+        return aItem->Type() == PCB_PAD_T;
 
-    case SHOWMATCH_DOMAIN::PADS_AND_VIAS: return aItem->Type() == PCB_PAD_T || aItem->Type() == PCB_VIA_T;
+    case SHOWMATCH_DOMAIN::PADS_AND_VIAS:
+        return aItem->Type() == PCB_PAD_T || aItem->Type() == PCB_VIA_T;
 
-    case SHOWMATCH_DOMAIN::PASTE_ITEMS: return aItem->IsOnLayer( F_Paste ) || aItem->IsOnLayer( B_Paste );
+    case SHOWMATCH_DOMAIN::PASTE_ITEMS:
+        return aItem->IsOnLayer( F_Paste ) || aItem->IsOnLayer( B_Paste );
 
     case SHOWMATCH_DOMAIN::ROUTING_ITEMS:
         switch( aItem->Type() )
@@ -2683,12 +2769,15 @@ bool matchesShowMatchDomain( const BOARD_ITEM* aItem, SHOWMATCH_DOMAIN aDomain )
         case PCB_TRACE_T:
         case PCB_ARC_T:
         case PCB_VIA_T:
-        case PCB_PAD_T: return true;
+        case PCB_PAD_T:
+            return true;
 
-        default: return false;
+        default:
+            return false;
         }
 
-    case SHOWMATCH_DOMAIN::SILK_ITEMS: return aItem->IsOnLayer( F_SilkS ) || aItem->IsOnLayer( B_SilkS );
+    case SHOWMATCH_DOMAIN::SILK_ITEMS:
+        return aItem->IsOnLayer( F_SilkS ) || aItem->IsOnLayer( B_SilkS );
 
     case SHOWMATCH_DOMAIN::SILK_TARGET_ITEMS:
         return aItem->IsOnLayer( F_SilkS ) || aItem->IsOnLayer( B_SilkS ) || aItem->IsOnLayer( F_Mask )
@@ -2701,7 +2790,8 @@ bool matchesShowMatchDomain( const BOARD_ITEM* aItem, SHOWMATCH_DOMAIN aDomain )
         return aItem->Type() == PCB_FIELD_T || aItem->Type() == PCB_TEXT_T || aItem->Type() == PCB_TEXTBOX_T
                || aItem->Type() == PCB_TABLECELL_T || BaseType( aItem->Type() ) == PCB_DIMENSION_T;
 
-    case SHOWMATCH_DOMAIN::VIAS: return aItem->Type() == PCB_VIA_T;
+    case SHOWMATCH_DOMAIN::VIAS:
+        return aItem->Type() == PCB_VIA_T;
     }
 
     return false;
@@ -2712,24 +2802,31 @@ SHOWMATCH_DOMAIN_SPEC getShowMatchDomainSpec( DRC_CONSTRAINT_T aConstraint )
 {
     switch( aConstraint )
     {
-    case CLEARANCE_CONSTRAINT: return { SHOWMATCH_DOMAIN::COPPER_ITEMS };
+    case CLEARANCE_CONSTRAINT:
+        return { SHOWMATCH_DOMAIN::COPPER_ITEMS };
 
-    case EDGE_CLEARANCE_CONSTRAINT: return { SHOWMATCH_DOMAIN::COPPER_ITEMS, SHOWMATCH_DOMAIN::EDGE_ITEMS, true, true };
+    case EDGE_CLEARANCE_CONSTRAINT:
+        return { SHOWMATCH_DOMAIN::COPPER_ITEMS, SHOWMATCH_DOMAIN::EDGE_ITEMS, true, true };
 
-    case HOLE_CLEARANCE_CONSTRAINT: return { SHOWMATCH_DOMAIN::HOLE_ITEMS, SHOWMATCH_DOMAIN::ALL_ITEMS, true, false };
+    case HOLE_CLEARANCE_CONSTRAINT:
+        return { SHOWMATCH_DOMAIN::HOLE_ITEMS, SHOWMATCH_DOMAIN::ALL_ITEMS, true, false };
 
-    case HOLE_TO_HOLE_CONSTRAINT: return { SHOWMATCH_DOMAIN::HOLE_ITEMS };
+    case HOLE_TO_HOLE_CONSTRAINT:
+        return { SHOWMATCH_DOMAIN::HOLE_ITEMS };
 
-    case COURTYARD_CLEARANCE_CONSTRAINT: return { SHOWMATCH_DOMAIN::FOOTPRINTS };
+    case COURTYARD_CLEARANCE_CONSTRAINT:
+        return { SHOWMATCH_DOMAIN::FOOTPRINTS };
 
     case PHYSICAL_CLEARANCE_CONSTRAINT:
     case PHYSICAL_HOLE_CLEARANCE_CONSTRAINT:
-    case CREEPAGE_CONSTRAINT: return { SHOWMATCH_DOMAIN::ALL_ITEMS };
+    case CREEPAGE_CONSTRAINT:
+        return { SHOWMATCH_DOMAIN::ALL_ITEMS };
 
     case SILK_CLEARANCE_CONSTRAINT:
         return { SHOWMATCH_DOMAIN::SILK_ITEMS, SHOWMATCH_DOMAIN::SILK_TARGET_ITEMS, true, false };
 
-    case SOLDER_MASK_SLIVER_CONSTRAINT: return { SHOWMATCH_DOMAIN::MASK_ITEMS };
+    case SOLDER_MASK_SLIVER_CONSTRAINT:
+        return { SHOWMATCH_DOMAIN::MASK_ITEMS };
 
     case TRACK_WIDTH_CONSTRAINT:
     case TRACK_ANGLE_CONSTRAINT:
@@ -2738,30 +2835,39 @@ SHOWMATCH_DOMAIN_SPEC getShowMatchDomainSpec( DRC_CONSTRAINT_T aConstraint )
     case DIFF_PAIR_GAP_CONSTRAINT:
     case MAX_UNCOUPLED_CONSTRAINT:
     case LENGTH_CONSTRAINT:
-    case SKEW_CONSTRAINT: return { SHOWMATCH_DOMAIN::ROUTING_ITEMS };
+    case SKEW_CONSTRAINT:
+        return { SHOWMATCH_DOMAIN::ROUTING_ITEMS };
 
     case VIA_DIAMETER_CONSTRAINT:
     case VIA_COUNT_CONSTRAINT:
     case MICROVIA_STACK_DEPTH_CONSTRAINT:
-    case MICROVIA_ASPECT_RATIO_CONSTRAINT: return { SHOWMATCH_DOMAIN::VIAS };
+    case HOLE_ASPECT_RATIO_CONSTRAINT:
+        return { SHOWMATCH_DOMAIN::HOLE_ITEMS };
 
-    case HOLE_SIZE_CONSTRAINT: return { SHOWMATCH_DOMAIN::HOLE_ITEMS };
+    case HOLE_SIZE_CONSTRAINT:
+        return { SHOWMATCH_DOMAIN::HOLE_ITEMS };
 
-    case ANNULAR_WIDTH_CONSTRAINT: return { SHOWMATCH_DOMAIN::PADS_AND_VIAS };
+    case ANNULAR_WIDTH_CONSTRAINT:
+        return { SHOWMATCH_DOMAIN::PADS_AND_VIAS };
 
-    case MIN_RESOLVED_SPOKES_CONSTRAINT: return { SHOWMATCH_DOMAIN::PADS };
+    case MIN_RESOLVED_SPOKES_CONSTRAINT:
+        return { SHOWMATCH_DOMAIN::PADS };
 
     case TEXT_HEIGHT_CONSTRAINT:
-    case TEXT_THICKNESS_CONSTRAINT: return { SHOWMATCH_DOMAIN::TEXT_ITEMS };
+    case TEXT_THICKNESS_CONSTRAINT:
+        return { SHOWMATCH_DOMAIN::TEXT_ITEMS };
 
-    case SOLDER_MASK_EXPANSION_CONSTRAINT: return { SHOWMATCH_DOMAIN::MASK_EXPANSION_ITEMS };
+    case SOLDER_MASK_EXPANSION_CONSTRAINT:
+        return { SHOWMATCH_DOMAIN::MASK_EXPANSION_ITEMS };
 
     case SOLDER_PASTE_ABS_MARGIN_CONSTRAINT:
-    case SOLDER_PASTE_REL_MARGIN_CONSTRAINT: return { SHOWMATCH_DOMAIN::PASTE_ITEMS };
+    case SOLDER_PASTE_REL_MARGIN_CONSTRAINT:
+        return { SHOWMATCH_DOMAIN::PASTE_ITEMS };
 
     case ASSERTION_CONSTRAINT:
     case DISALLOW_CONSTRAINT:
-    default: return { SHOWMATCH_DOMAIN::ALL_ITEMS };
+    default:
+        return { SHOWMATCH_DOMAIN::ALL_ITEMS };
     }
 }
 
@@ -2773,11 +2879,13 @@ std::vector<BOARD_ITEM*> collectShowMatchCandidates( BOARD* aBoard, SHOWMATCH_DO
     if( !aBoard )
         return items;
 
-    for( const auto& [kiid, item] : aBoard->GetItemByIdCache() )
-    {
-        if( matchesShowMatchDomain( item, aDomain ) )
-            items.push_back( item );
-    }
+    aBoard->RunOnChildren(
+            [&]( BOARD_ITEM* aItem )
+            {
+                if( matchesShowMatchDomain( aItem, aDomain ) )
+                    items.push_back( aItem );
+            },
+            RECURSE_MODE::RECURSE );
 
     return items;
 }
@@ -2789,9 +2897,11 @@ std::vector<PCB_LAYER_ID> getShowMatchLayers( const BOARD_ITEM* aItem )
 
     switch( aItem->Type() )
     {
-    case PCB_PAD_T: layers = static_cast<const PAD*>( aItem )->Padstack().UniqueLayers(); break;
+    case PCB_PAD_T:
+        layers = static_cast<const PAD*>( aItem )->Padstack().UniqueLayers(); break;
 
-    case PCB_VIA_T: layers = static_cast<const PCB_VIA*>( aItem )->Padstack().UniqueLayers(); break;
+    case PCB_VIA_T:
+        layers = static_cast<const PCB_VIA*>( aItem )->Padstack().UniqueLayers(); break;
 
     default:
         for( PCB_LAYER_ID layer : aItem->GetLayerSet() )
@@ -2861,7 +2971,9 @@ std::vector<PCB_LAYER_ID> getShowMatchPairLayers( const DRC_RULE& aRule, const B
 
         break;
 
-    case COURTYARD_CLEARANCE_CONSTRAINT: addLayer( UNDEFINED_LAYER ); break;
+    case COURTYARD_CLEARANCE_CONSTRAINT:
+        addLayer( UNDEFINED_LAYER );
+        break;
 
     default:
         for( PCB_LAYER_ID layer : getShowMatchLayers( aItemA ) )
@@ -2938,63 +3050,65 @@ std::vector<BOARD_ITEM*> DRC_ENGINE::GetItemsMatchingCondition( const wxString& 
             ftCache->Rebuild( m_board );
     }
 
-    BOARD_ITEM_SET items = m_board->GetItemSet();
     size_t totalItems = 0;
     size_t skippedItems = 0;
     size_t noLayerItems = 0;
     size_t checkedItems = 0;
 
-    for( auto& [kiid, item] : m_board->GetItemByIdCache() )
-    {
-        totalItems++;
-
-        // Skip items that don't have visible geometry or can't be meaningfully matched
-        switch( item->Type() )
-        {
-        case PCB_NETINFO_T:
-        case PCB_GENERATOR_T:
-        case PCB_GROUP_T:
-        case PCB_CONSTRAINT_T:
-            skippedItems++;
-            continue;
-
-        default:
-            break;
-        }
-
-        LSET itemLayers = item->GetLayerSet();
-
-        if( itemLayers.none() )
-        {
-            noLayerItems++;
-            continue;
-        }
-
-        checkedItems++;
-        bool matched = false;
-
-        for( PCB_LAYER_ID layer : itemLayers )
-        {
-            if( condition.EvaluateFor( item, nullptr, static_cast<int>( aConstraint ), layer,
-                                    aReporter ? aReporter : m_logReporter ) )
+    const auto applyConditionToItemFunc =
+            [&]( BOARD_ITEM* aItem )
             {
-                matches.push_back( item );
-                wxLogTrace( wxS( "KI_TRACE_DRC_RULE_EDITOR" ),
-                            wxS( "[ShowMatches] engine: match type=%d kiid=%s layer=%d" ),
-                            (int) item->Type(), kiid.AsString(), (int) layer );
-                matched = true;
-                break; // No need to check other layers
-            }
-        }
+                totalItems++;
 
-        // Log a few non-matching items to help debug condition issues
-        if( !matched && matches.size() == 0 && checkedItems <= 5 )
-        {
-            wxLogTrace( wxS( "KI_TRACE_DRC_RULE_EDITOR" ),
-                        wxS( "[ShowMatches] engine: no-match sample type=%d kiid=%s layers=%s" ),
-                        (int) item->Type(), kiid.AsString(), itemLayers.FmtHex() );
-        }
-    }
+                // Skip items that don't have visible geometry or can't be meaningfully matched
+                switch( aItem->Type() )
+                {
+                case PCB_NETINFO_T:
+                case PCB_GENERATOR_T:
+                case PCB_GROUP_T:
+                case PCB_CONSTRAINT_T:
+                    skippedItems++;
+                    return;
+
+                default:
+                    break;
+                }
+
+                LSET itemLayers = aItem->GetLayerSet();
+
+                if( itemLayers.none() )
+                {
+                    noLayerItems++;
+                    return;
+                }
+
+                checkedItems++;
+                bool matched = false;
+
+                for( PCB_LAYER_ID layer : itemLayers )
+                {
+                    if( condition.EvaluateFor( aItem, nullptr, static_cast<int>( aConstraint ), layer,
+                                               aReporter ? aReporter : m_logReporter ) )
+                    {
+                        matches.push_back( aItem );
+                        wxLogTrace( wxS( "KI_TRACE_DRC_RULE_EDITOR" ),
+                                    wxS( "[ShowMatches] engine: match type=%d kiid=%s layer=%d" ),
+                                    (int) aItem->Type(), aItem->m_Uuid.AsString(), (int) layer );
+                        matched = true;
+                        break; // No need to check other layers
+                    }
+                }
+
+                // Log a few non-matching items to help debug condition issues
+                if( !matched && matches.size() == 0 && checkedItems <= 5 )
+                {
+                    wxLogTrace( wxS( "KI_TRACE_DRC_RULE_EDITOR" ),
+                                wxS( "[ShowMatches] engine: no-match sample type=%d kiid=%s layers=%s" ),
+                                (int) aItem->Type(), aItem->m_Uuid.AsString(), itemLayers.FmtHex() );
+                }
+            };
+
+    m_board->RunOnChildren( applyConditionToItemFunc, RECURSE_MODE::RECURSE );
 
     wxLogTrace( wxS( "KI_TRACE_DRC_RULE_EDITOR" ),
                 wxS( "[ShowMatches] engine stats: total=%zu skipped=%zu noLayer=%zu checked=%zu" ),
@@ -3078,9 +3192,7 @@ std::vector<BOARD_ITEM*> DRC_ENGINE::GetItemsMatchingRule( const std::shared_ptr
             for( BOARD_ITEM* item : primaryItems )
             {
                 if( ruleMatchesUnary( *aRule, item, constraint.m_Type, aReporter ? aReporter : m_logReporter ) )
-                {
                     matchedItems.insert( item );
-                }
             }
 
             if( domainSpec.hasSecondary && domainSpec.secondaryUnary )
@@ -3088,9 +3200,7 @@ std::vector<BOARD_ITEM*> DRC_ENGINE::GetItemsMatchingRule( const std::shared_ptr
                 for( BOARD_ITEM* item : secondaryItems )
                 {
                     if( ruleMatchesUnary( *aRule, item, constraint.m_Type, aReporter ? aReporter : m_logReporter ) )
-                    {
                         matchedItems.insert( item );
-                    }
                 }
             }
         }
@@ -3102,8 +3212,7 @@ std::vector<BOARD_ITEM*> DRC_ENGINE::GetItemsMatchingRule( const std::shared_ptr
 }
 
 
-int DRC_ENGINE::GetCachedOwnClearance( const BOARD_ITEM* aItem, PCB_LAYER_ID aLayer,
-                                       wxString* aSource )
+int DRC_ENGINE::GetCachedOwnClearance( const BOARD_ITEM* aItem, PCB_LAYER_ID aLayer, wxString* aSource )
 {
     DRC_OWN_CLEARANCE_CACHE_KEY key{ aItem->m_Uuid, aLayer };
 
@@ -3171,7 +3280,11 @@ void DRC_ENGINE::InvalidateClearanceCache( const KIID& aUuid )
     }
     else
     {
-        std::erase_if( m_ownClearanceCache, [&aUuid]( const auto& entry ) { return entry.first.m_uuid == aUuid; } );
+        std::erase_if( m_ownClearanceCache,
+                       [&aUuid]( const auto& entry )
+                       {
+                           return entry.first.m_uuid == aUuid;
+                       } );
     }
 }
 

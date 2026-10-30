@@ -60,8 +60,19 @@ struct BACKANNOTATE_UNIT_SWAP_PLAN
 };
 
 /**
- * Compute a pure unit-swap plan from schematic-side unit definitions and the final PCB pin map.
+ * Append this unit's PCB nets to a map keyed by logical pin number, resolving pin-to-pad mappings.
  *
+ * Return false if a pin's pads disagree or units assign different nets to a shared logical pin.
+ * The output may be partially populated on failure and must not be used for swap planning.
+ */
+bool CollectBackannotatePcbNets( const SCH_SYMBOL& aSymbol, const SCH_SHEET_PATH& aSheetPath,
+                                 const wxString& aVariantName, const std::map<wxString, wxString>& aPcbNetsByPad,
+                                 std::map<wxString, wxString>& aPcbNetsByLogicalPin );
+
+/**
+ * Compute a pure unit-swap plan from schematic-side unit definitions and PCB nets keyed by logical pin number.
+ *
+ * The caller must resolve pin-to-pad mappings before constructing the PCB net map.
  * This is shared by backannotation and unit tests so swap inference can be exercised without
  * constructing a full schematic editor test harness.
  */
@@ -116,7 +127,7 @@ public:
         std::map<wxString, wxString> m_fieldsMap;
     };
 
-    ///< Map to hold NETLIST footprints data
+    /// Map to hold NETLIST footprints data
     using PCB_FOOTPRINTS_MAP = std::map<wxString, std::shared_ptr<PCB_FP_DATA>>;
 
     using CHANGELIST_ITEM = std::pair<SCH_REFERENCE, std::shared_ptr<PCB_FP_DATA>>;
@@ -148,14 +159,13 @@ public:
 
 private:
     /**
-     * Parse netlist sent over KiWay express mail interface and fill \ref m_pcbModules.
+     * Parse netlist sent over KiWay express mail interface and fill \ref m_pcbFootprints.
      *
      * @param aPayload is the netlist from Pcbnew.
-     * @return number of errors during parsing.
      */
     void getPcbModulesFromString( const std::string& aPayload );
 
-    ///< Create changelist.
+    /// Create changelist.
     void getChangeList();
 
     /**

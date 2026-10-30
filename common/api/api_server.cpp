@@ -594,6 +594,14 @@ void KICAD_API_SERVER::NotifyNetSettingsChanged()
 }
 
 
+void KICAD_API_SERVER::NotifyDocumentRenamed( kiapi::common::types::DocumentType aType,
+                                              const wxString& aOldPath, const wxString& aNewPath )
+{
+    if( m_renameListener )
+        m_renameListener( aType, aOldPath, aNewPath );
+}
+
+
 std::string KICAD_API_SERVER::SocketPath() const
 {
     if( m_inProcess )

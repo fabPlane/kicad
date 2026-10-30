@@ -19,6 +19,7 @@
 
 #include <plotters/plotter_png.h>
 #include <geometry/shape_poly_set.h>
+#include <geometry/shape_rect.h>
 #include <convert_basic_shapes_to_polygon.h>
 #include <trigo.h>
 #include <wx/image.h>
@@ -162,6 +163,11 @@ bool PNG_PLOTTER::SaveFile( const wxString& aPath )
 
 void PNG_PLOTTER::SetCurrentLineWidth( int aWidth, void* aData )
 {
+    if( aWidth == DO_NOT_SET_LINE_WIDTH )
+        return;
+    else if( aWidth == USE_DEFAULT_LINE_WIDTH )
+        aWidth = m_renderSettings->GetDefaultPenWidth();
+
     if( aWidth == m_currentPenWidth )
         return;
 
@@ -290,6 +296,16 @@ void PNG_PLOTTER::Rect( const VECTOR2I& p1, const VECTOR2I& p2, FILL_T aFill, in
 {
     if( !m_context )
         return;
+
+    if( aCornerRadius > 0 )
+    {
+        BOX2I box( p1, VECTOR2I( p2.x - p1.x, p2.y - p1.y ) );
+        box.Normalize();
+        SHAPE_RECT rect( box );
+        rect.SetRadius( aCornerRadius );
+        PLOTTER::PlotPoly( rect.Outline(), aFill, aWidth, nullptr );
+        return;
+    }
 
     VECTOR2D start = userToDeviceCoordinates( p1 );
     VECTOR2D end = userToDeviceCoordinates( p2 );

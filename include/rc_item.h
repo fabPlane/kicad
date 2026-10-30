@@ -22,6 +22,7 @@
 #include <deque>
 #include <memory>
 #include <vector>
+#include <unordered_set>
 
 #include <wx/dataview.h>
 #include <units_provider.h>
@@ -62,11 +63,69 @@ public:
 
     /**
      * Remove (and optionally deletes) the indexed item from the list.
+     *
+     * @param aIndex is the index of the item to delete.
      * @param aDeep If true, the source item should be deleted as well as its entry in the list.
      */
     virtual void DeleteItem( int aIndex, bool aDeep ) = 0;
 
     virtual ~RC_ITEMS_PROVIDER() { }
+};
+
+
+/**
+ * Interface for resolving EDA_ITEM instances by the KIID from an RC_ITEM.
+ *
+ * Implement this interface to provide a way to look up EDA_ITEM objects
+ * using their unique identifiers (KIID). For example, a PCB may defer
+ * to BOARD::ResolveItem().
+ *
+ * These objects are expected to be short-lived and are not thread-safe
+ * for concurrent access.
+ */
+class RC_ITEM_RESOLVER
+{
+public:
+    virtual ~RC_ITEM_RESOLVER() = default;
+
+    /**
+     * Resolve an item by its KIID.
+     *
+     * @param aKiid The KIID of the item to resolve.
+     * @return A pointer to the resolved item, or nullptr if not found.
+     *         This pointer is borrowed and should not be deleted by the caller.
+     */
+    EDA_ITEM* ResolveItemById( const KIID& aKiid ) const
+    {
+        // This is expected, e.g., when an RC item doesn't have an aux ID.
+        if( aKiid == niluuid )
+            return nullptr;
+
+        if( m_resolutionMisses.contains( aKiid ) )
+            return nullptr;
+
+        EDA_ITEM* item = doResolveItemById( aKiid );
+
+        if( !item )
+            m_resolutionMisses.insert( aKiid );
+
+        return item;
+    }
+
+protected:
+    /**
+     * The actual resolution logic for an item by its KIID, must be implemented
+     * against the actual item store of the inheriting class.
+     *
+     * @param aKiid The KIID of the item to resolve.
+     * @return A pointer to the resolved item, or nullptr if not found.
+     *         This pointer is borrowed and should not be deleted by the caller.
+     */
+    virtual EDA_ITEM* doResolveItemById( const KIID& aKiid ) const = 0;
+
+private:
+    /// Store of missed resolution attempts (KIIDs that could not be resolved).
+    mutable std::unordered_set<KIID> m_resolutionMisses;
 };
 
 
@@ -78,11 +137,9 @@ public:
 class RC_ITEM
 {
 public:
-    typedef std::vector<KIID> KIIDS;
-
     RC_ITEM() :
-        m_errorCode( 0 ),
-        m_parent( nullptr )
+            m_errorCode( 0 ),
+            m_parent( nullptr )
     {
     }
 
@@ -105,7 +162,7 @@ public:
         SetErrorMessage( GetErrorText( true ) + wxS( " " ) + aMsg );
     }
 
-    void SetItems( const KIIDS& aIds ) { m_ids = aIds; }
+    void SetItems( const std::vector<KIID>& aIds ) { m_ids = aIds; }
 
     void AddItem( EDA_ITEM* aItem );
 
@@ -140,7 +197,7 @@ public:
      * @return wxString - the simple multi-line report text.
      */
     virtual wxString ShowReport( UNITS_PROVIDER* aUnitsProvider, SEVERITY aSeverity,
-                                 const std::map<KIID, EDA_ITEM*>& aItemMap ) const;
+                                 const RC_ITEM_RESOLVER& aResolver ) const;
 
     /**
      * Translate this object into an RC_JSON::VIOLATION object
@@ -148,14 +205,12 @@ public:
      * @param aViolation is the violation to be populated by info from this item
      * @param aUnitsProvider is the units provider that will be used to output coordinates
      * @param aSeverity is the severity of this item
-     * @param aItemMap is a map allowing the lookup of items from KIIDs
-     *
-     * @return None
+     * @param aResolver is an object allowing the lookup of items from KIIDs
      */
-    virtual void GetJsonViolation( RC_JSON::VIOLATION& aViolation, UNITS_PROVIDER* aUnitsProvider,
-                                   SEVERITY aSeverity, const std::map<KIID, EDA_ITEM*>& aItemMap ) const;
+    virtual void GetJsonViolation( RC_JSON::VIOLATION& aViolation, UNITS_PROVIDER* aUnitsProvider, SEVERITY aSeverity,
+                                   const RC_ITEM_RESOLVER& aResolver ) const;
 
-    int GetErrorCode() const { return m_errorCode; }
+    int  GetErrorCode() const { return m_errorCode; }
     void SetErrorCode( int aCode ) { m_errorCode = aCode; }
 
     /**
@@ -197,17 +252,18 @@ protected:
      *
      * @param aItem is the affected item being described
      * @param aIndex is 0 for the main item and 1 for the aux item
+     * @param aUnitsProvider is the provider to handle units.
      */
     virtual wxString getItemDescription( EDA_ITEM* aItem, int aIndex, UNITS_PROVIDER* aUnitsProvider ) const;
 
 protected:
-    int           m_errorCode;         ///< The error code's numeric value
-    wxString      m_errorMessage;      ///< A message describing the details of this specific error
-    wxString      m_errorTitle;        ///< The string describing the type of error
-    wxString      m_settingsKey;       ///< The key used to describe this type of error in settings
-    MARKER_BASE*  m_parent;            ///< The marker this item belongs to, if any
+    int               m_errorCode;         ///< The error code's numeric value
+    wxString          m_errorMessage;      ///< A message describing the details of this specific error
+    wxString          m_errorTitle;        ///< The string describing the type of error
+    wxString          m_settingsKey;       ///< The key used to describe this type of error in settings
+    MARKER_BASE*      m_parent;            ///< The marker this item belongs to, if any
 
-    KIIDS         m_ids;
+    std::vector<KIID> m_ids;
 };
 
 

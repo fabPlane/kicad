@@ -22,20 +22,31 @@
 #include <api/api_enums.h>
 #include <api/api_sch_utils.h>
 #include <api/api_utils.h>
-#include <lib_id.h>
+#include <view/view.h>
+#include <fmt.h>
+#include <magic_enum.hpp>
+#include <base_units.h>
 #include <lib_symbol.h>
 #include <project.h>
-#include <sch_field.h>
-#include <sch_item.h>
+#include <sch_bitmap.h>
 #include <sch_commit.h>
+#include <sch_field.h>
 #include <sch_pin.h>
+#include <sch_screen.h>
+#include <sch_shape.h>
+#include <sch_table.h>
+#include <sch_text.h>
+#include <sch_textbox.h>
+#include <symbol_edit_frame.h>
 #include <undo_redo_container.h>
-#include <wx/log.h>
+#include <wildcards_and_files_ext.h>
+
+#include <wx/filename.h>
 
 using namespace kiapi::common::commands;
+using kiapi::common::commands::DocumentModifiedState;
 using kiapi::common::types::DocumentType;
 using kiapi::common::types::ItemRequestStatus;
-using google::protobuf::Empty;
 
 
 namespace
@@ -129,11 +140,13 @@ public:
             m_sink->SaveCopyInUndoList( undoList, false );
     }
 
-    void Revert() override
+    void Revert() override { RevertToCheckpoint( 0 ); }
+
+    void RevertToCheckpoint( int aCheckpoint ) override
     {
-        for( auto it = m_entries.rbegin(); it != m_entries.rend(); ++it )
+        for( int ii = (int) m_entries.size() - 1; ii >= aCheckpoint; --ii )
         {
-            COMMIT_LINE& ent = *it;
+            COMMIT_LINE& ent = m_entries[ii];
             SCH_ITEM*    item = static_cast<SCH_ITEM*>( ent.m_item );
             SCH_ITEM*    copy = static_cast<SCH_ITEM*>( ent.m_copy );
 
@@ -167,7 +180,7 @@ public:
             }
         }
 
-        clear();
+        dropEntriesAfter( aCheckpoint );
     }
 
     EDA_ITEM* ResolveItem( KIID& aID ) override
@@ -195,35 +208,57 @@ private:
 };
 
 
-/// The child item types a symbol document exposes
-const std::set<KICAD_T> s_symbolChildTypes = { SCH_PIN_T, SCH_SHAPE_T, SCH_TEXT_T, SCH_TEXTBOX_T, SCH_FIELD_T };
-
 } // namespace
 
 
-API_HANDLER_SYMBOL::API_HANDLER_SYMBOL( std::shared_ptr<SYMBOL_CONTEXT> aContext ) :
-        API_HANDLER_EDITOR( nullptr ),
+std::set<KICAD_T> API_HANDLER_SYMBOL::s_allowedTypes = {
+    LIB_SYMBOL_T, SCH_FIELD_T,   SCH_PIN_T,   SCH_SHAPE_T,     SCH_BITMAP_T,
+    SCH_TEXT_T,   SCH_TEXTBOX_T, SCH_TABLE_T, SCH_TABLECELL_T,
+};
+
+
+API_HANDLER_SYMBOL::API_HANDLER_SYMBOL( SYMBOL_EDIT_FRAME* aFrame ) :
+        API_HANDLER_SYMBOL( CreateSymbolEditorFrameContext( aFrame ), aFrame )
+{
+}
+
+
+API_HANDLER_SYMBOL::API_HANDLER_SYMBOL( std::shared_ptr<SYMBOL_EDITOR_CONTEXT> aContext, SYMBOL_EDIT_FRAME* aFrame ) :
+        API_HANDLER_EDITOR( aFrame ),
         m_context( std::move( aContext ) )
 {
+    registerHandler<OpenLibraryItem, Empty>( &API_HANDLER_SYMBOL::handleOpenLibraryItem );
     registerHandler<GetOpenDocuments, GetOpenDocumentsResponse>( &API_HANDLER_SYMBOL::handleGetOpenDocuments );
     registerHandler<SaveDocument, Empty>( &API_HANDLER_SYMBOL::handleSaveDocument );
     registerHandler<SaveCopyOfDocument, Empty>( &API_HANDLER_SYMBOL::handleSaveCopyOfDocument );
+    registerHandler<RevertDocument, Empty>( &API_HANDLER_SYMBOL::handleRevertDocument );
+
     registerHandler<GetItems, GetItemsResponse>( &API_HANDLER_SYMBOL::handleGetItems );
     registerHandler<GetItemsById, GetItemsResponse>( &API_HANDLER_SYMBOL::handleGetItemsById );
 
-    m_undoStack = std::make_unique<API_UNDO_STACK>(
-            [this]( PICKED_ITEMS_LIST& aList )
-            {
-                restoreUndoList( aList );
-            },
-            []( PICKED_ITEMS_LIST& aList )
-            {
-                aList.ClearListAndDeleteItems(
-                        []( EDA_ITEM* aItem )
-                        {
-                            delete aItem;
-                        } );
-            } );
+    // The frame keeps the history of its own commits; a headless document keeps it here
+    if( !m_frame )
+    {
+        m_undoStack = std::make_unique<API_UNDO_STACK>(
+                [this]( PICKED_ITEMS_LIST& aList )
+                {
+                    restoreUndoList( aList );
+                },
+                []( PICKED_ITEMS_LIST& aList )
+                {
+                    aList.ClearListAndDeleteItems(
+                            []( EDA_ITEM* aItem )
+                            {
+                                delete aItem;
+                            } );
+                } );
+    }
+}
+
+
+SYMBOL_EDIT_FRAME* API_HANDLER_SYMBOL::frame() const
+{
+    return static_cast<SYMBOL_EDIT_FRAME*>( m_frame );
 }
 
 
@@ -291,65 +326,27 @@ void API_HANDLER_SYMBOL::restoreUndoList( PICKED_ITEMS_LIST& aList )
 std::optional<DocumentSpecifier> API_HANDLER_SYMBOL::Document() const
 {
     DocumentSpecifier doc;
-    LIB_ID            id = m_context->GetLoadedLibId();
+    LIB_ID            id = context()->GetLoadedLibId();
 
     doc.set_type( DocumentType::DOCTYPE_SYMBOL );
     doc.mutable_lib_id()->set_library_nickname( id.GetUniStringLibNickname() );
     doc.mutable_lib_id()->set_entry_name( id.GetUniStringLibItemName() );
 
-    if( !m_context->Prj().IsNullProject() )
-        PackProject( *doc.mutable_project(), m_context->Prj() );
+    if( !context()->Prj().IsNullProject() )
+        PackProject( *doc.mutable_project(), context()->Prj() );
 
     return doc;
 }
 
 
-std::unique_ptr<COMMIT> API_HANDLER_SYMBOL::createCommit()
-{
-    return std::make_unique<SYMBOL_API_COMMIT>( symbol(), m_undoStack.get() );
-}
-
-
-tl::expected<bool, ApiResponseStatus> API_HANDLER_SYMBOL::validateDocumentInternal(
-        const DocumentSpecifier& aDocument ) const
-{
-    if( aDocument.type() != DocumentType::DOCTYPE_SYMBOL )
-    {
-        ApiResponseStatus e;
-        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        e.set_error_message( "the requested document is not a symbol" );
-        return tl::unexpected( e );
-    }
-
-    LIB_ID      loaded = m_context->GetLoadedLibId();
-    std::string actualLib = loaded.GetUniStringLibNickname().ToStdString();
-    std::string actualName = loaded.GetUniStringLibItemName().ToStdString();
-
-    if( aDocument.lib_id().library_nickname() != actualLib )
-    {
-        ApiResponseStatus e;
-        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        e.set_error_message( fmt::format( "the requested library is {} but the actual library is {}",
-                                          aDocument.lib_id().library_nickname(), actualLib ) );
-        return tl::unexpected( e );
-    }
-
-    if( aDocument.lib_id().entry_name() != actualName )
-    {
-        ApiResponseStatus e;
-        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        e.set_error_message( fmt::format( "the requested symbol name is {} but the actual name is {}",
-                                          aDocument.lib_id().entry_name(), actualName ) );
-        return tl::unexpected( e );
-    }
-
-    return true;
-}
-
-
 SCH_ITEM* API_HANDLER_SYMBOL::findItem( const KIID& aId ) const
 {
-    for( SCH_ITEM& item : symbol()->GetDrawItems() )
+    LIB_SYMBOL* sym = symbol();
+
+    if( !sym )
+        return nullptr;
+
+    for( SCH_ITEM& item : sym->GetDrawItems() )
     {
         if( item.m_Uuid == aId )
             return &item;
@@ -359,63 +356,211 @@ SCH_ITEM* API_HANDLER_SYMBOL::findItem( const KIID& aId ) const
 }
 
 
-std::optional<EDA_ITEM*> API_HANDLER_SYMBOL::getItemFromDocument( const DocumentSpecifier& aDocument,
-                                                                  const KIID& aId )
+std::unique_ptr<COMMIT> API_HANDLER_SYMBOL::createCommit()
 {
-    if( !validateDocumentInternal( aDocument ) )
-        return std::nullopt;
+    if( m_frame )
+        return std::make_unique<SCH_COMMIT>( static_cast<SYMBOL_EDIT_FRAME*>( m_frame ) );
 
-    if( SCH_ITEM* item = findItem( aId ) )
-        return item;
-
-    return std::nullopt;
+    // Without a frame the commit stages item by item and hands its undo list to our stack
+    return std::make_unique<SYMBOL_API_COMMIT>( symbol(), m_undoStack.get() );
 }
 
 
-HANDLER_RESULT<GetOpenDocumentsResponse> API_HANDLER_SYMBOL::handleGetOpenDocuments(
-        const HANDLER_CONTEXT<GetOpenDocuments>& aCtx )
+tl::expected<bool, ApiResponseStatus>
+API_HANDLER_SYMBOL::validateDocumentInternal( const DocumentSpecifier& aDocument ) const
+{
+    if( aDocument.type() != DocumentType::DOCTYPE_SYMBOL )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_UNHANDLED );
+        return tl::unexpected( e );
+    }
+
+    const PROJECT& prj = context()->Prj();
+
+    if( aDocument.has_project() )
+    {
+        if( aDocument.project().name().compare( prj.GetProjectName().ToUTF8() ) != 0 )
+        {
+            ApiResponseStatus e;
+            e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( fmt::format( "the requested project {} is not open", aDocument.project().name() ) );
+            return tl::unexpected( e );
+        }
+
+        if( aDocument.project().path().compare( prj.GetProjectPath().ToUTF8() ) != 0 )
+        {
+            ApiResponseStatus e;
+            e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( fmt::format( "the requested project {} is not open at path {}",
+                                              aDocument.project().name(), aDocument.project().path() ) );
+            return tl::unexpected( e );
+        }
+    }
+
+    LIB_ID loaded = context()->GetLoadedLibId();
+
+    // An empty library nickname addresses an unsaved new symbol
+    if( aDocument.lib_id().library_nickname().empty() )
+    {
+        if( loaded.GetLibItemName().empty() )
+        {
+            ApiResponseStatus e;
+            e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( "no symbol is currently open" );
+            return tl::unexpected( e );
+        }
+
+        return true;
+    }
+
+    if( !loaded.IsValid() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "no symbol is currently open" );
+        return tl::unexpected( e );
+    }
+
+    if( aDocument.lib_id().library_nickname() != loaded.GetUniStringLibNickname().ToStdString() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "the requested library is {} but the open library is {}",
+                                          aDocument.lib_id().library_nickname(),
+                                          loaded.GetUniStringLibNickname().ToStdString() ) );
+        return tl::unexpected( e );
+    }
+
+    if( aDocument.lib_id().entry_name() != loaded.GetUniStringLibItemName().ToStdString() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "the requested symbol is {} but the open symbol is {}",
+                                          aDocument.lib_id().entry_name(),
+                                          loaded.GetUniStringLibItemName().ToStdString() ) );
+        return tl::unexpected( e );
+    }
+
+    return true;
+}
+
+HANDLER_RESULT<commands::GetOpenDocumentsResponse>
+API_HANDLER_SYMBOL::handleGetOpenDocuments( const HANDLER_CONTEXT<commands::GetOpenDocuments>& aCtx )
 {
     if( aCtx.Request.type() != DocumentType::DOCTYPE_SYMBOL )
     {
         ApiResponseStatus e;
-        // No message needed for AS_UNHANDLED; this is an internal flag for the API server
         e.set_status( ApiStatusCode::AS_UNHANDLED );
         return tl::unexpected( e );
     }
 
     GetOpenDocumentsResponse response;
-    response.mutable_documents()->Add( *Document() );
+
+    if( !context()->GetCurSymbol() )
+        return response;
+
+    types::DocumentSpecifier doc;
+    LIB_ID libId = context()->GetCurSymbol()->GetLibId();
+
+    doc.set_type( DocumentType::DOCTYPE_SYMBOL );
+    doc.mutable_lib_id()->set_library_nickname( libId.GetUniStringLibNickname().ToStdString() );
+    doc.mutable_lib_id()->set_entry_name( libId.GetUniStringLibItemName().ToStdString() );
+
+    PROJECT& prj = context()->Prj();
+
+    if( !prj.IsNullProject() )
+    {
+        doc.mutable_project()->set_name( prj.GetProjectName().ToUTF8() );
+        doc.mutable_project()->set_path( prj.GetProjectPath().ToUTF8() );
+    }
+
+    response.mutable_documents()->Add( std::move( doc ) );
     return response;
 }
 
 
-HANDLER_RESULT<Empty> API_HANDLER_SYMBOL::handleSaveDocument( const HANDLER_CONTEXT<SaveDocument>& aCtx )
+HANDLER_RESULT<Empty>
+API_HANDLER_SYMBOL::handleOpenLibraryItem( const HANDLER_CONTEXT<commands::OpenLibraryItem>& aCtx )
 {
-    HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() );
-
-    if( !documentValidation )
-        return tl::unexpected( documentValidation.error() );
-
-    if( !m_context->SaveSymbol() )
+    if( aCtx.Request.type() != DocumentType::DOCTYPE_SYMBOL )
     {
         ApiResponseStatus e;
-        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        e.set_error_message( "failed to save symbol" );
+        e.set_status( ApiStatusCode::AS_UNHANDLED );
         return tl::unexpected( e );
     }
 
-    notifyDocumentSaved( m_context->GetLoadedLibId().GetUniStringLibId() );
+    LIB_ID libId = UnpackLibId( aCtx.Request.identifier() );
+
+    if( !libId.IsValid() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "could not parse library identifier {}.{}",
+                                          aCtx.Request.identifier().library_nickname(),
+                                          aCtx.Request.identifier().entry_name() ) );
+        return tl::unexpected( e );
+    }
+
+    if( !context()->LoadSymbol( libId ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "could not open symbol {}.{}",
+                                          aCtx.Request.identifier().library_nickname(),
+                                          aCtx.Request.identifier().entry_name() ) );
+        return tl::unexpected( e );
+    }
+
+    // The history belongs to the symbol that was replaced
+    if( m_undoStack )
+        m_undoStack->Clear();
+
+    bumpRevision();
     return Empty();
 }
 
 
-HANDLER_RESULT<Empty> API_HANDLER_SYMBOL::handleSaveCopyOfDocument(
-        const HANDLER_CONTEXT<SaveCopyOfDocument>& aCtx )
+HANDLER_RESULT<Empty> API_HANDLER_SYMBOL::handleSaveDocument( const HANDLER_CONTEXT<commands::SaveDocument>& aCtx )
+{
+    if( context()->GetLoadedLibId().GetLibNickname().empty() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "the open symbol has no library yet; use SaveCopyOfDocument with a "
+                             "path to save it" );
+        return tl::unexpected( e );
+    }
+
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( !context()->SaveSymbol() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "failed to save symbol (is the library read-only?)" );
+        return tl::unexpected( e );
+    }
+
+    notifyDocumentSaved( context()->GetLoadedLibId().GetUniStringLibId() );
+    return Empty();
+}
+
+
+HANDLER_RESULT<Empty>
+API_HANDLER_SYMBOL::handleSaveCopyOfDocument( const HANDLER_CONTEXT<commands::SaveCopyOfDocument>& aCtx )
 {
     HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() );
 
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     wxString pathStr = wxString::FromUTF8( aCtx.Request.path() );
 
@@ -423,31 +568,75 @@ HANDLER_RESULT<Empty> API_HANDLER_SYMBOL::handleSaveCopyOfDocument(
     {
         ApiResponseStatus e;
         e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        e.set_error_message( "path must contain the new symbol name, "
-                             "optionally prefixed with a library nickname (e.g. \"lib:name\")" );
+        e.set_error_message( "path must name a .kicad_sym file, or the new symbol name optionally "
+                             "prefixed with a library nickname (e.g. \"lib:name\")" );
         return tl::unexpected( e );
     }
 
-    // path can be "NewName" (same library) or "LibNick:NewName" (different library)
-    LIB_ID target;
-    target.Parse( pathStr );
+    // A path that is not a symbol library file names a symbol in the project's libraries:
+    // "NewName" (same library) or "LibNick:NewName"
+    if( !pathStr.Lower().EndsWith( wxS( "." ) + wxString( FILEEXT::KiCadSymbolLibFileExtension ) )
+        && !wxFileName( pathStr ).IsAbsolute() )
+    {
+        LIB_ID target;
+        target.Parse( pathStr );
 
-    wxString libraryName = target.GetUniStringLibNickname();
+        wxString libraryName = target.GetUniStringLibNickname();
 
-    if( libraryName.IsEmpty() )
-        libraryName = m_context->GetLoadedLibId().GetUniStringLibNickname();
+        if( libraryName.IsEmpty() )
+            libraryName = context()->GetLoadedLibId().GetUniStringLibNickname();
 
-    wxString newName = target.GetUniStringLibItemName();
-    bool     overwrite = aCtx.Request.has_options() && aCtx.Request.options().overwrite();
-    wxString error;
+        wxString newName = target.GetUniStringLibItemName();
+        bool     overwrite = aCtx.Request.has_options() && aCtx.Request.options().overwrite();
+        wxString error;
 
-    if( !m_context->SaveSymbolCopy( libraryName, newName, overwrite, &error ) )
+        if( !symbol() || !SaveSymbolCopyToLibrary( *symbol(), &context()->Prj(), libraryName, newName,
+                                                   overwrite, &error ) )
+        {
+            ApiResponseStatus e;
+            e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( fmt::format( "failed to save symbol copy '{}' to library '{}': {}",
+                                              newName.ToStdString(), libraryName.ToStdString(),
+                                              error.ToStdString() ) );
+            return tl::unexpected( e );
+        }
+
+        return Empty();
+    }
+
+    wxFileName libPath( pathStr );
+
+    if( !libPath.IsOk() || !libPath.IsDirWritable() )
     {
         ApiResponseStatus e;
         e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        e.set_error_message( fmt::format( "failed to save symbol copy '{}' to library '{}': {}",
-                                          newName.ToStdString(), libraryName.ToStdString(),
-                                          error.ToStdString() ) );
+        e.set_error_message( fmt::format( "save path '{}' could not be opened", libPath.GetFullPath().ToStdString() ) );
+        return tl::unexpected( e );
+    }
+
+    if( libPath.FileExists() && ( !libPath.IsFileWritable() || !aCtx.Request.options().overwrite() ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message(
+                fmt::format( "save path '{}' exists and cannot be overwritten", libPath.GetFullPath().ToStdString() ) );
+        return tl::unexpected( e );
+    }
+
+    if( libPath.GetExt() != wxString( FILEEXT::KiCadSymbolLibFileExtension ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message(
+                fmt::format( "save path '{}' must have a kicad_sym extension", libPath.GetFullPath().ToStdString() ) );
+        return tl::unexpected( e );
+    }
+
+    if( !context()->SaveSymbolCopy( libPath.GetFullPath(), aCtx.Request.options().overwrite() ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "failed to save symbol copy" );
         return tl::unexpected( e );
     }
 
@@ -455,45 +644,83 @@ HANDLER_RESULT<Empty> API_HANDLER_SYMBOL::handleSaveCopyOfDocument(
 }
 
 
-HANDLER_RESULT<GetItemsResponse> API_HANDLER_SYMBOL::handleGetItems( const HANDLER_CONTEXT<GetItems>& aCtx )
+HANDLER_RESULT<Empty> API_HANDLER_SYMBOL::handleRevertDocument( const HANDLER_CONTEXT<commands::RevertDocument>& aCtx )
 {
-    // validateItemHeaderDocument already answers AS_UNHANDLED for another editor's
-    // document type; anything else it reports is a real error for this client
-    if( HANDLER_RESULT<std::optional<KIID>> header = validateItemHeaderDocument( aCtx.Request.header() );
-        !header )
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
     {
-        return tl::unexpected( header.error() );
+        return tl::unexpected( documentValidation.error() );
     }
 
-    GetItemsResponse response;
-    std::set<KICAD_T> typesRequested;
-    bool              wantSymbol = false;
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
-    for( int typeRaw : aCtx.Request.types() )
-    {
-        auto    typeMessage = static_cast<types::KiCadObjectType>( typeRaw );
-        KICAD_T type = FromProtoEnum<KICAD_T>( typeMessage );
-
-        if( type == LIB_SYMBOL_T )
-            wantSymbol = true;
-        else if( s_symbolChildTypes.contains( type ) )
-            typesRequested.insert( type );
-    }
-
-    if( !wantSymbol && typesRequested.empty() )
+    if( !context()->RevertSymbol() )
     {
         ApiResponseStatus e;
         e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        e.set_error_message( "none of the requested types are valid for a symbol document" );
+        e.set_error_message( "failed to revert symbol" );
+        return tl::unexpected( e );
+    }
+
+    if( m_undoStack )
+        m_undoStack->Clear();
+
+    bumpRevision();
+    return Empty();
+}
+
+
+HANDLER_RESULT<commands::GetItemsResponse>
+API_HANDLER_SYMBOL::handleGetItems( const HANDLER_CONTEXT<commands::GetItems>& aCtx )
+{
+    if( HANDLER_RESULT<std::optional<KIID>> valid = validateItemHeaderDocument( aCtx.Request.header() );
+        !valid.has_value() )
+    {
+        return tl::unexpected( valid.error() );
+    }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    LIB_SYMBOL* symbol = context()->GetCurSymbol();
+
+    if( !symbol )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "no symbol is currently loaded" );
+        return tl::unexpected( e );
+    }
+
+    GetItemsResponse     response;
+    std::set<KICAD_T>    typesRequested;
+    std::vector<KICAD_T> requestedTypes = parseRequestedItemTypes( aCtx.Request.types() );
+
+    if( aCtx.Request.types().empty() )
+        requestedTypes.assign( s_allowedTypes.begin(), s_allowedTypes.end() );
+
+    for( KICAD_T type : requestedTypes )
+    {
+        if( !s_allowedTypes.contains( type ) )
+            continue;
+
+        typesRequested.insert( type );
+    }
+
+    if( typesRequested.empty() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "none of the requested types are valid for a Symbol object" );
         return tl::unexpected( e );
     }
 
     std::vector<const EDA_ITEM*> items;
 
-    if( wantSymbol )
-        items.push_back( symbol() );
+    if( typesRequested.contains( LIB_SYMBOL_T ) )
+        items.push_back( symbol );
 
-    for( const SCH_ITEM& item : symbol()->GetDrawItems() )
+    for( const SCH_ITEM& item : symbol->GetDrawItems() )
     {
         if( typesRequested.contains( item.Type() ) )
             items.push_back( &item );
@@ -507,18 +734,9 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_SYMBOL::handleGetItems( const HANDL
 
     for( const EDA_ITEM* item : items )
     {
-        if( item == symbol() )
-        {
-            kiapi::schematic::types::SchematicSymbol packed;
-            PackLibSymbol( &packed, symbol() );
-            response.add_items()->PackFrom( packed );
-        }
-        else
-        {
-            google::protobuf::Any itemBuf;
-            item->Serialize( itemBuf );
-            response.mutable_items()->Add( std::move( itemBuf ) );
-        }
+        google::protobuf::Any any;
+        item->Serialize( any );
+        response.mutable_items()->Add( std::move( any ) );
     }
 
     response.set_status( ItemRequestStatus::IRS_OK );
@@ -529,11 +747,16 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_SYMBOL::handleGetItems( const HANDL
 std::map<KICAD_T, uint32_t> API_HANDLER_SYMBOL::countItems( const DocumentSpecifier& aDocument )
 {
     std::map<KICAD_T, uint32_t> counts;
+    LIB_SYMBOL*                 sym = symbol();
+
+    if( !sym )
+        return counts;
+
     counts[LIB_SYMBOL_T] = 1;
 
-    for( const SCH_ITEM& item : symbol()->GetDrawItems() )
+    for( const SCH_ITEM& item : sym->GetDrawItems() )
     {
-        if( s_symbolChildTypes.contains( item.Type() ) )
+        if( s_allowedTypes.contains( item.Type() ) )
             ++counts[item.Type()];
     }
 
@@ -541,25 +764,51 @@ std::map<KICAD_T, uint32_t> API_HANDLER_SYMBOL::countItems( const DocumentSpecif
 }
 
 
-HANDLER_RESULT<GetItemsResponse> API_HANDLER_SYMBOL::handleGetItemsById( const HANDLER_CONTEXT<GetItemsById>& aCtx )
+HANDLER_RESULT<commands::GetItemsResponse>
+API_HANDLER_SYMBOL::handleGetItemsById( const HANDLER_CONTEXT<commands::GetItemsById>& aCtx )
 {
-    // validateItemHeaderDocument already answers AS_UNHANDLED for another editor's
-    // document type; anything else it reports is a real error for this client
-    if( HANDLER_RESULT<std::optional<KIID>> header = validateItemHeaderDocument( aCtx.Request.header() );
-        !header )
+    if( HANDLER_RESULT<std::optional<KIID>> valid = validateItemHeaderDocument( aCtx.Request.header() );
+        !valid.has_value() )
     {
-        return tl::unexpected( header.error() );
+        return tl::unexpected( valid.error() );
+    }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    LIB_SYMBOL* symbol = context()->GetCurSymbol();
+
+    if( !symbol )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "no symbol is currently loaded" );
+        return tl::unexpected( e );
     }
 
     GetItemsResponse response;
 
-    for( const types::KIID& id : aCtx.Request.items() )
+    for( const types::KIID& idProto : aCtx.Request.items() )
     {
-        if( SCH_ITEM* item = findItem( KIID( id.value() ) ) )
+        KIID id( idProto.value() );
+
+        if( id == symbol->m_Uuid )
         {
-            google::protobuf::Any itemBuf;
-            item->Serialize( itemBuf );
-            response.mutable_items()->Add( std::move( itemBuf ) );
+            google::protobuf::Any any;
+            symbol->Serialize( any );
+            response.mutable_items()->Add( std::move( any ) );
+            continue;
+        }
+
+        for( SCH_ITEM& item : symbol->GetDrawItems() )
+        {
+            if( item.m_Uuid != id || !s_allowedTypes.contains( item.Type() ) )
+                continue;
+
+            google::protobuf::Any any;
+            item.Serialize( any );
+            response.mutable_items()->Add( std::move( any ) );
+            break;
         }
     }
 
@@ -568,15 +817,37 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_SYMBOL::handleGetItemsById( const H
 }
 
 
-HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SYMBOL::handleCreateUpdateItemsInternal( bool aCreate,
-        const std::string& aClientName,
-        const types::ItemHeader& aHeader,
+std::optional<EDA_ITEM*> API_HANDLER_SYMBOL::getItemFromDocument( const DocumentSpecifier& aDocument, const KIID& aId )
+{
+    if( !validateDocument( aDocument ).has_value() )
+        return std::nullopt;
+
+    LIB_SYMBOL* symbol = context()->GetCurSymbol();
+
+    if( !symbol )
+        return std::nullopt;
+
+    if( symbol->m_Uuid == aId )
+        return std::optional<EDA_ITEM*>( symbol );
+
+    for( SCH_ITEM& item : symbol->GetDrawItems() )
+    {
+        if( item.m_Uuid == aId )
+            return std::optional<EDA_ITEM*>( &item );
+    }
+
+    return std::nullopt;
+}
+
+
+HANDLER_RESULT<types::ItemRequestStatus> API_HANDLER_SYMBOL::handleCreateUpdateItemsInternal(
+        bool aCreate, const std::string& aClientName, const types::ItemHeader& aHeader,
         const google::protobuf::RepeatedPtrField<google::protobuf::Any>& aItems,
-        std::function<void( ItemStatus, google::protobuf::Any )> aItemHandler )
+        std::function<void( ItemStatus, google::protobuf::Any )>         aItemHandler )
 {
     ApiResponseStatus e;
 
-    auto containerResult = validateItemHeaderDocument( aHeader );
+    HANDLER_RESULT<std::optional<KIID>> containerResult = validateItemHeaderDocument( aHeader );
 
     if( !containerResult && containerResult.error().status() == ApiStatusCode::AS_UNHANDLED )
     {
@@ -589,7 +860,26 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SYMBOL::handleCreateUpdateItemsInt
         return tl::unexpected( e );
     }
 
-    COMMIT* commit = getCurrentCommit( aClientName );
+    LIB_SYMBOL* symbol = context()->GetCurSymbol();
+
+    if( !symbol )
+    {
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "no symbol is currently loaded" );
+        return tl::unexpected( e );
+    }
+
+    if( containerResult->has_value() && **containerResult != symbol->m_Uuid )
+    {
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "the requested container {} is not the open symbol",
+                                          ( *containerResult )->AsString().ToStdString() ) );
+        return tl::unexpected( e );
+    }
+
+    SCH_SCREEN* screen = context()->GetScreen();
+    COMMIT*     commit = getCurrentCommit( aClientName );
+    SCH_COMMIT* sch_commit = m_frame ? static_cast<SCH_COMMIT*>( commit ) : nullptr;
 
     for( const google::protobuf::Any& anyItem : aItems )
     {
@@ -604,75 +894,139 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SYMBOL::handleCreateUpdateItemsInt
             continue;
         }
 
-        if( !s_symbolChildTypes.contains( *type ) )
+        if( !s_allowedTypes.contains( *type ) )
         {
             status.set_code( ItemStatusCode::ISC_INVALID_TYPE );
-            status.set_error_message( fmt::format( "{} is not a valid child of a symbol", anyItem.type_url() ) );
+            status.set_error_message( fmt::format( "type {} is not supported by the symbol editor API handler",
+                                                   magic_enum::enum_name( *type ) ) );
             aItemHandler( status, anyItem );
             continue;
         }
 
-        std::unique_ptr<EDA_ITEM> item = CreateItemForType( *type, symbol() );
-
-        if( !item )
+        if( *type == LIB_SYMBOL_T )
         {
             status.set_code( ItemStatusCode::ISC_INVALID_TYPE );
-            status.set_error_message( fmt::format( "could not create an item of type {}", anyItem.type_url() ) );
+            status.set_error_message( "whole-symbol create/update is not supported; "
+                                      "edit the symbol's child items instead" );
             aItemHandler( status, anyItem );
             continue;
         }
 
-        if( !item->Deserialize( anyItem ) )
+        std::unique_ptr<EDA_ITEM> created = CreateItemForType( *type, symbol );
+
+        if( !created )
         {
-            e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-            e.set_error_message( fmt::format( "could not unpack {} from request", item->GetClass().ToStdString() ) );
-            return tl::unexpected( e );
+            status.set_code( ItemStatusCode::ISC_INVALID_TYPE );
+            status.set_error_message(
+                    fmt::format( "could not create an item of type {}", magic_enum::enum_name( *type ) ) );
+            aItemHandler( status, anyItem );
+            continue;
         }
 
-        SCH_ITEM* existingItem = findItem( item->m_Uuid );
+        if( !created->Deserialize( anyItem ) )
+        {
+            status.set_code( ItemStatusCode::ISC_INVALID_DATA );
+            status.set_error_message(
+                    fmt::format( "could not unpack {} from request", created->GetClass().ToStdString() ) );
+            aItemHandler( status, anyItem );
+            continue;
+        }
+
+        SCH_ITEM* newItem = static_cast<SCH_ITEM*>( created.get() );
+
+        SCH_ITEM* existingItem = findItem( newItem->m_Uuid );
+
+        // Mandatory fields exist on every symbol; they can be updated but not created
+        if( aCreate && newItem->Type() == SCH_FIELD_T && static_cast<SCH_FIELD*>( newItem )->IsMandatory() )
+        {
+            status.set_code( ItemStatusCode::ISC_INVALID_DATA );
+            status.set_error_message( "mandatory fields cannot be created" );
+            aItemHandler( status, anyItem );
+            continue;
+        }
 
         if( aCreate && existingItem )
         {
             status.set_code( ItemStatusCode::ISC_EXISTING );
-            status.set_error_message( fmt::format( "an item with UUID {} already exists",
-                                                   item->m_Uuid.AsStdString() ) );
+            status.set_error_message(
+                    fmt::format( "an item with UUID {} already exists", newItem->m_Uuid.AsStdString() ) );
             aItemHandler( status, anyItem );
             continue;
         }
         else if( !aCreate && !existingItem )
         {
             status.set_code( ItemStatusCode::ISC_NONEXISTENT );
-            status.set_error_message( fmt::format( "an item with UUID {} does not exist",
-                                                   item->m_Uuid.AsStdString() ) );
+            status.set_error_message(
+                    fmt::format( "an item with UUID {} does not exist", newItem->m_Uuid.AsStdString() ) );
+            aItemHandler( status, anyItem );
+            continue;
+        }
+
+        if( !aCreate && existingItem->Type() != *type )
+        {
+            status.set_code( ItemStatusCode::ISC_INVALID_DATA );
+            status.set_error_message(
+                    fmt::format( "item {} is not of the requested type", newItem->m_Uuid.AsStdString() ) );
             aItemHandler( status, anyItem );
             continue;
         }
 
         status.set_code( ItemStatusCode::ISC_OK );
-        google::protobuf::Any newItem;
+        google::protobuf::Any responseItem;
+
+        if( !m_frame )
+        {
+            // The frameless commit stages each child and applies it on Push
+            if( aCreate )
+            {
+                created.release();
+                newItem->SetParent( symbol );
+                newItem->SetLayer( LAYER_DEVICE );
+                commit->Add( newItem );
+                newItem->Serialize( responseItem );
+            }
+            else
+            {
+                commit->Modify( existingItem );
+                existingItem->SwapItemData( newItem );
+                existingItem->Serialize( responseItem );
+            }
+
+            aItemHandler( status, responseItem );
+            continue;
+        }
+
+        sch_commit->Modify( symbol, screen );
 
         if( aCreate )
         {
-            SCH_ITEM* createdItem = static_cast<SCH_ITEM*>( item.release() );
-            createdItem->SetParent( symbol() );
-            createdItem->SetLayer( LAYER_DEVICE );
-            commit->Add( createdItem );
-            createdItem->Serialize( newItem );
+            if( newItem->Type() == SCH_PIN_T )
+                const_cast<KIID&>( newItem->m_Uuid ) = KIID();
+
+            newItem->SetParent( symbol );
+            symbol->AddDrawItem( newItem, false );
+            created.release();
+            newItem->Serialize( responseItem );
+
+            if( m_frame && frame()->GetCanvas() )
+                frame()->GetCanvas()->GetView()->Add( newItem );
         }
         else
         {
-            commit->Modify( existingItem );
-            existingItem->SwapItemData( static_cast<SCH_ITEM*>( item.get() ) );
-            existingItem->Serialize( newItem );
+            SCH_ITEM* updated = existingItem;
+            updated->SwapItemData( newItem );
+            updated->Serialize( responseItem );
+
+            if( m_frame && frame()->GetCanvas() )
+                frame()->GetCanvas()->GetView()->Update( updated, KIGFX::GEOMETRY );
         }
 
-        aItemHandler( status, newItem );
+        aItemHandler( status, responseItem );
     }
 
     if( !m_activeClients.contains( aClientName ) )
     {
-        pushImplicitCommit( aClientName, aCreate ? _( "Created items via API" )
-                                                : _( "Modified items via API" ) );
+        pushImplicitCommit( aClientName, aCreate ? _( "Created items via API" ) : _( "Modified items via API" ) );
     }
 
     return ItemRequestStatus::IRS_OK;
@@ -682,14 +1036,29 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SYMBOL::handleCreateUpdateItemsInt
 void API_HANDLER_SYMBOL::deleteItemsInternal( std::map<KIID, ItemDeletionStatus>& aItemsToDelete,
                                               const std::string& aClientName )
 {
-    COMMIT* commit = getCurrentCommit( aClientName );
+    LIB_SYMBOL* symbol = context()->GetCurSymbol();
+
+    if( !symbol )
+        return;
+
+    SCH_SCREEN* screen = context()->GetScreen();
+    COMMIT*     commit = getCurrentCommit( aClientName );
 
     for( auto& [id, status] : aItemsToDelete )
     {
+        if( status != ItemDeletionStatus::IDS_NONEXISTENT )
+            continue;
+
         SCH_ITEM* item = findItem( id );
 
         if( !item )
             continue;
+
+        if( !s_allowedTypes.contains( item->Type() ) )
+        {
+            status = ItemDeletionStatus::IDS_IMMUTABLE;
+            continue;
+        }
 
         if( item->Type() == SCH_FIELD_T && static_cast<SCH_FIELD*>( item )->IsMandatory() )
         {
@@ -697,10 +1066,51 @@ void API_HANDLER_SYMBOL::deleteItemsInternal( std::map<KIID, ItemDeletionStatus>
             continue;
         }
 
-        commit->Remove( item );
         status = ItemDeletionStatus::IDS_OK;
+
+        if( !m_frame )
+        {
+            commit->Remove( item );
+            continue;
+        }
+
+        static_cast<SCH_COMMIT*>( commit )->Modify( symbol, screen );
+
+        if( frame()->GetCanvas() )
+            frame()->GetCanvas()->GetView()->Remove( item );
+
+        symbol->RemoveDrawItem( item );
     }
 
     if( !m_activeClients.contains( aClientName ) )
         pushImplicitCommit( aClientName, _( "Deleted items via API" ) );
+}
+
+
+void API_HANDLER_SYMBOL::onModified()
+{
+    if( frame() )
+        frame()->OnModify();
+
+    context()->SetContentModified();
+}
+
+
+void API_HANDLER_SYMBOL::pushCurrentCommit( const std::string& aClientName, const wxString& aMessage )
+{
+    API_HANDLER_EDITOR::pushCurrentCommit( aClientName, aMessage );
+    onModified();
+}
+
+
+HANDLER_RESULT<commands::GetDocumentModifiedStateResponse>
+API_HANDLER_SYMBOL::handleGetDocumentModifiedState( const HANDLER_CONTEXT<commands::GetDocumentModifiedState>& aCtx )
+{
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    GetDocumentModifiedStateResponse response;
+    response.set_state( context()->IsContentModified() ? DocumentModifiedState::DMS_MODIFIED
+                                                       : DocumentModifiedState::DMS_UNMODIFIED );
+    return response;
 }

@@ -15,6 +15,19 @@ $toolchain = Join-Path $env:VCPKG_ROOT "scripts\buildsystems\vcpkg.cmake"
 Write-Host "source : $root"
 Write-Host "build  : $buildDir ($buildType)"
 
+# The RHI shader compiler tools come from vcpkg.json's host ports glslang[tools] and
+# spirv-tools[tools]; cmake/RHIShaderCompilation.cmake finds them under
+# vcpkg_installed/<triplet>/tools/*.  spirv-cross (MSL) is only used for the Metal backend,
+# so Windows does not need it.  Fail here with a clear message rather than in the configure.
+foreach ($tool in "glslangValidator.exe", "spirv-opt.exe") {
+    $found = Get-ChildItem -Path (Join-Path $buildDir "vcpkg_installed") -Recurse -Filter $tool -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $found) {
+        Write-Error "$tool not found under $buildDir\vcpkg_installed (vcpkg.json host ports glslang/spirv-tools)"
+        exit 1
+    }
+    Write-Host "$($tool): $($found.FullName)"
+}
+
 cmake -S $root -B $buildDir -G Ninja `
     "-DCMAKE_BUILD_TYPE=$buildType" `
     "-DCMAKE_TOOLCHAIN_FILE=$toolchain" `

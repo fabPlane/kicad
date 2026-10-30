@@ -230,7 +230,7 @@ public:
         SHAPE_PROPS                             shape;
         std::optional<ZONE_CONNECTION>          zone_connection;
         std::optional<int>                      thermal_spoke_width;
-        std::optional<EDA_ANGLE>                thermal_spoke_angle;
+        std::optional<EDA_ORIENTATION>          thermal_spoke_angle;
         std::optional<int>                      thermal_gap;
         std::optional<int>                      clearance;
 
@@ -335,6 +335,8 @@ public:
     /**
      * Flips the padstack layers in the case that the pad's parent footprint is flipped to the
      * other side of the board.
+     *
+     * @param aBoard provides custom layer pairs, or nullptr to use the standard layer pairs.
      */
     void FlipLayers( BOARD* aBoard );
 
@@ -350,13 +352,8 @@ public:
     const wxChar* CustomName() const;
     void SetCustomName( const wxString& aCustomName );
 
-    EDA_ANGLE GetOrientation() const { return m_orientation; }
-
-    void SetOrientation( EDA_ANGLE aAngle )
-    {
-        m_orientation = aAngle;
-        m_orientation.Normalize();
-    }
+    EDA_ANGLE GetOrientation() const { return m_orientation.GetAngle(); }
+    void      SetOrientation( const EDA_ANGLE& aAngle ) { m_orientation = aAngle; }
 
     DRILL_PROPS& Drill() { return m_drill; }
     const DRILL_PROPS& Drill() const { return m_drill; }
@@ -564,7 +561,7 @@ private:
     std::unique_ptr<wxString> m_customName;
 
     ///! The rotation of the pad relative to an outer reference frame
-    EDA_ANGLE                 m_orientation;
+    EDA_ORIENTATION           m_orientation;
 
     std::unordered_map<PCB_LAYER_ID, COPPER_LAYER_PROPS> m_copperProps;
 
@@ -600,4 +597,3 @@ private:
 DECLARE_ENUM_TO_WXANY( PAD_DRILL_POST_MACHINING_MODE );
 DECLARE_ENUM_TO_WXANY( UNCONNECTED_LAYER_MODE );
 DECLARE_ENUM_TO_WXANY( BACKDRILL_MODE );
-

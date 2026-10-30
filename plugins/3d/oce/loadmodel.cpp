@@ -26,6 +26,7 @@
 #include <sstream>
 #include <string>
 #include <cstring>
+#include <array>
 #include <map>
 #include <vector>
 #include <atomic>
@@ -87,7 +88,8 @@
 #define MASK_OCE wxT( "PLUGIN_OCE" )
 #define MASK_OCE_EXTRA wxT( "PLUGIN_OCE_EXTRA" )
 
-typedef std::map<std::size_t, IFSG_APPEARANCE>       COLORMAP;
+typedef std::array<double, 4>                        COLORKEY;
+typedef std::map<COLORKEY, IFSG_APPEARANCE>          COLORMAP;
 typedef std::map<std::string, SGNODE*>               FACEMAP;
 typedef std::map<std::string, std::vector<SGNODE*>>  NODEMAP;
 typedef std::pair<std::string, std::vector<SGNODE*>> NODEITEM;
@@ -118,7 +120,6 @@ struct DATA
     /// Wrapper so the node clears it if a shape that took ownership is destroyed first
     IFSG_APPEARANCE defaultColor{ false };
 
-    Quantity_Color refColor;
     NODEMAP  shapes;    // SGNODE lists representing a TopoDS_SOLID / COMPOUND
     COLORMAP colors;    // SGAPPEARANCE nodes
     FACEMAP  faces;     // SGSHAPE items representing a TopoDS_FACE
@@ -143,7 +144,6 @@ struct DATA
     DATA()
     {
         scene = nullptr;
-        refColor.SetValues( Quantity_NOC_BLACK );
         renderBoth = false;
         hasSolid = false;
     }
@@ -268,17 +268,14 @@ struct DATA
             return defaultColor.GetRawPtr();
         }
 
-        Quantity_Color colorRgb = colorObj->GetRGB();
-
         double r, g, b;
         colorObj->GetRGB().Values( r, g, b, OCC_COLOR_SPACE );
 
-        std::size_t hash = std::hash<double>{}( colorRgb.Distance( refColor ) )
-                           ^ ( std::hash<float>{}( colorObj->Alpha() ) << 1 );
+        COLORKEY key = { r, g, b, colorObj->Alpha() };
 
         // The wrapper lives in the map so the node can clear it, which turns a cache entry
         // whose owning shape was destroyed into a miss rather than a dangling pointer
-        IFSG_APPEARANCE& app = colors.try_emplace( hash, false ).first->second;
+        IFSG_APPEARANCE& app = colors.try_emplace( key, false ).first->second;
 
         if( SGNODE* cached = app.GetRawPtr() )
             return cached;
@@ -452,12 +449,12 @@ static inline std::ostream& operator<<( std::ostream& aOStream, const Quantity_C
 
 
 /**
- * Gets a string for a given TopAbs_ShapeEnum element
+ * Get a string for a given TopAbs_ShapeEnum element.
  *
- * @param aLabel Label to convert
- * @param aShapeTool Handle to shape tool being used
- * @param aColorTool Handle to color tool being used
- * @param aPregMsg Any prefixed message to insert (used for indentation in dump)
+ * @param aLabel Label to convert.
+ * @param aShapeTool Handle to shape tool being used.
+ * @param aColorTool Handle to color tool being used.
+ * @param aPreMsg Any prefixed message to insert (used for indentation in dump).
  */
 static void printLabel( TDF_Label aLabel, Handle( XCAFDoc_ShapeTool ) aShapeTool,
                         Handle( XCAFDoc_ColorTool ) aColorTool, const char* aPreMsg = nullptr )

@@ -119,10 +119,10 @@ public:
     /**
      * Perform the plotting of the schematic using the given \a aPlotFormat and a\ aPlotSettings.
      *
-     * @param aPlotFormat The resulting output plot format (PDF, SVG, DXF, etc)
-     * @param aPlotSettings The configuration for the plotting operation
-     * @param aRenderSettings Mandatory object containing render settings for lower level classes
-     * @param aReporter Optional reporter to print messages to
+     * @param aPlotFormat The resulting output plot format (PDF, SVG, DXF, etc).
+     * @param aPlotOpts The configuration for the plotting operation.
+     * @param aRenderSettings Mandatory object containing render settings for lower level classes.
+     * @param aReporter Optional reporter to print messages to.
      */
     void Plot( PLOT_FORMAT aPlotFormat, const SCH_PLOT_OPTS& aPlotOpts,
                SCH_RENDER_SETTINGS* aRenderSettings, REPORTER* aReporter = nullptr );
@@ -180,17 +180,9 @@ protected:
                           RENDER_SETTINGS* aRenderSettings, const SCH_PLOT_OPTS& aPlotOpts );
 
     /**
-     * Everything done, close the plot and restore the environment.
-     *
-     * @param aPlotter the plotter to close and destroy (can be null if no current active plotter)
-     * @param aOldsheetpath the stored old sheet path for the current sheet before the plot started
-     */
-    void restoreEnvironment( PDF_PLOTTER* aPlotter, SCH_SHEET_PATH& aOldsheetpath );
-
-
-    /**
      * Create a file name with an absolute path name.
      *
+     * @param aPlotOpts The configuration for the plotting operation
      * @param aPlotFileName the name for the file to plot without a path.
      * @param aExtension the extension for the file to plot.
      * @param aReporter a point to a REPORTER object use to show messages (can be NULL).

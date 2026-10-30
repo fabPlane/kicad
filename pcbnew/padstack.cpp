@@ -138,8 +138,15 @@ bool PADSTACK::operator==( const PADSTACK& aOther ) const
     if( m_layerSet != aOther.m_layerSet )
         return false;
 
-    if(  CustomName() != aOther.CustomName() )
+    if( m_customName && aOther.m_customName )
+    {
+        if( *m_customName != *aOther.m_customName )
+            return false;
+    }
+    else if( (bool) m_customName != (bool) m_customName )
+    {
         return false;
+    }
 
     if(  m_orientation != aOther.m_orientation )
         return false;
@@ -270,7 +277,7 @@ bool PADSTACK::Deserialize( const kiapi::board::types::PadStack& padstack )
 
     m_mode = FromProtoEnum<MODE>( padstack.type() );
     SetLayerSet( kiapi::board::UnpackLayerSet( padstack.layers() ) );
-    m_orientation = EDA_ANGLE( padstack.angle().value_degrees(), DEGREES_T );
+    SetOrientation( EDA_ANGLE( padstack.angle().value_degrees(), DEGREES_T ) );
 
     Drill().size = kiapi::common::UnpackVector2( padstack.drill().diameter() );
     Drill().start = FromProtoEnum<PCB_LAYER_ID>( padstack.drill().start_layer() );
@@ -546,22 +553,24 @@ BACKDRILL_MODE PADSTACK::GetBackdrillMode() const
 
 void PADSTACK::SetBackdrillMode( BACKDRILL_MODE aMode )
 {
-    auto apply = [this]( bool aTop, bool aWant )
-    {
-        if( aWant )
-        {
-            DRILL_PROPS& drill = backdrillWriteSlot( aTop );
-            drill.start = aTop ? F_Cu : B_Cu;
-            drill.shape = PAD_DRILL_SHAPE::CIRCLE;
+    auto apply =
+            [this]( bool aTop, bool aWant )
+            {
+                if( aWant )
+                {
+                    DRILL_PROPS& drill = backdrillWriteSlot( aTop );
+                    drill.start = aTop ? F_Cu : B_Cu;
+                    drill.end = drill.start;                 // Must-cut a single copper layer
+                    drill.shape = PAD_DRILL_SHAPE::CIRCLE;
 
-            if( drill.size.x <= 0 )
-                drill.size = m_drill.size * 1.1; // Backdrill slightly larger than main drill
-        }
-        else
-        {
-            clearBackdrillSide( aTop );
-        }
-    };
+                    if( drill.size.x <= 0 )
+                        drill.size = m_drill.size * 1.1;     // Backdrill slightly larger than main drill
+                }
+                else
+                {
+                    clearBackdrillSide( aTop );
+                }
+            };
 
     apply( true, aMode == BACKDRILL_MODE::BACKDRILL_TOP || aMode == BACKDRILL_MODE::BACKDRILL_BOTH );
     apply( false, aMode == BACKDRILL_MODE::BACKDRILL_BOTTOM || aMode == BACKDRILL_MODE::BACKDRILL_BOTH );
@@ -624,7 +633,7 @@ void PADSTACK::Serialize( kiapi::board::types::PadStack& padstack ) const
 
     padstack.set_type( ToProtoEnum<MODE, PadStackType>( m_mode ) );
     kiapi::board::PackLayerSet( *padstack.mutable_layers(), m_layerSet );
-    padstack.mutable_angle()->set_value_degrees( m_orientation.AsDegrees() );
+    padstack.mutable_angle()->set_value_degrees( m_orientation.GetAngle().AsDegrees() );
 
     kiapi::common::PackVector2( *padstack.mutable_drill()->mutable_diameter(), m_drill.size );
     padstack.mutable_drill()->set_start_layer( ToProtoEnum<PCB_LAYER_ID, BoardLayer>( m_drill.start ) );
@@ -750,7 +759,7 @@ void PADSTACK::Serialize( kiapi::board::types::PadStack& padstack ) const
     if( CopperLayer( ALL_LAYERS ).thermal_spoke_angle.has_value() )
     {
         padstack.mutable_zone_settings()->mutable_thermal_spokes()->mutable_angle()->set_value_degrees(
-                CopperLayer( ALL_LAYERS ).thermal_spoke_angle.value().AsDegrees() );
+                CopperLayer( ALL_LAYERS ).thermal_spoke_angle.value().GetAngle().AsDegrees() );
     }
 
     padstack.set_unconnected_layer_removal( ToProtoEnum<UNCONNECTED_LAYER_MODE,
@@ -1124,7 +1133,7 @@ EDA_ANGLE PADSTACK::DefaultThermalSpokeAngleForShape( PCB_LAYER_ID aLayer ) cons
 EDA_ANGLE PADSTACK::ThermalSpokeAngle( PCB_LAYER_ID aLayer ) const
 {
     if( CopperLayer( aLayer ).thermal_spoke_angle.has_value() )
-        return CopperLayer( aLayer ).thermal_spoke_angle.value();
+        return CopperLayer( aLayer ).thermal_spoke_angle.value().GetAngle();
 
     return DefaultThermalSpokeAngleForShape( aLayer );
 }
@@ -1187,17 +1196,37 @@ PADSTACK::COPPER_LAYER_PROPS& PADSTACK::CopperLayer( PCB_LAYER_ID aLayer )
     if( m_mode == MODE::NORMAL )
         return m_copperProps[ALL_LAYERS];
 
+    PCB_LAYER_ID key = aLayer;
+
     if( m_mode == MODE::FRONT_INNER_BACK )
     {
         if( IsFrontLayer( aLayer ) )
-            return m_copperProps[F_Cu];
+            key = F_Cu;
         else if( IsBackLayer( aLayer ) )
-            return m_copperProps[B_Cu];
+            key = B_Cu;
         else
-            return m_copperProps[INNER_LAYERS];
+            key = INNER_LAYERS;
     }
 
-    return m_copperProps[aLayer];
+    // A layer without an entry reads through to another one, so a new entry starts from what was read
+    const bool readsThrough = m_copperProps.contains( ALL_LAYERS )
+                              || ( m_mode == MODE::CUSTOM && !m_copperProps.empty() );
+
+    if( !m_copperProps.contains( key ) && readsThrough )
+    {
+        COPPER_LAYER_PROPS inherited = std::as_const( *this ).CopperLayer( aLayer );
+
+        // the new layer owns its primitives, as flipping or editing one layer must not change the other
+        for( std::shared_ptr<PCB_SHAPE>& shape : inherited.custom_shapes )
+        {
+            shape.reset( static_cast<PCB_SHAPE*>( shape->Clone() ) );
+            shape->SetParent( m_parent );
+        }
+
+        return m_copperProps.emplace( key, std::move( inherited ) ).first->second;
+    }
+
+    return m_copperProps[key];
 }
 
 
@@ -1423,7 +1452,8 @@ int PADSTACK::Compare( const PADSTACK* aLeft, const PADSTACK* aRight )
     if( ( diff = wxString( aLeft->CustomName() ).Cmp( aRight->CustomName() ) ) != 0 )
         return diff;
 
-    TEST( aLeft->m_orientation.AsTenthsOfADegree(), aRight->m_orientation.AsTenthsOfADegree() );
+    TEST( aLeft->m_orientation.GetAngle().AsTenthsOfADegree(),
+          aRight->m_orientation.GetAngle().AsTenthsOfADegree() );
 
     if( ( diff = aLeft->m_frontMaskProps.Compare( aRight->m_frontMaskProps ) ) != 0 )
         return diff;
@@ -1526,14 +1556,19 @@ double PADSTACK::Similarity( const PADSTACK& aOther ) const
 
 void PADSTACK::FlipLayers( BOARD* aBoard )
 {
+    auto flipLayer = [aBoard]( PCB_LAYER_ID aLayer )
+    {
+        return aBoard ? aBoard->FlipLayer( aLayer ) : ::FlipLayer( aLayer );
+    };
+
     if( m_mode == MODE::FRONT_INNER_BACK )
     {
         std::unordered_map<PCB_LAYER_ID, COPPER_LAYER_PROPS> oldCopperProps = m_copperProps;
         m_copperProps.clear();
 
-        m_copperProps[aBoard->FlipLayer( F_Cu )] = oldCopperProps[F_Cu];
+        m_copperProps[flipLayer( F_Cu )] = oldCopperProps[F_Cu];
         m_copperProps[INNER_LAYERS] = oldCopperProps[INNER_LAYERS];
-        m_copperProps[aBoard->FlipLayer( B_Cu )] = oldCopperProps[B_Cu];
+        m_copperProps[flipLayer( B_Cu )] = oldCopperProps[B_Cu];
     }
     else if( m_mode == MODE::CUSTOM )
     {
@@ -1541,19 +1576,19 @@ void PADSTACK::FlipLayers( BOARD* aBoard )
         m_copperProps.clear();
 
         for( const auto& [layer, props] : oldCopperProps )
-            m_copperProps[aBoard->FlipLayer( layer )] = props;
+            m_copperProps[flipLayer( layer )] = props;
     }
 
     std::swap( m_frontMaskProps, m_backMaskProps );
 
-    m_drill.start = aBoard->FlipLayer( m_drill.start );
-    m_drill.end = aBoard->FlipLayer( m_drill.end );
+    m_drill.start = flipLayer( m_drill.start );
+    m_drill.end = flipLayer( m_drill.end );
 
-    m_secondaryDrill.start = aBoard->FlipLayer( m_secondaryDrill.start );
-    m_secondaryDrill.end = aBoard->FlipLayer( m_secondaryDrill.end );
+    m_secondaryDrill.start = flipLayer( m_secondaryDrill.start );
+    m_secondaryDrill.end = flipLayer( m_secondaryDrill.end );
 
-    m_tertiaryDrill.start = aBoard->FlipLayer( m_tertiaryDrill.start );
-    m_tertiaryDrill.end = aBoard->FlipLayer( m_tertiaryDrill.end );
+    m_tertiaryDrill.start = flipLayer( m_tertiaryDrill.start );
+    m_tertiaryDrill.end = flipLayer( m_tertiaryDrill.end );
 
     std::swap( m_frontPostMachining, m_backPostMachining );
 }
@@ -1707,12 +1742,14 @@ double PADSTACK::COPPER_LAYER_PROPS::Similarity( const PADSTACK::COPPER_LAYER_PR
                 return (int) a.value_or( v ) - (int) b.value_or( v ); \
         }
 
-#define TEST_OPT_ANGLE( a, b, v )                                                          \
+#define TEST_OPT_ORIENTATION( a, b, v )                                                          \
         {                                                                                  \
             if( a.has_value() != b.has_value() )                                           \
                 return a.has_value() - b.has_value();                                      \
-            if( abs( a.value_or( v ).AsDegrees() - b.value_or( v ).AsDegrees() ) > 0.001 ) \
-                return a.value_or( v ).AsDegrees() > b.value_or( v ).AsDegrees() ? 1 : -1; \
+            const EDA_ANGLE aVal = a.value_or( EDA_ORIENTATION( v ) ).GetAngle();          \
+            const EDA_ANGLE bVal = b.value_or( EDA_ORIENTATION( v ) ).GetAngle();          \
+            if( abs( aVal.AsDegrees() - bVal.AsDegrees() ) > 0.001 )                       \
+                return aVal.AsDegrees() > bVal.AsDegrees() ? 1 : -1;                       \
         }
 
 
@@ -1725,7 +1762,7 @@ int PADSTACK::COPPER_LAYER_PROPS::Compare( const PADSTACK::COPPER_LAYER_PROPS& a
 
     TEST_OPT( zone_connection, aOther.zone_connection, ZONE_CONNECTION::NONE );
     TEST_OPT( thermal_spoke_width, aOther.thermal_spoke_width, 0 );
-    TEST_OPT_ANGLE( thermal_spoke_angle, aOther.thermal_spoke_angle, ANGLE_0 );
+    TEST_OPT_ORIENTATION( thermal_spoke_angle, aOther.thermal_spoke_angle, ANGLE_0 );
     TEST_OPT( thermal_gap, aOther.thermal_gap, 0 );
     TEST_OPT( clearance, aOther.clearance, 0 );
 

@@ -92,6 +92,7 @@ KICOMMON_API std::optional<KICAD_T> TypeNameFromAny( const google::protobuf::Any
         { "type.googleapis.com/kiapi.board.types.ViaStitchArea", PCB_GENERATOR_T },
         { "type.googleapis.com/kiapi.board.types.ViaStack", PCB_GENERATOR_T },
         { "type.googleapis.com/kiapi.board.types.Constraint", PCB_CONSTRAINT_T },
+        { "type.googleapis.com/kiapi.board.types.Body3D", PCB_3D_BODY_T },
         { "type.googleapis.com/kiapi.board.types.Field", PCB_FIELD_T },
         { "type.googleapis.com/kiapi.board.types.FootprintInstance", PCB_FOOTPRINT_T },
         { "type.googleapis.com/kiapi.schematic.types.Junction", SCH_JUNCTION_T },
@@ -113,6 +114,7 @@ KICOMMON_API std::optional<KICAD_T> TypeNameFromAny( const google::protobuf::Any
         { "type.googleapis.com/kiapi.schematic.types.SheetSymbol", SCH_SHEET_T },
         { "type.googleapis.com/kiapi.schematic.types.SchematicSymbolInstance", SCH_SYMBOL_T },
         { "type.googleapis.com/kiapi.schematic.types.SchematicPin", SCH_PIN_T },
+        { "type.googleapis.com/kiapi.schematic.types.SchematicSymbol", LIB_SYMBOL_T },
         { "type.googleapis.com/kiapi.schematic.types.SchematicRuleArea", SCH_RULE_AREA_T },
     };
 
@@ -422,9 +424,7 @@ KICOMMON_API bool PackKiwayApiMessage( const google::protobuf::Message& aMessage
 {
     ApiRequest request;
     request.mutable_header()->set_client_name( KiwayClientName );
-
-    if( !request.mutable_message()->PackFrom( aMessage ) )
-        return false;
+    request.mutable_message()->PackFrom( aMessage );
 
     aBytes = request.SerializeAsString();
     return true;

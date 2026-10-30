@@ -236,9 +236,9 @@ public:
     /**
      * Board design settings for this project's board.  This will be initialized by PcbNew after
      * loading a board so that BOARD_DESIGN_SETTINGS doesn't need to live in common for now.
-     * Owned by the BOARD; may be null if a board isn't loaded: be careful
+     * May be null if a board isn't loaded: be careful.
      */
-    BOARD_DESIGN_SETTINGS* m_BoardSettings;
+    std::shared_ptr<BOARD_DESIGN_SETTINGS> m_BoardSettings;
 
     /**
      * Net settings for this project (owned here)
@@ -267,6 +267,8 @@ public:
     std::vector<LAYER_PAIR_INFO>  m_LayerPairInfos; /// Layer pair list for the board
 
     struct IP2581_BOM             m_IP2581Bom;      /// IPC-2581 BOM settings
+
+    IDF_EXPORT_SETTINGS           m_IdfExportSettings;
 
 private:
     /**

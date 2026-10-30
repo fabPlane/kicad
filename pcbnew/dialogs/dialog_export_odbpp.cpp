@@ -18,43 +18,59 @@
  */
 
 #include "dialogs/dialog_export_odbpp.h"
+#include "dialogs/panel_fab_export_content.h"
 
-#include <exporters/export_odbpp.h>
+#include <algorithm>
 
-#include <set>
-#include <vector>
-#include <thread_pool.h>
-
-#include <wx/dir.h>
 #include <wx/filedlg.h>
-#include <wx/wfstream.h>
-#include <kiplatform/ui.h>
-#include <wx/zipstrm.h>
-#include <wx/tarstrm.h>
-#include <wx/zstream.h>
 
-#include <board.h>
-#include <reporter.h>
+#include <kiplatform/ui.h>
+
+#include <bitmaps.h>
 #include <confirm.h>
-#include <footprint.h>
-#include <kidialog.h>
-#include <kiway_holder.h>
-#include <paths.h>
 #include <pcb_edit_frame.h>
 #include <pcbnew_settings.h>
 #include <pgm_base.h>
-#include <progress_reporter.h>
 #include <project.h>
-#include <project/project_file.h>
-#include <settings/settings_manager.h>
 #include <string_utils.h>
 #include <widgets/std_bitmap_button.h>
-#include <io/io_mgr.h>
 #include <jobs/job_export_pcb_odb.h>
-#include <pcb_io/pcb_io_mgr.h>
-#include <kiplatform/io.h>
-#include <locale_io.h>
+#include <board.h>
+#include <reporter.h>
+#include <widgets/wx_progress_reporters.h>
+#include <widgets/wx_html_report_panel.h>
+#include <pcb_io/odbpp/pcb_io_odbpp.h>
+#include <tools/zone_filler_tool.h>
+#include <tool/tool_manager.h>
+#include <grid_tricks.h>
+#include <widgets/wx_grid.h>
+#include <pcb_io/odbpp/odb_util.h>
 
+
+namespace
+{
+enum LAYER_GRID_COL
+{
+    COL_INCLUDE,
+    COL_LAYER,
+    COL_NAME,
+    COL_TYPE,
+    COL_CONTEXT,
+    COL_SPAN
+};
+
+
+wxArrayString overridableTypeNames( PCB_LAYER_ID aLayer )
+{
+    wxArrayString names;
+
+    for( ODB_TYPE type : ODB::OverridableLayerTypes( aLayer ) )
+        names.Add( wxString::FromUTF8( ODB::Enum2String( type ) ) );
+
+    return names;
+}
+
+} // namespace
 
 
 DIALOG_EXPORT_ODBPP::DIALOG_EXPORT_ODBPP( PCB_EDIT_FRAME* aParent ) :
@@ -63,13 +79,13 @@ DIALOG_EXPORT_ODBPP::DIALOG_EXPORT_ODBPP( PCB_EDIT_FRAME* aParent ) :
         m_job( nullptr )
 {
     m_browseButton->SetBitmap( KiBitmapBundle( BITMAPS::small_folder ) );
-
-    SetupStandardButtons();
+    SetupStandardButtons( { { wxID_OK, _( "Export" ) }, { wxID_CANCEL, _( "Close" ) } } );
 
     // DIALOG_SHIM needs a unique hash_key because classname will be the same for both job and
     // non-job versions.
     m_hash_key = TO_UTF8( GetTitle() );
 
+    setupControls();
     // Now all widgets have the size fixed, call FinishDialogSettings
     finishDialogSettings();
 }
@@ -82,6 +98,7 @@ DIALOG_EXPORT_ODBPP::DIALOG_EXPORT_ODBPP( JOB_EXPORT_PCB_ODB* aJob, PCB_EDIT_FRA
         m_job( aJob )
 {
     m_browseButton->Hide();
+    m_messagesPanel->Hide();
 
     SetupStandardButtons();
 
@@ -89,13 +106,81 @@ DIALOG_EXPORT_ODBPP::DIALOG_EXPORT_ODBPP( JOB_EXPORT_PCB_ODB* aJob, PCB_EDIT_FRA
     // non-job versions.
     m_hash_key = TO_UTF8( GetTitle() );
 
+    setupControls();
     // Now all widgets have the size fixed, call FinishDialogSettings
     finishDialogSettings();
 }
 
 
+void DIALOG_EXPORT_ODBPP::setupControls()
+{
+    m_choiceUnits->Bind( wxEVT_CHOICE,
+                         [this]( wxCommandEvent& )
+                         {
+                             updatePrecisionRange();
+                         } );
+    m_contentPanel->Configure( FAB_CONTENT_FORMAT::ODBPP, m_parent->GetBoard() );
+    m_contentPanel->SetContentChanged(
+            [this]
+            {
+                updateVariantFilename();
+                refreshLayerRows();
+            } );
+
+    m_layers->PushEventHandler( new GRID_TRICKS( m_layers ) );
+
+    wxGridCellAttr* includeAttr = new wxGridCellAttr;
+    includeAttr->SetRenderer( new wxGridCellBoolRenderer );
+    includeAttr->SetEditor( new wxGridCellBoolEditor );
+    includeAttr->SetAlignment( wxALIGN_CENTER, wxALIGN_CENTER );
+    m_layers->SetColAttr( COL_INCLUDE, includeAttr );
+
+    for( int col : { COL_LAYER, COL_CONTEXT, COL_SPAN } )
+    {
+        wxGridCellAttr* readOnlyAttr = new wxGridCellAttr;
+        readOnlyAttr->SetReadOnly();
+        m_layers->SetColAttr( col, readOnlyAttr );
+    }
+}
+
+
+DIALOG_EXPORT_ODBPP::~DIALOG_EXPORT_ODBPP()
+{
+    m_layers->PopEventHandler( true );
+}
+
+
+void DIALOG_EXPORT_ODBPP::updatePrecisionRange()
+{
+    m_precision->SetRange( PCB_IO_ODBPP::MinPrecision( m_choiceUnits->GetSelection() == 1 ),
+                           PCB_IO_ODBPP::MaxPrecision() );
+}
+
+
 bool DIALOG_EXPORT_ODBPP::TransferDataToWindow()
 {
+    JOB_EXPORT_PCB_ODB        defaults;
+    const JOB_EXPORT_PCB_ODB& settings = m_job ? *m_job : defaults;
+
+    m_choiceUnits->SetSelection( settings.m_units == JOB_EXPORT_PCB_FAB::UNITS::MM ? 0 : 1 );
+    updatePrecisionRange();
+    m_precision->SetValue( settings.m_precision );
+    m_choiceCompress->SetSelection( static_cast<int>( settings.m_compressionMode ) );
+    m_choiceOrigin->SetSelection( static_cast<int>( settings.m_origin ) );
+    m_productName->SetValue( settings.m_productName );
+    m_refillZones->SetValue( m_job ? settings.m_checkZonesBeforeExport : true );
+    m_contentPanel->SetDataSet( settings.m_dataSet );
+    m_contentPanel->SetSectionKey( settings.m_sections );
+    m_contentPanel->SetBoardMetadata( settings.m_boardMetadata );
+    m_contentPanel->SetNetNames( settings.m_netNames );
+    m_contentPanel->SetVariantNames( settings.m_variantNames );
+    m_contentPanel->SetCombinedVariantOutput( settings.m_variantPackaging
+                                              == JOB_EXPORT_PCB_ODB::VARIANT_PACKAGING::COMBINED );
+    IPC2581_BOM_FIELDS fields;
+    fields.m_mfgPn = settings.m_colMfgPn;
+    m_contentPanel->SetBomFields( fields );
+    m_layerOverrides = settings.m_layerOverrides;
+
     if( !m_job )
     {
         if( m_outputFileName->GetValue().IsEmpty() )
@@ -111,14 +196,148 @@ bool DIALOG_EXPORT_ODBPP::TransferDataToWindow()
     else
     {
         SetTitle( m_job->GetSettingsDialogTitle() );
-
-        m_choiceUnits->SetSelection( static_cast<int>( m_job->m_units ) );
-        m_precision->SetValue( m_job->m_precision );
-        m_choiceCompress->SetSelection( static_cast<int>( m_job->m_compressionMode ) );
         m_outputFileName->SetValue( m_job->GetConfiguredOutputPath() );
     }
 
+    updateVariantFilename();
+    refreshLayerRows();
     return true;
+}
+
+
+void DIALOG_EXPORT_ODBPP::populateJob( JOB_EXPORT_PCB_ODB& aJob ) const
+{
+    aJob.SetConfiguredOutputPath( m_outputFileName->GetValue() );
+
+    if( &aJob != m_job )
+        aJob.m_filename = m_parent->GetBoard()->GetFileName();
+
+    aJob.m_precision = m_precision->GetValue();
+    aJob.m_units = m_choiceUnits->GetSelection() == 0 ? JOB_EXPORT_PCB_FAB::UNITS::MM : JOB_EXPORT_PCB_FAB::UNITS::INCH;
+    aJob.m_compressionMode = static_cast<JOB_EXPORT_PCB_ODB::ODB_COMPRESSION>( m_choiceCompress->GetSelection() );
+    aJob.m_origin = static_cast<JOB_EXPORT_PCB_ODB::ORIGIN>( m_choiceOrigin->GetSelection() );
+    aJob.m_productName = m_productName->GetValue();
+    aJob.m_checkZonesBeforeExport = m_refillZones->GetValue();
+    aJob.m_dataSet = m_contentPanel->GetDataSet();
+    aJob.m_sections = m_contentPanel->GetSectionKey();
+    aJob.m_boardMetadata = m_contentPanel->GetBoardMetadata();
+    aJob.m_netNames = m_contentPanel->GetNetNames();
+    aJob.m_variantNames = m_contentPanel->GetVariantNames();
+    aJob.m_variantPackaging = m_contentPanel->IsCombinedVariantOutput()
+                                      ? JOB_EXPORT_PCB_ODB::VARIANT_PACKAGING::COMBINED
+                                      : JOB_EXPORT_PCB_ODB::VARIANT_PACKAGING::SEPARATE;
+    aJob.m_colMfgPn = m_contentPanel->GetBomFields().m_mfgPn;
+    aJob.m_layerOverrides = m_layerOverrides;
+}
+
+
+void DIALOG_EXPORT_ODBPP::refreshLayerRows()
+{
+    JOB_EXPORT_PCB_ODB previewJob;
+    populateJob( previewJob );
+    previewJob.m_layerOverrides.clear();
+    harvestLayerOverrides();
+    m_previewRows = PreviewOdbMatrix( m_parent->GetBoard(), previewJob );
+    m_layers->ClearRows();
+    m_layers->AppendRows( static_cast<int>( m_previewRows.size() ) );
+    int gridRow = 0;
+
+    for( const ODB_MATRIX_PREVIEW_ROW& row : m_previewRows )
+    {
+        auto it = std::find_if( m_layerOverrides.begin(), m_layerOverrides.end(),
+                                [&]( const ODB_LAYER_OVERRIDE& aCandidate )
+                                {
+                                    return row.m_editable && aCandidate.m_layer == row.m_boardLayer;
+                                } );
+        const ODB_LAYER_OVERRIDE* override = it == m_layerOverrides.end() ? nullptr : &*it;
+
+        wxString name = override && !override->m_odbName.IsEmpty() ? override->m_odbName : row.m_matrix.m_name;
+        wxString type = override && !override->m_odbType.IsEmpty() ? override->m_odbType : row.m_matrix.m_type;
+        wxString span = row.m_matrix.m_startName;
+
+        if( !row.m_matrix.m_endName.IsEmpty() )
+            span += wxS( " – " ) + row.m_matrix.m_endName;
+
+        // The preview omits overrides, and the exporter only references copper from mask, paste and silk
+        bool keepsRef = type == wxS( "SOLDER_MASK" ) || type == wxS( "SOLDER_PASTE" ) || type == wxS( "SILK_SCREEN" );
+
+        if( !row.m_matrix.m_ref.IsEmpty() && keepsRef )
+        {
+            span += wxS( " REF " ) + OdbPreviewReferenceName( row.m_matrix.m_ref, m_previewRows );
+        }
+
+        bool include = !override || override->m_include;
+        m_layers->SetCellValue( gridRow, COL_INCLUDE, include ? wxString( wxS( "1" ) ) : wxString() );
+        m_layers->SetCellValue( gridRow, COL_LAYER, row.m_displayLayer );
+        m_layers->SetCellValue( gridRow, COL_NAME, name );
+        m_layers->SetCellValue( gridRow, COL_TYPE, type );
+        m_layers->SetCellValue( gridRow, COL_CONTEXT, row.m_matrix.m_context );
+        m_layers->SetCellValue( gridRow, COL_SPAN, span );
+
+        if( row.m_editable )
+        {
+            m_layers->SetCellEditor( gridRow, COL_TYPE,
+                                     new wxGridCellChoiceEditor( overridableTypeNames( row.m_boardLayer ) ) );
+        }
+        else
+        {
+            for( int col : { COL_INCLUDE, COL_NAME, COL_TYPE } )
+                m_layers->SetReadOnly( gridRow, col );
+        }
+
+        ++gridRow;
+    }
+}
+
+
+void DIALOG_EXPORT_ODBPP::harvestLayerOverrides()
+{
+    m_layers->CommitPendingChanges( true );
+
+    for( size_t index = 0; index < m_previewRows.size() && index < static_cast<size_t>( m_layers->GetNumberRows() );
+         ++index )
+    {
+        const ODB_MATRIX_PREVIEW_ROW& row = m_previewRows[index];
+
+        if( !row.m_editable )
+            continue;
+
+        int      gridRow = static_cast<int>( index );
+        wxString name = m_layers->GetCellValue( gridRow, COL_NAME );
+        wxString type = m_layers->GetCellValue( gridRow, COL_TYPE );
+
+        // Pasted text bypasses the choice editor
+        if( overridableTypeNames( row.m_boardLayer ).Index( type ) == wxNOT_FOUND )
+            type = row.m_matrix.m_type;
+
+        ODB_LAYER_OVERRIDE override;
+        override.m_layer = row.m_boardLayer;
+        override.m_include = !m_layers->GetCellValue( gridRow, COL_INCLUDE ).IsEmpty();
+        override.m_odbName = name == row.m_matrix.m_name ? wxString() : name;
+        override.m_odbType = type == row.m_matrix.m_type ? wxString() : type;
+
+        std::erase_if( m_layerOverrides,
+                       [&]( const ODB_LAYER_OVERRIDE& aCandidate )
+                       {
+                           return aCandidate.m_layer == row.m_boardLayer;
+                       } );
+
+        if( !override.m_include || !override.m_odbName.IsEmpty() || !override.m_odbType.IsEmpty() )
+            m_layerOverrides.push_back( override );
+    }
+}
+
+
+void DIALOG_EXPORT_ODBPP::updateVariantFilename()
+{
+    bool separate = m_contentPanel->GetVariantNames().size() > 1 && !m_contentPanel->IsCombinedVariantOutput();
+    bool directory = m_choiceCompress->GetSelection() == static_cast<int>( JOB_EXPORT_PCB_ODB::ODB_COMPRESSION::NONE );
+    wxString path =
+            UpdateOdbVariantOutputPath( m_outputFileName->GetValue(), directory, separate, m_autoVariantSuffix );
+    m_autoVariantSuffix = separate;
+
+    if( !path.IsEmpty() )
+        m_outputFileName->SetValue( path );
 }
 
 
@@ -132,8 +351,7 @@ void DIALOG_EXPORT_ODBPP::onBrowseClicked( wxCommandEvent& event )
     // clang-format on
 
     // Build the absolute path of current output directory to preselect it in the file browser.
-    wxString   path = ExpandEnvVarSubstitutions( m_outputFileName->GetValue(), &Prj() );
-    wxFileName fn( Prj().AbsolutePath( path ) );
+    wxFileName fn( ResolveProjectPath( m_outputFileName->GetValue(), &Prj() ) );
 
     wxFileName brdFile( m_parent->GetBoard()->GetFileName() );
 
@@ -146,7 +364,7 @@ void DIALOG_EXPORT_ODBPP::onBrowseClicked( wxCommandEvent& event )
     if( dlg.ShowModal() == wxID_CANCEL )
         return;
 
-    path = dlg.GetPath();
+    wxString path = dlg.GetPath();
 
     fn = wxFileName( path );
 
@@ -210,6 +428,7 @@ void DIALOG_EXPORT_ODBPP::OnFmtChoiceOptionChanged()
     };
 
     m_outputFileName->SetValue( fn );
+    updateVariantFilename();
 }
 
 
@@ -240,44 +459,35 @@ void DIALOG_EXPORT_ODBPP::onOKClick( wxCommandEvent& event )
         }
     }
 
-    event.Skip();
+    if( m_job )
+    {
+        event.Skip();
+        return;
+    }
+
+    harvestLayerOverrides();
+    JOB_EXPORT_PCB_ODB job;
+    populateJob( job );
+    m_messagesPanel->Clear();
+    REPORTER& reporter = m_messagesPanel->Reporter();
+
+    if( job.m_checkZonesBeforeExport )
+        m_parent->GetToolManager()->GetTool<ZONE_FILLER_TOOL>()->CheckAllZones( this );
+
+    WX_PROGRESS_REPORTER progress( this, _( "Generate ODB++ Files" ), 3, PR_CAN_ABORT );
+    ODB_EXPORT_RESULT    result = GenerateODBPPFiles( job, m_parent->GetBoard(), m_parent, &progress, &reporter );
+
+    for( const wxString& output : result.m_outputs )
+        reporter.Report( wxString::Format( _( "Generated %s" ), output ), RPT_SEVERITY_ACTION );
 }
 
 
 bool DIALOG_EXPORT_ODBPP::TransferDataFromWindow()
 {
-    if( m_job )
-    {
-        m_job->SetConfiguredOutputPath( m_outputFileName->GetValue() );
+    harvestLayerOverrides();
 
-        m_job->m_precision = m_precision->GetValue();
-        m_job->m_units = static_cast<JOB_EXPORT_PCB_ODB::ODB_UNITS>( m_choiceUnits->GetSelection() );
-        m_job->m_compressionMode = static_cast<JOB_EXPORT_PCB_ODB::ODB_COMPRESSION>( m_choiceCompress->GetSelection() );
-    }
+    if( m_job )
+        populateJob( *m_job );
 
     return true;
-}
-
-
-void DIALOG_EXPORT_ODBPP::GenerateODBPPFiles( const JOB_EXPORT_PCB_ODB& aJob, BOARD* aBoard,
-                                              PCB_EDIT_FRAME* aParentFrame, PROGRESS_REPORTER* aProgressReporter,
-                                              REPORTER* aReporter )
-{
-    // The work is in exporters/export_odbpp.cpp so that builds without dialogs can run it; all
-    // this adds is the overwrite prompt.
-    std::function<bool( const wxString& )> confirmOverwrite;
-
-    if( aParentFrame )
-    {
-        confirmOverwrite =
-                [aParentFrame]( const wxString& aMessage ) -> bool
-                {
-                    KIDIALOG dlg( aParentFrame, aMessage, _( "Confirmation" ),
-                                  wxOK | wxCANCEL | wxICON_WARNING );
-                    dlg.SetOKLabel( _( "Overwrite" ) );
-                    return dlg.ShowModal() == wxID_OK;
-                };
-    }
-
-    ExportBoardToOdbpp( aJob, aBoard, confirmOverwrite, aProgressReporter, aReporter );
 }

@@ -200,7 +200,7 @@ bool SYMBOL_EDITOR_MOVE_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, SCH_COM
 
                             got_unit[cur_pin->GetUnit()] = true;
 
-                            for( SCH_PIN* pin : symbol->GetPins() )
+                            for( SCH_PIN* pin : symbol->GetGraphicalPins( ALL_UNITS, ALL_BODY_STYLES ) )
                             {
                                 if( !got_unit[pin->GetUnit()]
                                         && pin->GetPosition() == cur_pin->GetPosition()
@@ -434,6 +434,10 @@ bool SYMBOL_EDITOR_MOVE_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, SCH_COM
         }
 
     } while( ( evt = Wait() ) );  // Assignment intentional; not equality test
+
+    // A shutdown abandons the move rather than committing it
+    if( !evt )
+        restore_state = true;
 
     controls->ForceCursorPosition( false );
     controls->ShowCursor( false );

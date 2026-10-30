@@ -71,7 +71,6 @@
 #include <dialogs/dialog_wire_bus_properties.h>
 #include <dialogs/dialog_junction_props.h>
 #include <dialogs/dialog_table_properties.h>
-#include <import_gfx/dialog_import_gfx_sch.h>
 #include <sync_sheet_pin/sheet_synchronization_agent.h>
 #include <string_utils.h>
 #include <wildcards_and_files_ext.h>
@@ -771,6 +770,11 @@ static std::optional<VECTOR2I> designBlockAnchor( const std::vector<SCH_ITEM*>& 
 
 int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
 {
+    if( m_inDrawingTool )
+        return 0;
+
+    REENTRANCY_GUARD guard( &m_inDrawingTool );
+
     COMMON_SETTINGS*      common_settings = Pgm().GetCommonSettings();
     EESCHEMA_SETTINGS*    cfg = m_frame->eeconfig();
     SCHEMATIC_SETTINGS&   schSettings = m_frame->Schematic().Settings();
@@ -795,9 +799,6 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
     RESET_FORCED_CURSOR_GUARD forcedCursorGuard{ controls };
 
     if( !cfg || !common_settings )
-        return 0;
-
-    if( m_inDrawingTool )
         return 0;
 
     bool placingDesignBlock = aEvent.IsAction( &SCH_ACTIONS::placeDesignBlock );
@@ -853,9 +854,11 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
 
                 selectionTool->ClearSelection();
 
-                // Mark all existing items on the screen so we don't select them after appending
+                // Remember existing items so we only select and commit imported items.
+                std::unordered_set<EDA_ITEM*> existingItems;
+
                 for( EDA_ITEM* item : screen->Items() )
-                    item->SetFlags( SKIP_STRUCT );
+                    existingItems.insert( item );
 
                 if( !m_frame->LoadSheetFromFile( sheetPath.Last(), &sheetPath, sheetFileName, true,
                                                  placingDesignBlock ) )
@@ -895,7 +898,7 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
                 // Select all new items
                 for( EDA_ITEM* item : screen->Items() )
                 {
-                    if( !item->HasFlag( SKIP_STRUCT ) )
+                    if( !existingItems.contains( item ) )
                     {
                         // When auto-annotating, preserve original refs so that
                         // AnnotateSymbols can build correct locked groups for
@@ -917,10 +920,6 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
                         }
 
                         commit.Added( item, screen );
-                    }
-                    else
-                    {
-                        item->ClearFlags( SKIP_STRUCT );
                     }
                 }
 
@@ -957,23 +956,7 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
                                                   true /* recursive */,
                                                   schSettings.m_AnnotateStartNum,
                                                   true /* aResetAnnotation */,
-                                                  false, false, reporter, SYMBOL_FILTER_NON_POWER );
-                    }
-
-                    if( placingDesignBlock )
-                    {
-                        NULL_REPORTER reporter;
-
-                        if( placeAsGroup )
-                            selectionTool->AddItemToSel( group );
-                        else
-                            selectionTool->AddItemsToSel( &newItems, true );
-
-                        m_frame->AnnotateSymbols( &commit, ANNOTATE_SELECTION,
-                                                  (ANNOTATE_ORDER_T) schSettings.m_AnnotateSortOrder,
-                                                  (ANNOTATE_ALGO_T) schSettings.m_AnnotateMethod, true /* recursive */,
-                                                  schSettings.m_AnnotateStartNum, true /* aResetAnnotation */, false,
-                                                  false, reporter, SYMBOL_FILTER_POWER );
+                                                  false, false, reporter );
                     }
 
                     // Annotation will clear selection, so we need to restore it
@@ -3001,6 +2984,7 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
                 {
                     sheetFields.emplace_back( sheet, FIELD_T::USER, fieldName );
                     sheetFields.back().SetText( fieldValue );
+                    sheetFields.back().SetTextPos( sheet->GetPosition() );
                     sheetFields.back().SetVisible( false );
                 }
             }
@@ -3039,6 +3023,9 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
             {
                 m_view->ClearPreview();
 
+                if( ( isDrawSheetCopy || isDrawSheetFromDesignBlock ) && cfg->m_Drawing.auto_place_sheet_pins )
+                    AutoPlaceSheetPins( sheet, GetUnplacedSheetPinLabels( *sheet ) );
+
                 sheet->AutoplaceFields( m_frame->GetScreen(), AUTOPLACE_AUTO );
 
                 // Use the commit we were provided or make our own
@@ -3054,41 +3041,21 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
                 // The cached hierarchy was built before this sheet was added.
                 m_frame->Schematic().RefreshHierarchy();
 
-                bool annotateNonPowerSymbols = cfg->m_AnnotatePanel.automatic
-                                               && !( ( isDrawSheetCopy || isDrawSheetFromDesignBlock )
-                                                     && cfg->m_DesignBlockChooserPanel.keep_annotations );
-                bool annotatePowerSymbols = isDrawSheetFromDesignBlock;
-
-                if( annotateNonPowerSymbols || annotatePowerSymbols )
+                if( cfg->m_AnnotatePanel.automatic && !( ( isDrawSheetCopy || isDrawSheetFromDesignBlock )
+                                                         && cfg->m_DesignBlockChooserPanel.keep_annotations ) )
                 {
                     // Annotation will remove this from selection, but we add it back later
                     m_selectionTool->AddItemToSel( sheet );
 
                     NULL_REPORTER reporter;
 
-                    if( annotateNonPowerSymbols )
-                    {
-                        m_frame->AnnotateSymbols( &c, ANNOTATE_SELECTION,
-                                                  (ANNOTATE_ORDER_T) schSettings.m_AnnotateSortOrder,
-                                                  (ANNOTATE_ALGO_T) schSettings.m_AnnotateMethod, true, /* recursive */
-                                                  schSettings.m_AnnotateStartNum, true,                 /* reset */
-                                                  false,                                                /* regroup */
-                                                  false,                                                /* repair */
-                                                  reporter, SYMBOL_FILTER_NON_POWER );
-                    }
-
-                    if( annotatePowerSymbols )
-                    {
-                        m_selectionTool->AddItemToSel( sheet );
-
-                        m_frame->AnnotateSymbols( &c, ANNOTATE_SELECTION,
-                                                  (ANNOTATE_ORDER_T) schSettings.m_AnnotateSortOrder,
-                                                  (ANNOTATE_ALGO_T) schSettings.m_AnnotateMethod, true, /* recursive */
-                                                  schSettings.m_AnnotateStartNum, true,                 /* reset */
-                                                  false,                                                /* regroup */
-                                                  false,                                                /* repair */
-                                                  reporter, SYMBOL_FILTER_POWER );
-                    }
+                    m_frame->AnnotateSymbols( &c, ANNOTATE_SELECTION,
+                                              (ANNOTATE_ORDER_T) schSettings.m_AnnotateSortOrder,
+                                              (ANNOTATE_ALGO_T) schSettings.m_AnnotateMethod, true, /* recursive */
+                                              schSettings.m_AnnotateStartNum, true,                 /* reset */
+                                              false,                                                /* regroup */
+                                              false,                                                /* repair */
+                                              reporter );
                 }
 
                 if( isDrawSheetFromDesignBlock && cfg->m_DesignBlockChooserPanel.place_as_group )
@@ -3181,11 +3148,21 @@ void SCH_DRAWING_TOOLS::sizeSheet( SCH_SHEET* aSheet, const VECTOR2I& aPos )
 {
     VECTOR2I pos = aSheet->GetPosition();
     VECTOR2I size = aPos - pos;
+    VECTOR2I minSize( schIUScale.MilsToIU( MIN_SHEET_WIDTH ), schIUScale.MilsToIU( MIN_SHEET_HEIGHT ) );
 
-    size.x = std::max( size.x, schIUScale.MilsToIU( MIN_SHEET_WIDTH ) );
-    size.y = std::max( size.y, schIUScale.MilsToIU( MIN_SHEET_HEIGHT ) );
+    size.x = std::max( size.x, minSize.x );
+    size.y = std::max( size.y, minSize.y );
 
     VECTOR2I grid = m_frame->GetNearestGridPosition( pos + size );
+    VECTOR2I gridSize = getView()->GetGAL()->GetGridSize();
+
+    // Keep the corner on-grid without letting inward rounding violate the minimum size.
+    if( grid.x - pos.x < minSize.x )
+        grid.x += gridSize.x;
+
+    if( grid.y - pos.y < minSize.y )
+        grid.y += gridSize.y;
+
     aSheet->Resize( VECTOR2I( grid.x - pos.x, grid.y - pos.y ) );
 }
 
@@ -3301,7 +3278,7 @@ int SCH_DRAWING_TOOLS::AutoPlaceAllSheetPins( const TOOL_EVENT& aEvent )
     if( !sheet )
         return 0;
 
-    std::vector<SCH_HIERLABEL*> labels = importHierLabels( sheet );
+    std::vector<SCH_HIERLABEL*> labels = GetUnplacedSheetPinLabels( *sheet );
 
     if( labels.empty() )
     {
@@ -3321,76 +3298,7 @@ int SCH_DRAWING_TOOLS::AutoPlaceAllSheetPins( const TOOL_EVENT& aEvent )
     SCH_COMMIT commit( m_toolMgr );
     commit.Modify( sheet, m_frame->GetScreen() );
 
-    // Vertical pitch big enough to keep pin text from touching, snapped to grid.
-    const int grid = schIUScale.MilsToIU( 50 );
-    int       textSize = sheet->Schematic()->Settings().m_DefaultTextSize;
-    int       pitch = std::max( KiROUND( textSize * 2.0 ), schIUScale.MilsToIU( 100 ) );
-    pitch = KiROUND( (double) pitch / grid ) * grid;
-
-    const int margin = pitch;
-    int       leftX = sheet->GetPosition().x;
-    int       rightX = sheet->GetPosition().x + sheet->GetSize().x;
-    int       topY = sheet->GetPosition().y;
-
-    // Stack new pins below whatever is already on each edge, without moving it.
-    int leftY = topY + margin - pitch;
-    int rightY = topY + margin - pitch;
-
-    for( SCH_SHEET_PIN* pin : sheet->GetPins() )
-    {
-        if( pin->GetSide() == SHEET_SIDE::RIGHT )
-            rightY = std::max( rightY, pin->GetPosition().y );
-        else if( pin->GetSide() == SHEET_SIDE::LEFT )
-            leftY = std::max( leftY, pin->GetPosition().y );
-    }
-
-    // New pins: outputs on the right edge, everything else on the left.
-    std::vector<SCH_HIERLABEL*> leftLabels;
-    std::vector<SCH_HIERLABEL*> rightLabels;
-
-    for( SCH_HIERLABEL* label : labels )
-    {
-        if( label->GetShape() == LABEL_FLAG_SHAPE::L_OUTPUT )
-            rightLabels.push_back( label );
-        else
-            leftLabels.push_back( label );
-    }
-
-    auto byText =
-            []( const SCH_HIERLABEL* a, const SCH_HIERLABEL* b )
-            {
-                return a->GetText() < b->GetText();
-            };
-
-    std::sort( leftLabels.begin(), leftLabels.end(), byText );
-    std::sort( rightLabels.begin(), rightLabels.end(), byText );
-
-    // Grow the sheet if the new pins would run past the bottom edge.
-    int botLeft = leftY + (int) leftLabels.size() * pitch;
-    int botRight = rightY + (int) rightLabels.size() * pitch;
-    int needBot = std::max( botLeft, botRight ) + margin;
-
-    if( needBot > topY + sheet->GetSize().y )
-        sheet->SetSize( VECTOR2I( sheet->GetSize().x, needBot - topY ) );
-
-    auto placeColumn =
-            [&]( std::vector<SCH_HIERLABEL*>& aLabels, int aX, int aStartY )
-            {
-                int y = KiROUND( (double) aStartY / grid ) * grid;
-
-                for( SCH_HIERLABEL* label : aLabels )
-                {
-                    y += pitch;
-
-                    SCH_SHEET_PIN* pin = createNewSheetPinFromLabel( sheet, VECTOR2I( aX, y ), label );
-                    pin->ClearFlags( IS_NEW | IS_MOVING );
-                    sheet->AddPin( pin );
-                    pin->AutoplaceFields( m_frame->GetScreen(), AUTOPLACE_AUTO );
-                }
-            };
-
-    placeColumn( leftLabels, leftX, leftY );
-    placeColumn( rightLabels, rightX, rightY );
+    AutoPlaceSheetPins( sheet, labels );
 
     commit.Push( _( "Auto-place Sheet Pins" ) );
     return 0;
@@ -3475,25 +3383,6 @@ SCH_HIERLABEL* SCH_DRAWING_TOOLS::importHierLabel( SCH_SHEET* aSheet )
     }
 
     return nullptr;
-}
-
-
-std::vector<SCH_HIERLABEL*> SCH_DRAWING_TOOLS::importHierLabels( SCH_SHEET* aSheet )
-{
-    if( !aSheet->GetScreen() )
-        return {};
-
-    std::vector<SCH_HIERLABEL*> labels;
-
-    for( EDA_ITEM* item : aSheet->GetScreen()->Items().OfType( SCH_HIER_LABEL_T ) )
-    {
-        SCH_HIERLABEL* label = static_cast<SCH_HIERLABEL*>( item );
-
-        if( !aSheet->HasPin( label->GetText() ) )
-            labels.push_back( label );
-    }
-
-    return labels;
 }
 
 

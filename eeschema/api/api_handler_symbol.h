@@ -20,27 +20,32 @@
 #ifndef KICAD_API_HANDLER_SYMBOL_H
 #define KICAD_API_HANDLER_SYMBOL_H
 
-#include <memory>
+#include <google/protobuf/empty.pb.h>
 
 #include <api/api_handler_editor.h>
 #include <api/api_undo_stack.h>
-#include <api/symbol_context.h>
+#include <api/common/commands/editor_commands.pb.h>
 #include <api/common/commands/project_commands.pb.h>
+#include <api/symbol_editor_context.h>
+
+using google::protobuf::Empty;
 
 class LIB_SYMBOL;
 class SCH_ITEM;
+class SYMBOL_EDIT_FRAME;
 
 
 /**
  * API handler for a library symbol document (DOCTYPE_SYMBOL).  The items of the document are the
- * symbol's children: pins, shapes, text, text boxes and fields.  Serves the generic editor
- * commands (commits, Create/Update/DeleteItems, HitTest, GetDocumentRevision) plus
- * GetOpenDocuments, GetItems, SaveDocument and SaveCopyOfDocument.
+ * symbol's children: pins, shapes, text, text boxes and fields.  Serves the symbol editor frame
+ * or, with no frame, a headless symbol context that keeps its own undo history.
  */
 class API_HANDLER_SYMBOL : public API_HANDLER_EDITOR
 {
 public:
-    API_HANDLER_SYMBOL( std::shared_ptr<SYMBOL_CONTEXT> aContext );
+    API_HANDLER_SYMBOL( SYMBOL_EDIT_FRAME* aFrame );
+    API_HANDLER_SYMBOL( std::shared_ptr<SYMBOL_EDITOR_CONTEXT> aContext,
+                        SYMBOL_EDIT_FRAME* aFrame = nullptr );
 
     std::optional<DocumentSpecifier> Document() const override;
 
@@ -52,41 +57,57 @@ protected:
         return kiapi::common::types::DOCTYPE_SYMBOL;
     }
 
-    tl::expected<bool, ApiResponseStatus> validateDocumentInternal( const DocumentSpecifier& aDocument ) const override;
-
     const EDA_IU_SCALE& getIuScale() const override { return schIUScale; }
 
-    HANDLER_RESULT<ItemRequestStatus> handleCreateUpdateItemsInternal( bool aCreate,
+    tl::expected<bool, ApiResponseStatus> validateDocumentInternal( const DocumentSpecifier& aDocument ) const override;
+
+    std::optional<EDA_ITEM*> getItemFromDocument( const DocumentSpecifier& aDocument, const KIID& aId ) override;
+
+    HANDLER_RESULT<types::ItemRequestStatus> handleCreateUpdateItemsInternal( bool aCreate,
             const std::string& aClientName,
-            const types::ItemHeader& aHeader,
+            const types::ItemHeader &aHeader,
             const google::protobuf::RepeatedPtrField<google::protobuf::Any>& aItems,
-            std::function<void( commands::ItemStatus, google::protobuf::Any )> aItemHandler ) override;
+            std::function<void( commands::ItemStatus, google::protobuf::Any )> aItemHandler )
+            override;
 
     void deleteItemsInternal( std::map<KIID, ItemDeletionStatus>& aItemsToDelete,
                               const std::string& aClientName ) override;
 
-    std::optional<EDA_ITEM*> getItemFromDocument( const DocumentSpecifier& aDocument, const KIID& aId ) override;
+    void onModified() override;
 
-private:
-    HANDLER_RESULT<commands::GetOpenDocumentsResponse> handleGetOpenDocuments(
-            const HANDLER_CONTEXT<commands::GetOpenDocuments>& aCtx );
+    void pushCurrentCommit( const std::string& aClientName, const wxString& aMessage ) override;
 
-    HANDLER_RESULT<google::protobuf::Empty> handleSaveDocument(
-            const HANDLER_CONTEXT<commands::SaveDocument>& aCtx );
+    HANDLER_RESULT<commands::GetDocumentModifiedStateResponse>
+    handleGetDocumentModifiedState( const HANDLER_CONTEXT<commands::GetDocumentModifiedState>& aCtx ) override;
 
-    HANDLER_RESULT<google::protobuf::Empty> handleSaveCopyOfDocument(
-            const HANDLER_CONTEXT<commands::SaveCopyOfDocument>& aCtx );
+    SYMBOL_EDITOR_CONTEXT* context() const { return m_context.get(); }
 
-    HANDLER_RESULT<commands::GetItemsResponse> handleGetItems( const HANDLER_CONTEXT<commands::GetItems>& aCtx );
+    LIB_SYMBOL* symbol() const { return context()->GetCurSymbol(); }
+
+    SYMBOL_EDIT_FRAME* frame() const;
 
     std::map<KICAD_T, uint32_t> countItems( const DocumentSpecifier& aDocument ) override;
 
+    API_UNDO_STACK* apiUndoStack() const override { return m_undoStack.get(); }
+
+private:
+    HANDLER_RESULT<Empty> handleOpenLibraryItem( const HANDLER_CONTEXT<commands::OpenLibraryItem>& aCtx );
+
+    HANDLER_RESULT<commands::GetOpenDocumentsResponse> handleGetOpenDocuments(
+            const HANDLER_CONTEXT<commands::GetOpenDocuments>& aCtx );
+
+    HANDLER_RESULT<Empty> handleSaveDocument( const HANDLER_CONTEXT<commands::SaveDocument>& aCtx );
+
+    HANDLER_RESULT<Empty> handleSaveCopyOfDocument(
+            const HANDLER_CONTEXT<commands::SaveCopyOfDocument>& aCtx );
+
+    HANDLER_RESULT<Empty> handleRevertDocument( const HANDLER_CONTEXT<commands::RevertDocument>& aCtx );
+
+    HANDLER_RESULT<commands::GetItemsResponse> handleGetItems(
+            const HANDLER_CONTEXT<commands::GetItems>& aCtx );
+
     HANDLER_RESULT<commands::GetItemsResponse> handleGetItemsById(
             const HANDLER_CONTEXT<commands::GetItemsById>& aCtx );
-
-    LIB_SYMBOL* symbol() const { return m_context->GetSymbol(); }
-
-    API_UNDO_STACK* apiUndoStack() const override { return m_undoStack.get(); }
 
     /// Put the symbol back into the state an undo list records; see API_UNDO_STACK::RESTORE_FN
     void restoreUndoList( PICKED_ITEMS_LIST& aList );
@@ -94,10 +115,12 @@ private:
     /// @return the child of the symbol with the given id, or nullptr
     SCH_ITEM* findItem( const KIID& aId ) const;
 
-    std::shared_ptr<SYMBOL_CONTEXT> m_context;
+    std::shared_ptr<SYMBOL_EDITOR_CONTEXT> m_context;
+    static std::set<KICAD_T>               s_allowedTypes;
 
-    /// The document's undo history (headless only; symbol documents have no editor window here)
+    /// The document's undo history when there is no editor frame to keep it
     std::unique_ptr<API_UNDO_STACK> m_undoStack;
 };
 
-#endif // KICAD_API_HANDLER_SYMBOL_H
+
+#endif //KICAD_API_HANDLER_SYMBOL_H

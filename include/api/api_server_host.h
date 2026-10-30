@@ -94,8 +94,13 @@ private:
     {
         kiapi::common::types::DocumentType type;
         wxString                           fileName;
+        wxString                           specPath; ///< Full path of a file-backed document
         LIB_ID                             libId;
     };
+
+    /// Follow a board or schematic saved under a new name (SaveDocumentAs)
+    void onDocumentRenamed( kiapi::common::types::DocumentType aType, const wxString& aOldPath,
+                            const wxString& aNewPath );
 
     static KIWAY::FACE_T faceForDocument( kiapi::common::types::DocumentType aType );
 

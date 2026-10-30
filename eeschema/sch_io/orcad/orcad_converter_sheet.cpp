@@ -130,6 +130,25 @@ std::optional<std::chrono::sys_days> orcadCalendarDay( uint32_t aTimestamp )
 }
 
 
+/** "January 02, 2006", or "Jan 02, 2006" with aShortMonth */
+static std::string orcadMonthDayYear( std::chrono::sys_days aDate, bool aShortMonth )
+{
+    static constexpr std::array<const char*, 12> months = { "January",   "February", "March",    "April",
+                                                             "May",       "June",     "July",     "August",
+                                                             "September", "October",  "November", "December" };
+
+    std::chrono::year_month_day ymd( aDate );
+    std::string                 month = months[static_cast<unsigned>( ymd.month() ) - 1];
+
+    if( aShortMonth )
+        month.resize( 3 );
+
+    return month
+           + wxString::Format( wxS( " %02u, %d" ), static_cast<unsigned>( ymd.day() ), static_cast<int>( ymd.year() ) )
+                     .ToStdString();
+}
+
+
 std::string orcadCalendarDate( uint32_t aTimestamp )
 {
     using namespace std::chrono;
@@ -139,39 +158,17 @@ std::string orcadCalendarDate( uint32_t aTimestamp )
     if( !date )
         return {};
 
-    year_month_day ymd( *date );
-    weekday        day( *date );
-
     static constexpr std::array<const char*, 7> weekdays = { "Sunday",   "Monday", "Tuesday", "Wednesday",
-                                                              "Thursday", "Friday", "Saturday" };
-    static constexpr std::array<const char*, 12> months = { "January",   "February", "March",    "April",
-                                                             "May",       "June",     "July",     "August",
-                                                             "September", "October",  "November", "December" };
+                                                             "Thursday", "Friday", "Saturday" };
 
-    return std::string( weekdays[day.c_encoding()] ) + ", " + months[static_cast<unsigned>( ymd.month() ) - 1]
-           + wxString::Format( wxS( " %02u, %d" ), static_cast<unsigned>( ymd.day() ),
-                               static_cast<int>( ymd.year() ) )
-                     .ToStdString();
+    return std::string( weekdays[weekday( *date ).c_encoding()] ) + ", " + orcadMonthDayYear( *date, false );
 }
 
 
 std::string orcadShortCalendarDate( uint32_t aTimestamp )
 {
-    using namespace std::chrono;
-
-    std::optional<sys_days> date = orcadCalendarDay( aTimestamp );
-
-    if( !date )
-        return {};
-
-    year_month_day ymd( *date );
-    static constexpr std::array<const char*, 12> months = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                                                             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-
-    return months[static_cast<unsigned>( ymd.month() ) - 1]
-           + wxString::Format( wxS( " %02u, %d" ), static_cast<unsigned>( ymd.day() ),
-                               static_cast<int>( ymd.year() ) )
-                     .ToStdString();
+    std::optional<std::chrono::sys_days> date = orcadCalendarDay( aTimestamp );
+    return date ? orcadMonthDayYear( *date, true ) : std::string();
 }
 
 
@@ -236,6 +233,18 @@ static std::string generatedPinNetName( uint32_t aInstanceId, size_t aPinIndex )
         instance.insert( 0, 5 - instance.size(), '0' );
 
     return "N" + instance + std::to_string( aPinIndex );
+}
+
+
+/** Capture's generated net names are N followed only by digits */
+bool isImplicitGeneratedName( const std::string& aName )
+{
+    return aName.size() > 1 && aName[0] == 'N'
+           && std::all_of( aName.begin() + 1, aName.end(),
+                           []( unsigned char c )
+                           {
+                               return std::isdigit( c );
+                           } );
 }
 
 
@@ -317,6 +326,53 @@ VECTOR2I dbuPointToIu( double aX, double aY )
 } // namespace
 
 
+void OrcadTransformPrimitivePoints( ORCAD_PRIMITIVE&                                        aPrim,
+                                    const std::function<ORCAD_POINT( const ORCAD_POINT& )>& aMap )
+{
+    for( ORCAD_POINT& point : aPrim.points )
+        point = aMap( point );
+
+    if( aPrim.start )
+        aPrim.start = aMap( *aPrim.start );
+
+    if( aPrim.end )
+        aPrim.end = aMap( *aPrim.end );
+}
+
+
+void OrcadOffsetPrimitive( ORCAD_PRIMITIVE& aPrim, int aDx, int aDy )
+{
+    aPrim.x1 += aDx;
+    aPrim.y1 += aDy;
+    aPrim.x2 += aDx;
+    aPrim.y2 += aDy;
+    OrcadTransformPrimitivePoints( aPrim,
+                                   [&]( const ORCAD_POINT& aPoint )
+                                   {
+                                       return ORCAD_POINT{ aPoint.x + aDx, aPoint.y + aDy };
+                                   } );
+}
+
+
+void OrcadForEachLeafPrimitive( const std::vector<ORCAD_PRIMITIVE>&                            aPrimitives,
+                                const std::function<void( const ORCAD_PRIMITIVE&, int, int )>& aVisit )
+{
+    std::function<void( const std::vector<ORCAD_PRIMITIVE>&, int, int )> visit =
+            [&]( const std::vector<ORCAD_PRIMITIVE>& aList, int aOffsetX, int aOffsetY )
+    {
+        for( const ORCAD_PRIMITIVE& primitive : aList )
+        {
+            if( primitive.kind == ORCAD_PRIM_KIND::GROUP_PRIM )
+                visit( primitive.children, aOffsetX + primitive.x1, aOffsetY + primitive.y1 );
+            else
+                aVisit( primitive, aOffsetX, aOffsetY );
+        }
+    };
+
+    visit( aPrimitives, 0, 0 );
+}
+
+
 VECTOR2I OrcadStretchedImageSize( int aWidth, int aHeight, int aBoxWidth, int aBoxHeight )
 {
     if( aWidth <= 0 || aHeight <= 0 || aBoxWidth <= 0 || aBoxHeight <= 0 )
@@ -384,6 +440,98 @@ KIID ORCAD_CONVERTER::deterministicUuid( const std::string& aRole, size_t aOrdin
 }
 
 
+void ORCAD_CONVERTER::assignPinUuids( SCH_SYMBOL* aSymbol, const std::string& aRole ) const
+{
+    std::map<std::string, size_t> pinOrdinals;
+
+    for( const std::unique_ptr<SCH_PIN>& ownedPin : aSymbol->GetRawPins() )
+    {
+        SCH_PIN*    pin = ownedPin.get();
+        VECTOR2I    position = pin->GetPosition();
+        std::string pinRole = std::string( pin->GetNumber().ToUTF8() ) + ":" + std::string( pin->GetName().ToUTF8() )
+                              + ":" + std::to_string( position.x ) + ":" + std::to_string( position.y );
+        size_t pinOrdinal = pinOrdinals[pinRole]++;
+        const_cast<KIID&>( pin->m_Uuid ) = deterministicUuid( aRole + ":pin:" + pinRole, pinOrdinal );
+    }
+
+    std::sort( aSymbol->GetRawPins().begin(), aSymbol->GetRawPins().end(),
+               []( const std::unique_ptr<SCH_PIN>& a, const std::unique_ptr<SCH_PIN>& b )
+               {
+                   return a->m_Uuid < b->m_Uuid;
+               } );
+}
+
+
+SCH_SCREEN* ORCAD_CONVERTER::newScreen()
+{
+    SCH_SCREEN* screen = new SCH_SCREEN( m_schematic );
+    const_cast<KIID&>( screen->GetUuid() ) = deterministicUuid( "screen", m_screenOrdinal++ );
+    m_importedScreens.insert( screen );
+    return screen;
+}
+
+
+void ORCAD_CONVERTER::assignRemainingUuids()
+{
+    SCH_SHEET_LIST sheets = m_schematic->BuildSheetListSortedByPageNumbers();
+
+    // A sheet loaded from a file is not yet part of the schematic it is loaded into
+    if( !sheets.ContainsSheet( m_rootSheet ) )
+    {
+        SCH_SHEET_LIST detached( m_rootSheet );
+        sheets.insert( sheets.end(), detached.begin(), detached.end() );
+        sheets.SortByPageNumbers();
+    }
+
+    std::set<SCH_SCREEN*> visited;
+    size_t                screenOrdinal = 0;
+
+    for( const SCH_SHEET_PATH& path : sheets )
+    {
+        SCH_SCREEN* screen = path.LastScreen();
+
+        if( !m_importedScreens.count( screen ) || !visited.insert( screen ).second )
+            continue;
+
+        std::map<std::string, size_t> ordinals;
+
+        for( SCH_ITEM* item : screen->Items() )
+        {
+            std::string uuid = item->m_Uuid.AsStdString();
+
+            // Assembling a native power package replaces a placed symbol's pins after page conversion
+            if( item->Type() == SCH_SYMBOL_T && !m_preExistingItems.count( item ) )
+            {
+                SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+
+                if( std::any_of( symbol->GetRawPins().begin(), symbol->GetRawPins().end(),
+                                 []( const std::unique_ptr<SCH_PIN>& aPin )
+                                 {
+                                     return aPin->m_Uuid.AsStdString()[14] != '5';
+                                 } ) )
+                {
+                    assignPinUuids( symbol, "post-pin:" + uuid );
+                }
+            }
+
+            // Name-based (version 5) UUIDs were assigned during conversion
+            if( ( uuid.size() > 14 && uuid[14] == '5' ) || m_preExistingItems.count( item ) )
+                continue;
+
+            VECTOR2I    position = item->GetPosition();
+            std::string role = std::to_string( static_cast<int>( item->Type() ) ) + ":" + std::to_string( position.x )
+                               + ":" + std::to_string( position.y );
+            size_t      ordinal = ordinals[role]++;
+            const_cast<KIID&>( item->m_Uuid ) =
+                    KIID::FromName( "orcad-import:" + m_design.sourceId + ":post:" + std::to_string( screenOrdinal )
+                                    + ":" + role + ":" + std::to_string( ordinal ) );
+        }
+
+        ++screenOrdinal;
+    }
+}
+
+
 void ORCAD_CONVERTER::appendPageItem( SCH_SCREEN* aScreen, SCH_ITEM* aItem )
 {
     if( aScreen == m_pageItemScreen )
@@ -408,28 +556,7 @@ void ORCAD_CONVERTER::assignPageItemUuids( size_t aPageOrdinal )
         const_cast<KIID&>( item->m_Uuid ) = deterministicUuid( role, ordinal );
 
         if( item->Type() == SCH_SYMBOL_T )
-        {
-            SCH_SYMBOL*                   symbol = static_cast<SCH_SYMBOL*>( item );
-            std::map<std::string, size_t> pinOrdinals;
-
-            for( const std::unique_ptr<SCH_PIN>& ownedPin : symbol->GetRawPins() )
-            {
-                SCH_PIN*    pin = ownedPin.get();
-                VECTOR2I    position = pin->GetPosition();
-                std::string pinRole = std::string( pin->GetNumber().ToUTF8() ) + ":"
-                                      + std::string( pin->GetName().ToUTF8() ) + ":" + std::to_string( position.x )
-                                      + ":" + std::to_string( position.y );
-                size_t pinOrdinal = pinOrdinals[pinRole]++;
-                const_cast<KIID&>( pin->m_Uuid ) =
-                        deterministicUuid( role + ":" + std::to_string( ordinal ) + ":pin:" + pinRole, pinOrdinal );
-            }
-
-            std::sort( symbol->GetRawPins().begin(), symbol->GetRawPins().end(),
-                       []( const std::unique_ptr<SCH_PIN>& a, const std::unique_ptr<SCH_PIN>& b )
-                       {
-                           return a->m_Uuid < b->m_Uuid;
-                       } );
-        }
+            assignPinUuids( static_cast<SCH_SYMBOL*>( item ), role + ":" + std::to_string( ordinal ) );
     }
 }
 
@@ -450,20 +577,10 @@ void ORCAD_CONVERTER::note( const wxString& aMsg )
 
 void ORCAD_CONVERTER::prepareGlobalNetNames()
 {
-    auto lowerName = []( std::string aName )
-    {
-        std::transform( aName.begin(), aName.end(), aName.begin(),
-                        []( unsigned char c )
-                        {
-                            return static_cast<char>( std::tolower( c ) );
-                        } );
-        return aName;
-    };
-
     auto addName = [&]( const std::string& aName )
     {
         std::string name = trimmed( aName );
-        std::string key = lowerName( name );
+        std::string key = OrcadLower( name );
 
         if( !key.empty() )
             m_globalNetNames.emplace( std::move( key ), std::move( name ) );
@@ -479,7 +596,7 @@ void ORCAD_CONVERTER::prepareGlobalNetNames()
             std::string powerName = !displayName.empty() ? displayName : logicalName;
             addName( powerName );
 
-            powerName = lowerName( powerName );
+            powerName = OrcadLower( powerName );
 
             if( !powerName.empty() )
                 m_powerNetNames.insert( std::move( powerName ) );
@@ -489,12 +606,7 @@ void ORCAD_CONVERTER::prepareGlobalNetNames()
         {
             addName( offpage.logicalName );
 
-            std::string key = trimmed( offpage.logicalName );
-            std::transform( key.begin(), key.end(), key.begin(),
-                            []( unsigned char c )
-                            {
-                                return static_cast<char>( std::tolower( c ) );
-                            } );
+            std::string key = OrcadLower( trimmed( offpage.logicalName ) );
 
             if( !key.empty() )
                 m_offpageNetNames.insert( std::move( key ) );
@@ -504,27 +616,14 @@ void ORCAD_CONVERTER::prepareGlobalNetNames()
             addName( port.logicalName.empty() ? port.name : port.logicalName );
     };
 
-    for( const ORCAD_RAW_PAGE& page : m_design.pages )
-        addPage( page );
-
-    for( const auto& [folder, pages] : m_design.childFolderPages )
-    {
-        for( const ORCAD_RAW_PAGE& page : pages )
-            addPage( page );
-    }
-
+    forEachDesignPage( addPage );
 }
 
 
 std::string ORCAD_CONVERTER::canonicalGlobalNetName( const std::string& aName ) const
 {
     std::string name = trimmed( aName );
-    std::string key = name;
-    std::transform( key.begin(), key.end(), key.begin(),
-                    []( unsigned char c )
-                    {
-                        return static_cast<char>( std::tolower( c ) );
-                    } );
+    std::string key = OrcadLower( name );
 
     auto alias = m_globalNetAliases.find( key );
 
@@ -536,61 +635,57 @@ std::string ORCAD_CONVERTER::canonicalGlobalNetName( const std::string& aName ) 
 }
 
 
+std::string ORCAD_CONVERTER::canonicalGlobalNetKey( const std::string& aName ) const
+{
+    return OrcadLower( canonicalGlobalNetName( aName ) );
+}
+
+
 std::string ORCAD_CONVERTER::effectiveInterfaceNetName( const std::string& aName ) const
 {
     std::string name = canonicalGlobalNetName( aName );
-    std::string key = name;
-    std::transform( key.begin(), key.end(), key.begin(),
-                    []( unsigned char c )
-                    {
-                        return static_cast<char>( std::tolower( c ) );
-                    } );
+    std::string key = OrcadLower( name );
 
-    auto effective = m_currentInterfaceNetAliases.find( key );
-    return effective != m_currentInterfaceNetAliases.end() ? effective->second : name;
+    auto effective = m_scope.interfaceNetAliases.find( key );
+    return effective != m_scope.interfaceNetAliases.end() ? effective->second : name;
+}
+
+
+void ORCAD_CONVERTER::enterScope( PAGE_SCOPE aScope )
+{
+    m_netIndex = PAGE_NET_INDEX();
+    m_scope = std::move( aScope );
+    m_scope.electricalKeyCounts.clear();
+
+    if( m_scope.occ )
+    {
+        for( const auto& [occurrenceId, name] : m_scope.occ->netNames )
+            ++m_scope.electricalKeyCounts[OrcadLower( occurrenceBaseNetName( name ) )];
+    }
+}
+
+
+std::string ORCAD_CONVERTER::occurrenceBaseNetName( const std::string& aName ) const
+{
+    std::string name = kicadOccurrenceNetName( aName );
+    std::string key = OrcadLower( name );
+    auto        occurrenceAlias = m_scope.occurrenceNetAliases.find( key );
+
+    if( occurrenceAlias != m_scope.occurrenceNetAliases.end() )
+        return occurrenceAlias->second;
+
+    auto interfaceAlias = m_scope.interfaceNetAliases.find( key );
+    return interfaceAlias != m_scope.interfaceNetAliases.end() ? interfaceAlias->second : name;
 }
 
 
 std::string ORCAD_CONVERTER::occurrenceElectricalNetName( uint32_t aOccurrenceId,
                                                           const std::string& aName ) const
 {
-    auto lower = []( std::string aValue )
-    {
-        std::transform( aValue.begin(), aValue.end(), aValue.begin(),
-                        []( unsigned char c )
-                        {
-                            return static_cast<char>( std::tolower( c ) );
-                        } );
-        return aValue;
-    };
+    std::string electricalName = occurrenceBaseNetName( aName );
+    auto        peers = m_scope.electricalKeyCounts.find( OrcadLower( electricalName ) );
 
-    auto baseName = [&]( const std::string& aValue )
-    {
-        std::string name = kicadOccurrenceNetName( aValue );
-        std::string key = lower( name );
-        auto occurrenceAlias = m_currentOccurrenceNetAliases.find( key );
-
-        if( occurrenceAlias != m_currentOccurrenceNetAliases.end() )
-            return occurrenceAlias->second;
-
-        auto interfaceAlias = m_currentInterfaceNetAliases.find( key );
-        return interfaceAlias != m_currentInterfaceNetAliases.end() ? interfaceAlias->second : name;
-    };
-
-    std::string electricalName = baseName( aName );
-    std::string electricalKey = lower( electricalName );
-    size_t      peerCount = 0;
-
-    if( m_currentOccNetNames )
-    {
-        peerCount = std::count_if( m_currentOccNetNames->begin(), m_currentOccNetNames->end(),
-                                   [&]( const auto& aOccurrence )
-                                   {
-                                       return lower( baseName( aOccurrence.second ) ) == electricalKey;
-                                   } );
-    }
-
-    if( peerCount > 1 )
+    if( peers != m_scope.electricalKeyCounts.end() && peers->second > 1 )
     {
         std::string suffix = std::to_string( aOccurrenceId );
 
@@ -606,24 +701,14 @@ std::string ORCAD_CONVERTER::occurrenceElectricalNetName( uint32_t aOccurrenceId
 
 bool ORCAD_CONVERTER::isOffpageNetName( const std::string& aName ) const
 {
-    std::string key = trimmed( aName );
-    std::transform( key.begin(), key.end(), key.begin(),
-                    []( unsigned char c )
-                    {
-                        return static_cast<char>( std::tolower( c ) );
-                    } );
+    std::string key = OrcadLower( trimmed( aName ) );
     return m_offpageNetNames.count( key );
 }
 
 
 bool ORCAD_CONVERTER::isPowerNetName( const std::string& aName ) const
 {
-    std::string key = trimmed( aName );
-    std::transform( key.begin(), key.end(), key.begin(),
-                    []( unsigned char c )
-                    {
-                        return static_cast<char>( std::tolower( c ) );
-                    } );
+    std::string key = OrcadLower( trimmed( aName ) );
     return m_powerNetNames.count( key );
 }
 
@@ -696,7 +781,30 @@ static std::string scopedHierBusName( const std::string& aName, uint32_t aOccurr
 }
 
 
-static bool parseVectorBusName( const std::string& aName, std::string& aPrefix, int& aFirst, int& aLast )
+/** A vector bus name "PREFIX[first..last]" (or ':' as separator); last may be below first */
+struct BUS_RANGE
+{
+    std::string prefix;
+    int         first = 0;
+    int         last = 0;
+
+    static std::optional<BUS_RANGE> Parse( const std::string& aName );
+
+    int64_t Count() const { return std::abs( static_cast<int64_t>( last ) - first ) + 1; }
+    int     Step() const { return last >= first ? 1 : -1; }
+
+    /** Position of aIndex within the range, or nullopt outside it */
+    std::optional<int64_t> Ordinal( int64_t aIndex ) const
+    {
+        int64_t ordinal = ( aIndex - first ) * Step();
+        return ordinal >= 0 && ordinal < Count() ? std::optional<int64_t>( ordinal ) : std::nullopt;
+    }
+
+    int64_t At( int64_t aOrdinal ) const { return first + aOrdinal * Step(); }
+};
+
+
+std::optional<BUS_RANGE> BUS_RANGE::Parse( const std::string& aName )
 {
     size_t open = aName.find( '[' );
     size_t dots = open == std::string::npos ? std::string::npos : aName.find( "..", open + 1 );
@@ -711,7 +819,7 @@ static bool parseVectorBusName( const std::string& aName, std::string& aPrefix, 
     size_t close = dots == std::string::npos ? std::string::npos : aName.find( ']', dots + separatorSize );
 
     if( open == std::string::npos || dots == std::string::npos || close != aName.size() - 1 )
-        return false;
+        return std::nullopt;
 
     auto parseIndex = []( std::string_view aText, int& aValue )
     {
@@ -721,54 +829,55 @@ static bool parseVectorBusName( const std::string& aName, std::string& aPrefix, 
         return error == std::errc() && next == end;
     };
 
-    if( !parseIndex( std::string_view( aName ).substr( open + 1, dots - open - 1 ), aFirst )
+    BUS_RANGE range;
+
+    if( !parseIndex( std::string_view( aName ).substr( open + 1, dots - open - 1 ), range.first )
         || !parseIndex( std::string_view( aName ).substr( dots + separatorSize, close - dots - separatorSize ),
-                        aLast ) )
+                        range.last ) )
     {
-        return false;
+        return std::nullopt;
     }
 
-    aPrefix = aName.substr( 0, open );
-    return true;
+    range.prefix = aName.substr( 0, open );
+    return range;
 }
 
 
-static std::string scopedHierBusMember( const std::string& aName,
-                                        const std::map<std::string, std::string>& aBusNames )
+/** Only renames whose source and scoped ranges have the same length map member by member */
+static std::vector<std::pair<BUS_RANGE, BUS_RANGE>>
+scopedBusRanges( const std::map<std::string, std::string>& aBusNames )
 {
+    std::vector<std::pair<BUS_RANGE, BUS_RANGE>> ranges;
+
     for( const auto& [sourceBus, scopedBus] : aBusNames )
     {
-        std::string sourcePrefix;
-        std::string scopedPrefix;
-        int         sourceFirst;
-        int         sourceLast;
-        int         scopedFirst;
-        int         scopedLast;
+        std::optional<BUS_RANGE> source = BUS_RANGE::Parse( sourceBus );
+        std::optional<BUS_RANGE> scoped = BUS_RANGE::Parse( scopedBus );
 
-        if( !parseVectorBusName( sourceBus, sourcePrefix, sourceFirst, sourceLast )
-            || !parseVectorBusName( scopedBus, scopedPrefix, scopedFirst, scopedLast )
-            || aName.compare( 0, sourcePrefix.size(), sourcePrefix ) != 0 )
-        {
+        if( source && scoped && source->Count() == scoped->Count() )
+            ranges.emplace_back( std::move( *source ), std::move( *scoped ) );
+    }
+
+    return ranges;
+}
+
+
+static std::string scopedHierBusMember( const std::string& aName, const std::map<std::string, std::string>& aBusNames )
+{
+    for( const auto& [source, scoped] : scopedBusRanges( aBusNames ) )
+    {
+        if( aName.compare( 0, source.prefix.size(), source.prefix ) != 0 )
             continue;
-        }
 
         int              member;
-        std::string_view suffix( aName.data() + sourcePrefix.size(), aName.size() - sourcePrefix.size() );
+        std::string_view suffix( aName.data() + source.prefix.size(), aName.size() - source.prefix.size() );
         auto [next, error] = std::from_chars( suffix.data(), suffix.data() + suffix.size(), member );
 
         if( suffix.empty() || error != std::errc() || next != suffix.data() + suffix.size() )
             continue;
 
-        int sourceStep = sourceLast >= sourceFirst ? 1 : -1;
-        int scopedStep = scopedLast >= scopedFirst ? 1 : -1;
-        int64_t ordinal = ( static_cast<int64_t>( member ) - sourceFirst ) * sourceStep;
-        int64_t sourceCount = std::abs( static_cast<int64_t>( sourceLast ) - sourceFirst ) + 1;
-        int64_t scopedCount = std::abs( static_cast<int64_t>( scopedLast ) - scopedFirst ) + 1;
-
-        if( ordinal < 0 || ordinal >= sourceCount || sourceCount != scopedCount )
-            continue;
-
-        return scopedPrefix + std::to_string( scopedFirst + ordinal * scopedStep );
+        if( std::optional<int64_t> ordinal = source.Ordinal( member ) )
+            return scoped.prefix + std::to_string( scoped.At( *ordinal ) );
     }
 
     return aName;
@@ -777,44 +886,24 @@ static std::string scopedHierBusMember( const std::string& aName,
 
 static std::string scopedHierBusRange( const std::string& aName, const std::map<std::string, std::string>& aBusNames )
 {
-    std::string memberPrefix;
-    int         memberFirst;
-    int         memberLast;
+    std::optional<BUS_RANGE> member = BUS_RANGE::Parse( aName );
 
-    if( !parseVectorBusName( aName, memberPrefix, memberFirst, memberLast ) )
+    if( !member )
         return aName;
 
-    for( const auto& [sourceBus, scopedBus] : aBusNames )
+    for( const auto& [source, scoped] : scopedBusRanges( aBusNames ) )
     {
-        std::string sourcePrefix;
-        std::string scopedPrefix;
-        int         sourceFirst;
-        int         sourceLast;
-        int         scopedFirst;
-        int         scopedLast;
-
-        if( !parseVectorBusName( sourceBus, sourcePrefix, sourceFirst, sourceLast )
-            || !parseVectorBusName( scopedBus, scopedPrefix, scopedFirst, scopedLast ) || memberPrefix != sourcePrefix )
-        {
+        if( member->prefix != source.prefix )
             continue;
-        }
 
-        int sourceStep = sourceLast >= sourceFirst ? 1 : -1;
-        int scopedStep = scopedLast >= scopedFirst ? 1 : -1;
-        int64_t sourceCount = std::abs( static_cast<int64_t>( sourceLast ) - sourceFirst ) + 1;
-        int64_t scopedCount = std::abs( static_cast<int64_t>( scopedLast ) - scopedFirst ) + 1;
-        int64_t firstOrdinal = ( static_cast<int64_t>( memberFirst ) - sourceFirst ) * sourceStep;
-        int64_t lastOrdinal = ( static_cast<int64_t>( memberLast ) - sourceFirst ) * sourceStep;
+        std::optional<int64_t> firstOrdinal = source.Ordinal( member->first );
+        std::optional<int64_t> lastOrdinal = source.Ordinal( member->last );
 
-        if( sourceCount != scopedCount || firstOrdinal < 0 || firstOrdinal >= sourceCount || lastOrdinal < 0
-            || lastOrdinal >= sourceCount )
+        if( firstOrdinal && lastOrdinal )
         {
-            continue;
+            return scoped.prefix + "[" + std::to_string( scoped.At( *firstOrdinal ) ) + ".."
+                   + std::to_string( scoped.At( *lastOrdinal ) ) + "]";
         }
-
-        int64_t mappedFirst = scopedFirst + firstOrdinal * scopedStep;
-        int64_t mappedLast = scopedFirst + lastOrdinal * scopedStep;
-        return scopedPrefix + "[" + std::to_string( mappedFirst ) + ".." + std::to_string( mappedLast ) + "]";
     }
 
     return aName;
@@ -877,10 +966,10 @@ static bool rawBusSegmentsTouch( const ORCAD_WIRE& aFirst, const ORCAD_WIRE& aSe
 }
 
 
-static std::set<std::string> busPrefixTokens( const std::string& aPrefix )
+static std::vector<std::string> busPrefixRuns( const std::string& aPrefix )
 {
-    std::set<std::string> result;
-    size_t                start = 0;
+    std::vector<std::string> runs;
+    size_t                   start = 0;
 
     while( start < aPrefix.size() )
     {
@@ -892,10 +981,24 @@ static std::set<std::string> busPrefixTokens( const std::string& aPrefix )
         while( end < aPrefix.size() && std::isalnum( static_cast<unsigned char>( aPrefix[end] ) ) )
             ++end;
 
-        if( end - start > 1 )
-            result.insert( aPrefix.substr( start, end - start ) );
+        if( end > start )
+            runs.push_back( aPrefix.substr( start, end - start ) );
 
         start = end;
+    }
+
+    return runs;
+}
+
+
+static std::set<std::string> busPrefixTokens( const std::string& aPrefix )
+{
+    std::set<std::string> result;
+
+    for( std::string& run : busPrefixRuns( aPrefix ) )
+    {
+        if( run.size() > 1 )
+            result.insert( std::move( run ) );
     }
 
     return result;
@@ -904,31 +1007,97 @@ static std::set<std::string> busPrefixTokens( const std::string& aPrefix )
 
 static std::string firstBusPrefixToken( const std::string& aPrefix )
 {
-    size_t start = 0;
+    std::vector<std::string> runs = busPrefixRuns( aPrefix );
+    return !runs.empty() && runs.front().size() > 1 ? runs.front() : std::string();
+}
 
-    while( start < aPrefix.size() && !std::isalnum( static_cast<unsigned char>( aPrefix[start] ) ) )
-        ++start;
 
-    size_t end = start;
+static std::set<std::string> pageNetNames( const ORCAD_RAW_PAGE& aPage, uint32_t aNetId )
+{
+    std::set<std::string> names;
+    auto                  net = aPage.netmap.find( aNetId );
 
-    while( end < aPrefix.size() && std::isalnum( static_cast<unsigned char>( aPrefix[end] ) ) )
-        ++end;
+    if( net != aPage.netmap.end() )
+        names.insert( net->second );
 
-    return end - start > 1 ? aPrefix.substr( start, end - start ) : std::string();
+    auto aliases = aPage.netAliases.find( aNetId );
+
+    if( aliases != aPage.netAliases.end() )
+        names.insert( aliases->second.begin(), aliases->second.end() );
+
+    return names;
+}
+
+
+static std::set<uint32_t> pageNetIdsNamed( const ORCAD_RAW_PAGE& aPage, std::string_view aName )
+{
+    std::set<uint32_t> netIds;
+
+    for( const auto& [netId, primaryName] : aPage.netmap )
+    {
+        std::set<std::string> names = pageNetNames( aPage, netId );
+
+        if( std::any_of( names.begin(), names.end(),
+                         [&]( const std::string& aNetName )
+                         {
+                             return OrcadIEquals( aNetName, aName );
+                         } ) )
+        {
+            netIds.insert( netId );
+        }
+    }
+
+    return netIds;
+}
+
+
+std::set<const std::string*>
+ORCAD_CONVERTER::pinOccurrenceTargets( const ORCAD_RAW_PAGE& aPage, const ORCAD_BLOCK_PIN& aPin,
+                                       const std::map<uint32_t, std::string>& aScopeNets, bool aSkipGenerated,
+                                       std::set<std::string>* aSourceKeys ) const
+{
+    std::set<std::string> sourceKeys = { canonicalGlobalNetKey( aPin.name ) };
+    std::set<uint32_t>    wireObjectIds;
+
+    for( const ORCAD_WIRE& wire : aPage.wires )
+    {
+        if( wire.isBus || !rawPointOnSegment( aPin.x, aPin.y, wire ) )
+            continue;
+
+        wireObjectIds.insert( wire.dbId );
+
+        for( const std::string& name : pageNetNames( aPage, wire.id ) )
+            sourceKeys.insert( canonicalGlobalNetKey( name ) );
+    }
+
+    std::set<const std::string*> targets;
+
+    for( const auto& [occurrenceId, occurrenceName] : aScopeNets )
+    {
+        bool matches = sourceKeys.count( canonicalGlobalNetKey( occurrenceName ) );
+
+        if( std::optional<uint32_t> objectId = occurrenceNetObjectId( occurrenceName ) )
+            matches = matches || wireObjectIds.count( *objectId );
+
+        if( matches && !( aSkipGenerated && isImplicitGeneratedName( occurrenceName ) ) )
+            targets.insert( &occurrenceName );
+    }
+
+    if( aSourceKeys )
+        *aSourceKeys = std::move( sourceKeys );
+
+    return targets;
 }
 
 
 static std::string connectedBusName( const ORCAD_RAW_PAGE& aPage, const ORCAD_BLOCK_PIN& aPin,
                                      const std::string& aFallback )
 {
-    std::string sourcePrefix;
-    int         sourceFirst;
-    int         sourceLast;
+    std::optional<BUS_RANGE> source = BUS_RANGE::Parse( aFallback );
 
-    if( !parseVectorBusName( aFallback, sourcePrefix, sourceFirst, sourceLast ) )
+    if( !source )
         return aFallback;
 
-    int                 sourceCount = std::abs( sourceLast - sourceFirst ) + 1;
     std::vector<size_t> pending;
     std::set<size_t>    seen;
 
@@ -964,15 +1133,7 @@ static std::string connectedBusName( const ORCAD_RAW_PAGE& aPage, const ORCAD_BL
         for( const ORCAD_ALIAS& alias : wire.aliases )
             names.insert( alias.name );
 
-        auto aliases = aPage.netAliases.find( wire.id );
-
-        if( aliases != aPage.netAliases.end() )
-            names.insert( aliases->second.begin(), aliases->second.end() );
-
-        auto net = aPage.netmap.find( wire.id );
-
-        if( net != aPage.netmap.end() )
-            names.insert( net->second );
+        names.merge( pageNetNames( aPage, wire.id ) );
     }
 
     for( const ORCAD_GRAPHIC_INST& port : aPage.ports )
@@ -1025,35 +1186,19 @@ static std::string connectedBusName( const ORCAD_RAW_PAGE& aPage, const ORCAD_BL
         connectedNetIds.insert( aPage.wires[wireIndex].id );
 
     std::set<std::string> sourceMembers;
-    int                   sourceStep = sourceLast >= sourceFirst ? 1 : -1;
 
-    for( int member = sourceFirst;; member += sourceStep )
-    {
-        sourceMembers.insert( sourcePrefix + std::to_string( member ) );
-
-        if( member == sourceLast )
-            break;
-    }
+    for( int64_t ordinal = 0; ordinal < source->Count(); ++ordinal )
+        sourceMembers.insert( source->prefix + std::to_string( source->At( ordinal ) ) );
 
     for( const ORCAD_NET_GROUP& group : aPage.netGroups )
     {
-        if( !connectedNetIds.count( group.id ) || static_cast<int>( group.members.size() ) != sourceCount )
+        if( !connectedNetIds.count( group.id ) || static_cast<int64_t>( group.members.size() ) != source->Count() )
             continue;
 
         std::set<std::string> memberNames;
 
         for( uint32_t memberId : group.members )
-        {
-            auto aliases = aPage.netAliases.find( memberId );
-
-            if( aliases != aPage.netAliases.end() )
-                memberNames.insert( aliases->second.begin(), aliases->second.end() );
-
-            auto net = aPage.netmap.find( memberId );
-
-            if( net != aPage.netmap.end() )
-                memberNames.insert( net->second );
-        }
+            memberNames.merge( pageNetNames( aPage, memberId ) );
 
         if( std::includes( memberNames.begin(), memberNames.end(), sourceMembers.begin(), sourceMembers.end() ) )
             return aFallback;
@@ -1063,28 +1208,22 @@ static std::string connectedBusName( const ORCAD_RAW_PAGE& aPage, const ORCAD_BL
 
     for( const std::string& name : names )
     {
-        std::string targetPrefix;
-        int         targetFirst;
-        int         targetLast;
+        std::optional<BUS_RANGE> target = BUS_RANGE::Parse( name );
 
-        if( parseVectorBusName( name, targetPrefix, targetFirst, targetLast )
-            && std::abs( targetLast - targetFirst ) + 1 == sourceCount )
-        {
+        if( target && target->Count() == source->Count() )
             candidates.insert( kicadBusName( name ) );
-        }
     }
 
-    std::set<std::string> sourceTokens = busPrefixTokens( sourcePrefix );
+    std::set<std::string> sourceTokens = busPrefixTokens( source->prefix );
 
     for( const std::string& candidate : candidates )
     {
-        std::string candidatePrefix;
-        int         candidateFirst;
-        int         candidateLast;
+        std::optional<BUS_RANGE> candidateRange = BUS_RANGE::Parse( candidate );
 
-        if( !parseVectorBusName( candidate, candidatePrefix, candidateFirst, candidateLast ) )
+        if( !candidateRange )
             continue;
 
+        const std::string&       candidatePrefix = candidateRange->prefix;
         std::set<std::string>    candidateTokens = busPrefixTokens( candidatePrefix );
         std::vector<std::string> sharedTokens;
         std::set_intersection( sourceTokens.begin(), sourceTokens.end(), candidateTokens.begin(), candidateTokens.end(),
@@ -1093,7 +1232,7 @@ static std::string connectedBusName( const ORCAD_RAW_PAGE& aPage, const ORCAD_BL
         // KiCad maps ranges positionally within a bus family.  Renaming such a pin
         // translates nested ranges twice; only unrelated, unambiguous families need it.
         bool leadingNamespaceOnly = sharedTokens.size() == 1 && sourceTokens.size() > 1 && candidateTokens.size() > 1
-                                    && sharedTokens.front() == firstBusPrefixToken( sourcePrefix )
+                                    && sharedTokens.front() == firstBusPrefixToken( source->prefix )
                                     && sharedTokens.front() == firstBusPrefixToken( candidatePrefix );
 
         if( !sharedTokens.empty() && !leadingNamespaceOnly )
@@ -1129,12 +1268,7 @@ static uint32_t busNetAt( const ORCAD_RAW_PAGE& aPage, const ORCAD_BLOCK_PIN& aP
 
     for( const ORCAD_WIRE& wire : aPage.wires )
     {
-        int64_t cross = static_cast<int64_t>( aPin.x - wire.x1 ) * ( wire.y2 - wire.y1 )
-                        - static_cast<int64_t>( aPin.y - wire.y1 ) * ( wire.x2 - wire.x1 );
-        bool onSegment = cross == 0 && aPin.x >= std::min( wire.x1, wire.x2 ) && aPin.x <= std::max( wire.x1, wire.x2 )
-                         && aPin.y >= std::min( wire.y1, wire.y2 ) && aPin.y <= std::max( wire.y1, wire.y2 );
-
-        if( !wire.isBus || !onSegment )
+        if( !wire.isBus || !rawPointOnSegment( aPin.x, aPin.y, wire ) )
             continue;
 
         bool      endpoint = ( aPin.x == wire.x1 && aPin.y == wire.y1 ) || ( aPin.x == wire.x2 && aPin.y == wire.y2 );
@@ -1159,13 +1293,151 @@ static std::string flatNetSuffix( const ORCAD_DRAWN_INSTANCE& aBlock )
 }
 
 
-SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
+static std::string appendOccurrenceSuffix( const std::string& aParentSuffix, const ORCAD_DRAWN_INSTANCE& aBlock )
 {
-    m_rootSheet = aRootSheet;
+    std::string suffix = aParentSuffix;
+    std::string blockSuffix = flatNetSuffix( aBlock );
 
-    prepareGlobalNetNames();
-    prepareSymbols();
+    if( !blockSuffix.empty() )
+    {
+        if( !suffix.empty() )
+            suffix += '_';
 
+        suffix += blockSuffix;
+    }
+
+    return suffix;
+}
+
+
+static const ORCAD_DRAWN_INSTANCE* findDrawnBlock( const ORCAD_RAW_PAGE& aPage, uint32_t aDbId )
+{
+    auto block = std::find_if( aPage.blocks.begin(), aPage.blocks.end(),
+                               [&]( const ORCAD_DRAWN_INSTANCE& aBlock )
+                               {
+                                   return aBlock.dbId == aDbId;
+                               } );
+
+    return block != aPage.blocks.end() ? &*block : nullptr;
+}
+
+
+static std::pair<const ORCAD_DRAWN_INSTANCE*, const ORCAD_RAW_PAGE*>
+findDrawnBlock( const std::vector<ORCAD_RAW_PAGE>& aPages, uint32_t aDbId )
+{
+    for( const ORCAD_RAW_PAGE& page : aPages )
+    {
+        if( const ORCAD_DRAWN_INSTANCE* block = findDrawnBlock( page, aDbId ) )
+            return { block, &page };
+    }
+
+    return {};
+}
+
+
+/** Capture orders child pages by numeric folder prefix, then by folder name without case */
+static std::vector<const ORCAD_OCC_BLOCK*> sortedOccurrences( const ORCAD_OCC_SCOPE& aScope )
+{
+    std::vector<const ORCAD_OCC_BLOCK*> occurrences;
+
+    for( const ORCAD_OCC_BLOCK& occurrence : aScope.blocks )
+        occurrences.push_back( &occurrence );
+
+    std::stable_sort( occurrences.begin(), occurrences.end(),
+                      []( const ORCAD_OCC_BLOCK* a, const ORCAD_OCC_BLOCK* b )
+                      {
+                          wxString aName = FromOrcadString( a->childFolder );
+                          wxString bName = FromOrcadString( b->childFolder );
+                          int      aOrder = OrcadPageOrder( aName );
+                          int      bOrder = OrcadPageOrder( bName );
+                          int      aKey = aOrder >= 0 ? aOrder : std::numeric_limits<int>::max();
+                          int      bKey = bOrder >= 0 ? bOrder : std::numeric_limits<int>::max();
+
+                          if( aKey != bKey )
+                              return aKey < bKey;
+
+                          return aName.CmpNoCase( bName ) < 0;
+                      } );
+
+    return occurrences;
+}
+
+
+void ORCAD_CONVERTER::forEachDesignPage( const std::function<void( const ORCAD_RAW_PAGE& )>& aVisit,
+                                         bool aUnreferenced ) const
+{
+    for( const ORCAD_RAW_PAGE& page : m_design.pages )
+        aVisit( page );
+
+    for( const auto& [folder, pages] : m_design.childFolderPages )
+    {
+        for( const ORCAD_RAW_PAGE& page : pages )
+            aVisit( page );
+    }
+
+    if( !aUnreferenced )
+        return;
+
+    for( const auto& [folder, pages] : m_design.unreferencedFolderPages )
+    {
+        for( const ORCAD_RAW_PAGE& page : pages )
+            aVisit( page );
+    }
+}
+
+
+wxString ORCAD_CONVERTER::uniqueSheetName( const wxString& aBase )
+{
+    wxString name = aBase;
+
+    for( int suffix = 2; !m_usedSheetNames.insert( name.Lower() ).second; ++suffix )
+        name = wxString::Format( wxS( "%s (%d)" ), aBase, suffix );
+
+    return name;
+}
+
+
+SCH_SHEET_PATH ORCAD_CONVERTER::topLevelPath( SCH_SHEET* aSheet, size_t aPageNumber ) const
+{
+    SCH_SHEET_PATH path;
+
+    for( const SCH_SHEET_PATH& candidate : m_schematic->Hierarchy() )
+    {
+        if( candidate.Last() == aSheet )
+        {
+            path = candidate;
+            break;
+        }
+    }
+
+    if( path.empty() )
+        path.push_back( aSheet );
+
+    path.SetPageNumber( wxString::Format( wxS( "%zu" ), aPageNumber ) );
+    return path;
+}
+
+
+static SHEET_SIDE nearestSheetSide( const ORCAD_BLOCK_PIN& aPin, const ORCAD_DRAWN_INSTANCE& aBlock )
+{
+    std::array<std::pair<int, SHEET_SIDE>, 4> sides = {
+        std::pair{ std::abs( aPin.x - aBlock.x1 ), SHEET_SIDE::LEFT },
+        std::pair{ std::abs( aPin.x - aBlock.x1 - aBlock.w ), SHEET_SIDE::RIGHT },
+        std::pair{ std::abs( aPin.y - aBlock.y1 ), SHEET_SIDE::TOP },
+        std::pair{ std::abs( aPin.y - aBlock.y1 - aBlock.h ), SHEET_SIDE::BOTTOM }
+    };
+
+    return std::min_element( sides.begin(), sides.end(),
+                             []( const auto& a, const auto& b )
+                             {
+                                 return a.first < b.first;
+                             } )
+            ->second;
+}
+
+
+void ORCAD_CONVERTER::prepareOccurrenceNets()
+{
     struct SLASH_NAMES
     {
         bool                  leading = false;
@@ -1180,11 +1452,7 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
 
         std::string key = aName;
         std::erase( key, '/' );
-        std::transform( key.begin(), key.end(), key.begin(),
-                        []( unsigned char c )
-                        {
-                            return static_cast<char>( std::tolower( c ) );
-                        } );
+        key = OrcadLower( key );
 
         if( aName.front() == '/' )
             slashNames[key].leading = true;
@@ -1203,36 +1471,14 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
         }
     };
 
-    for( const ORCAD_RAW_PAGE& page : m_design.pages )
-        collectPageSlashNames( page );
-
-    for( const auto& [folder, pages] : m_design.childFolderPages )
-    {
-        for( const ORCAD_RAW_PAGE& page : pages )
-            collectPageSlashNames( page );
-    }
-
-    std::map<std::string, std::string> baseOccurrenceNetAliases;
+    forEachDesignPage( collectPageSlashNames );
 
     for( const auto& [key, names] : slashNames )
     {
         if( names.leading && names.embedded.size() == 1 )
-            baseOccurrenceNetAliases[key] = *names.embedded.begin();
+            m_baseOccurrenceNetAliases[key] = *names.embedded.begin();
     }
 
-    std::map<const std::map<uint32_t, std::string>*, std::map<std::string, std::string>> occurrenceAliasesByScope;
-
-    auto selectOccurrenceAliases = [&]( const std::map<uint32_t, std::string>* aScope )
-    {
-        m_currentOccurrenceNetAliases = baseOccurrenceNetAliases;
-        auto aliases = occurrenceAliasesByScope.find( aScope );
-
-        if( aliases != occurrenceAliasesByScope.end() )
-            m_currentOccurrenceNetAliases.insert( aliases->second.begin(), aliases->second.end() );
-    };
-
-    m_occurrenceNetNameScopeCounts.clear();
-    m_occurrenceNetNameMinDepth.clear();
     std::function<void( const ORCAD_OCC_SCOPE&, size_t )> countOccurrenceNetNameScopes =
             [&]( const ORCAD_OCC_SCOPE& aScope, size_t aDepth )
     {
@@ -1241,12 +1487,7 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
         for( const auto& occurrence : aScope.netNames )
         {
             const std::string& name = occurrence.second;
-            std::string        key = kicadOccurrenceNetName( name );
-            std::transform( key.begin(), key.end(), key.begin(),
-                            []( unsigned char c )
-                            {
-                                return static_cast<char>( std::tolower( c ) );
-                            } );
+            std::string        key = OrcadLower( kicadOccurrenceNetName( name ) );
             scopeNames.insert( key );
 
             auto depth = m_occurrenceNetNameMinDepth.find( key );
@@ -1259,44 +1500,19 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
             ++m_occurrenceNetNameScopeCounts[name];
 
         for( const ORCAD_OCC_BLOCK& block : aScope.blocks )
+        {
+            ++m_occurrenceFolderCounts[OrcadLower( block.childFolder )];
             countOccurrenceNetNameScopes( block.scope, aDepth + 1 );
+        }
     };
     countOccurrenceNetNameScopes( m_design.occurrenceRoot, 0 );
 
-    SCH_SCREEN* rootScreen = aRootSheet->GetScreen();
-
-    SCH_SHEET_PATH rootPath;
-    rootPath.push_back( aRootSheet );
-    rootPath.SetPageNumber( wxS( "1" ) );
-
-    std::map<std::string, size_t>                 occurrenceFolderCounts;
-    std::function<void( const ORCAD_OCC_SCOPE& )> countOccurrenceFolders = [&]( const ORCAD_OCC_SCOPE& aScope )
-    {
-        for( const ORCAD_OCC_BLOCK& block : aScope.blocks )
-        {
-            std::string key = block.childFolder;
-            std::transform( key.begin(), key.end(), key.begin(),
-                            []( unsigned char c )
-                            {
-                                return static_cast<char>( std::tolower( c ) );
-                            } );
-            ++occurrenceFolderCounts[key];
-            countOccurrenceFolders( block.scope );
-        }
-    };
-    countOccurrenceFolders( m_design.occurrenceRoot );
-
     std::set<std::string> rootChildFolders;
-    bool                  simpleRepeatedLeafDesign = !m_design.occurrenceRoot.blocks.empty();
+    m_simpleRepeatedLeafDesign = !m_design.occurrenceRoot.blocks.empty();
 
     for( const ORCAD_OCC_BLOCK& block : m_design.occurrenceRoot.blocks )
     {
-        std::string key = block.childFolder;
-        std::transform( key.begin(), key.end(), key.begin(),
-                        []( unsigned char c )
-                        {
-                            return static_cast<char>( std::tolower( c ) );
-                        } );
+        std::string key = OrcadLower( block.childFolder );
         rootChildFolders.insert( key );
         auto pages = m_design.childFolderPages.find( key );
 
@@ -1307,524 +1523,481 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
                                  return aPage.blocks.empty();
                              } ) )
         {
-            simpleRepeatedLeafDesign = false;
+            m_simpleRepeatedLeafDesign = false;
         }
     }
 
-    simpleRepeatedLeafDesign &= rootChildFolders.size() == 1 && m_design.occurrenceRoot.blocks.size() > 1;
+    m_simpleRepeatedLeafDesign &= rootChildFolders.size() == 1 && m_design.occurrenceRoot.blocks.size() > 1;
 
-    m_connectedBlockInterfaceNames.clear();
-    auto collectConnectedBlockInterfaceNames = [&]( const ORCAD_RAW_PAGE& aPage )
-    {
-        for( const ORCAD_DRAWN_INSTANCE& block : aPage.blocks )
-        {
-            for( const ORCAD_BLOCK_PIN& pin : block.pins )
+    forEachDesignPage(
+            [&]( const ORCAD_RAW_PAGE& aPage )
             {
-                if( pin.noConnect || pin.name.empty() )
-                    continue;
-
-                std::string pinName = canonicalGlobalNetName( pin.name );
-                std::transform( pinName.begin(), pinName.end(), pinName.begin(),
-                                []( unsigned char c )
-                                {
-                                    return static_cast<char>( std::tolower( c ) );
-                                } );
-
-                for( const ORCAD_WIRE& wire : aPage.wires )
+                for( const ORCAD_DRAWN_INSTANCE& block : aPage.blocks )
                 {
-                    if( wire.isBus || !rawPointOnSegment( pin.x, pin.y, wire ) )
-                        continue;
-
-                    auto netName = aPage.netmap.find( wire.id );
-
-                    if( netName == aPage.netmap.end() )
-                        continue;
-
-                    std::string wireName = canonicalGlobalNetName( netName->second );
-                    std::transform( wireName.begin(), wireName.end(), wireName.begin(),
-                                    []( unsigned char c )
-                                    {
-                                        return static_cast<char>( std::tolower( c ) );
-                                    } );
-
-                    if( wireName == pinName )
-                        m_connectedBlockInterfaceNames.insert( pinName );
-                }
-            }
-        }
-    };
-
-    for( const ORCAD_RAW_PAGE& page : m_design.pages )
-        collectConnectedBlockInterfaceNames( page );
-
-    for( const auto& [folder, pages] : m_design.childFolderPages )
-    {
-        for( const ORCAD_RAW_PAGE& page : pages )
-            collectConnectedBlockInterfaceNames( page );
-    }
-
-    auto unconnectedInterfaceNetNames = [&]( const ORCAD_DRAWN_INSTANCE& aDrawn, const std::string& aFlatNetSuffix )
-    {
-        std::map<std::string, std::string> result;
-
-        for( const ORCAD_BLOCK_PIN& pin : aDrawn.pins )
-        {
-            if( !pin.noConnect || pin.name.empty() || aFlatNetSuffix.empty() )
-                continue;
-
-            std::string localName = canonicalGlobalNetName( pin.name );
-            std::string localKey = localName;
-            std::transform( localKey.begin(), localKey.end(), localKey.begin(),
-                            []( unsigned char c )
-                            {
-                                return static_cast<char>( std::tolower( c ) );
-                            } );
-
-            if( !m_connectedBlockInterfaceNames.count( localKey ) )
-                continue;
-
-            result.emplace( std::move( localKey ), localName + "_" + aFlatNetSuffix );
-        }
-
-        return result;
-    };
-
-    std::function<bool( const ORCAD_RAW_PAGE&, const ORCAD_OCC_SCOPE& )> canBuildHierarchy =
-            [&]( const ORCAD_RAW_PAGE& aPage, const ORCAD_OCC_SCOPE& aScope )
-    {
-        if( aPage.blocks.size() != aScope.blocks.size() )
-            return false;
-
-        std::set<uint32_t> matchedBlocks;
-
-        for( const ORCAD_OCC_BLOCK& occurrence : aScope.blocks )
-        {
-            auto drawn = std::find_if( aPage.blocks.begin(), aPage.blocks.end(),
-                                       [&]( const ORCAD_DRAWN_INSTANCE& aBlock )
-                                       {
-                                           return aBlock.dbId == occurrence.targetDbId;
-                                       } );
-
-            std::string key = occurrence.childFolder;
-            std::transform( key.begin(), key.end(), key.begin(),
-                            []( unsigned char c )
-                            {
-                                return static_cast<char>( std::tolower( c ) );
-                            } );
-
-            auto pages = m_design.childFolderPages.find( key );
-
-            if( !matchedBlocks.insert( occurrence.targetDbId ).second || drawn == aPage.blocks.end()
-                || pages == m_design.childFolderPages.end() || pages->second.size() != 1
-                || !canBuildHierarchy( pages->second.front(), occurrence.scope ) )
-            {
-                return false;
-            }
-        }
-
-        return true;
-    };
-
-    bool nativeHierarchy = m_design.pages.size() == 1 && !m_design.occurrenceRoot.blocks.empty()
-                           && canBuildHierarchy( m_design.pages.front(), m_design.occurrenceRoot );
-
-    if( nativeHierarchy )
-    {
-        ORCAD_RAW_PAGE& rootPage = m_design.pages.front();
-
-        pollProgress( m_progressReporter, rootPage.name );
-        m_currentOccRefs = &m_design.occurrenceRoot.partRefs;
-        m_currentOccUnitRefs = &m_design.occurrenceRoot.partUnitRefs;
-        m_currentOccProps = &m_design.occurrenceRoot.partProps;
-        m_currentOccNetNames = &m_design.occurrenceRoot.netNames;
-        selectOccurrenceAliases( m_currentOccNetNames );
-        m_currentFlatNetSuffix.clear();
-        m_scopeNamedFlatNets = false;
-        m_scopeGeneratedFlatNets = false;
-        m_currentUnconnectedInterfaceNetNames.clear();
-        applyPageSettings( rootPage, rootScreen );
-        convertPage( rootPage, rootScreen, rootPath );
-
-        int pageIndex = 1;
-
-        std::function<void( ORCAD_RAW_PAGE&, const ORCAD_OCC_SCOPE&, SCH_SHEET*, const SCH_SHEET_PATH& )>
-                placeChildren = [&]( ORCAD_RAW_PAGE& aParentPage, const ORCAD_OCC_SCOPE& aScope,
-                                     SCH_SHEET* aParentSheet, const SCH_SHEET_PATH& aParentPath )
-        {
-            std::vector<const ORCAD_OCC_BLOCK*> occurrences;
-
-            for( const ORCAD_OCC_BLOCK& occurrence : aScope.blocks )
-                occurrences.push_back( &occurrence );
-
-            std::stable_sort( occurrences.begin(), occurrences.end(),
-                              []( const ORCAD_OCC_BLOCK* a, const ORCAD_OCC_BLOCK* b )
-                              {
-                                  wxString aName = FromOrcadString( a->childFolder );
-                                  wxString bName = FromOrcadString( b->childFolder );
-                                  int      aOrder = OrcadPageOrder( aName );
-                                  int      bOrder = OrcadPageOrder( bName );
-                                  int      aKey = aOrder >= 0 ? aOrder : std::numeric_limits<int>::max();
-                                  int      bKey = bOrder >= 0 ? bOrder : std::numeric_limits<int>::max();
-
-                                  if( aKey != bKey )
-                                      return aKey < bKey;
-
-                                  return aName.CmpNoCase( bName ) < 0;
-                              } );
-
-            for( const ORCAD_OCC_BLOCK* occurrencePtr : occurrences )
-            {
-                const ORCAD_OCC_BLOCK& occurrence = *occurrencePtr;
-                auto                   drawn = std::find_if( aParentPage.blocks.begin(), aParentPage.blocks.end(),
-                                                             [&]( const ORCAD_DRAWN_INSTANCE& aBlock )
-                                                             {
-                                               return aBlock.dbId == occurrence.targetDbId;
-                                           } );
-
-                std::string key = occurrence.childFolder;
-                std::transform( key.begin(), key.end(), key.begin(),
-                                []( unsigned char c )
-                                {
-                                    return static_cast<char>( std::tolower( c ) );
-                                } );
-
-                ORCAD_RAW_PAGE& childPage = m_design.childFolderPages.at( key ).front();
-                SCH_SCREEN*     childScreen = new SCH_SCREEN( m_schematic );
-                const_cast<KIID&>( childScreen->GetUuid() ) = deterministicUuid( "screen", m_screenOrdinal++ );
-                SCH_SHEET* childSheet = new SCH_SHEET( aParentSheet, OrcadDbuToIu( drawn->x1, drawn->y1 ),
-                                                       OrcadDbuToIu( drawn->w, drawn->h ) );
-                wxString   sheetName = FromOrcadString( drawn->reference );
-
-                if( sheetName.IsEmpty() )
-                    sheetName = FromOrcadString( childPage.name );
-
-                wxString base = sheetName;
-
-                for( int suffix = 2; !m_usedSheetNames.insert( sheetName.Lower() ).second; ++suffix )
-                    sheetName = wxString::Format( wxS( "%s (%d)" ), base, suffix );
-
-                wxString fileName = MakePageFileName( ++pageIndex, childPage.name );
-                const_cast<KIID&>( childSheet->m_Uuid ) = deterministicUuid( "sheet", pageIndex );
-                childSheet->GetField( FIELD_T::SHEET_NAME )->SetText( sheetName );
-                childSheet->GetField( FIELD_T::SHEET_FILENAME )->SetText( fileName );
-                placeHierarchicalBlockFields( childSheet, *drawn, occurrence.childFolder );
-                childSheet->SetScreen( childScreen );
-                childScreen->SetFileName( m_schematic->Project().GetProjectPath() + fileName );
-
-                auto implementation = drawn->props.find( "Implementation" );
-
-                if( implementation != drawn->props.end() && !implementation->second.empty()
-                    && FromOrcadString( implementation->second )
-                                       .CmpNoCase( FromOrcadString( occurrence.childFolder ) )
-                               != 0 )
-                {
-                    childSheet->SetExcludedFromBoard( true );
-                }
-
-                size_t pinOrdinal = 0;
-
-                for( const ORCAD_BLOCK_PIN& sourcePin : drawn->pins )
-                {
-                    VECTOR2I    position = OrcadDbuToIu( sourcePin.x, sourcePin.y );
-                    std::string sourceName = canonicalGlobalNetName( sourcePin.name );
-                    uint32_t    busNetId = busNetAt( aParentPage, sourcePin );
-                    std::string pinName = busNetId ? connectedBusName( aParentPage, sourcePin, sourceName )
-                                                   : scopedHierBusName( sourceName, occurrence.targetDbId );
-
-                    if( busNetId && pinName != sourceName )
+                    for( const ORCAD_BLOCK_PIN& pin : block.pins )
                     {
-                        auto parentBusNames =
-                                m_hierBusNamesByScreen.find( aParentSheet->GetScreen()->GetUuid().AsStdString() );
-
-                        if( parentBusNames != m_hierBusNamesByScreen.end() )
-                            pinName = scopedHierBusRange( pinName, parentBusNames->second );
-                    }
-
-                    if( pinName != sourceName )
-                        m_hierBusNamesByScreen[childScreen->GetUuid().AsStdString()][sourceName] = pinName;
-
-                    SCH_SHEET_PIN* pin = new SCH_SHEET_PIN( childSheet, position, FromOrcadString( pinName ) );
-                    const_cast<KIID&>( pin->m_Uuid ) =
-                            deterministicUuid( "sheet-pin:" + childScreen->GetUuid().AsStdString(), pinOrdinal++ );
-                    std::array<std::pair<int, SHEET_SIDE>, 4> sides = {
-                        std::pair{ std::abs( sourcePin.x - drawn->x1 ), SHEET_SIDE::LEFT },
-                        std::pair{ std::abs( sourcePin.x - drawn->x1 - drawn->w ), SHEET_SIDE::RIGHT },
-                        std::pair{ std::abs( sourcePin.y - drawn->y1 ), SHEET_SIDE::TOP },
-                        std::pair{ std::abs( sourcePin.y - drawn->y1 - drawn->h ), SHEET_SIDE::BOTTOM }
-                    };
-
-                    pin->SetSide( std::min_element( sides.begin(), sides.end(),
-                                                    []( const auto& a, const auto& b )
-                                                    {
-                                                        return a.first < b.first;
-                                                    } )
-                                          ->second );
-                    pin->SetPosition( position );
-
-                    pin->SetShape( hierarchicalPinShape( sourcePin.portType ) );
-
-                    childSheet->AddPin( pin );
-                    placeHierarchicalBlockPinFill( aParentSheet->GetScreen(), pin );
-                }
-
-                aParentSheet->GetScreen()->Append( childSheet );
-
-                SCH_SHEET_PATH childPath = aParentPath;
-                childPath.push_back( childSheet );
-                childPath.SetPageNumber( wxString::Format( wxS( "%d" ), pageIndex ) );
-
-                std::map<std::string, std::string> childInterfaceAliases;
-
-                for( const ORCAD_BLOCK_PIN& sourcePin : drawn->pins )
-                {
-                    std::set<std::string> sourceNames;
-                    std::set<uint32_t>    wireObjectIds;
-                    std::string           pinName = canonicalGlobalNetName( sourcePin.name );
-                    std::string           pinKey = pinName;
-                    std::transform( pinKey.begin(), pinKey.end(), pinKey.begin(),
-                                    []( unsigned char c )
-                                    {
-                                        return static_cast<char>( std::tolower( c ) );
-                                    } );
-                    sourceNames.insert( pinKey );
-
-                    for( const ORCAD_WIRE& wire : aParentPage.wires )
-                    {
-                        if( wire.isBus || !rawPointOnSegment( sourcePin.x, sourcePin.y, wire ) )
+                        if( pin.noConnect || pin.name.empty() )
                             continue;
 
-                        wireObjectIds.insert( wire.dbId );
-                        auto pageName = aParentPage.netmap.find( wire.id );
+                        std::string pinName = canonicalGlobalNetKey( pin.name );
 
-                        if( pageName != aParentPage.netmap.end() && !pageName->second.empty() )
+                        for( const ORCAD_WIRE& wire : aPage.wires )
                         {
-                            std::string name = canonicalGlobalNetName( pageName->second );
-                            std::transform( name.begin(), name.end(), name.begin(),
-                                            []( unsigned char c )
-                                            {
-                                                return static_cast<char>( std::tolower( c ) );
-                                            } );
-                            sourceNames.insert( std::move( name ) );
-                        }
+                            if( wire.isBus || !rawPointOnSegment( pin.x, pin.y, wire ) )
+                                continue;
 
-                        auto aliases = aParentPage.netAliases.find( wire.id );
+                            auto netName = aPage.netmap.find( wire.id );
 
-                        if( aliases != aParentPage.netAliases.end() )
-                        {
-                            for( const std::string& alias : aliases->second )
-                            {
-                                std::string name = canonicalGlobalNetName( alias );
-                                std::transform( name.begin(), name.end(), name.begin(),
-                                                []( unsigned char c )
-                                                {
-                                                    return static_cast<char>( std::tolower( c ) );
-                                                } );
-                                sourceNames.insert( std::move( name ) );
-                            }
+                            if( netName != aPage.netmap.end() && canonicalGlobalNetKey( netName->second ) == pinName )
+                                m_connectedBlockInterfaceNames.insert( pinName );
                         }
                     }
-
-                    std::set<const std::string*> targets;
-
-                    for( const auto& [occurrenceId, occurrenceName] : aScope.netNames )
-                    {
-                        std::string occurrenceKey = canonicalGlobalNetName( occurrenceName );
-                        std::transform( occurrenceKey.begin(), occurrenceKey.end(), occurrenceKey.begin(),
-                                        []( unsigned char c )
-                                        {
-                                            return static_cast<char>( std::tolower( c ) );
-                                        } );
-                        bool matches = sourceNames.count( occurrenceKey );
-
-                        if( std::optional<uint32_t> objectId = occurrenceNetObjectId( occurrenceName ) )
-                            matches = matches || wireObjectIds.count( *objectId );
-
-                        if( matches )
-                            targets.insert( &occurrenceName );
-                    }
-
-                    if( targets.size() == 1 )
-                        childInterfaceAliases[pinKey] = canonicalGlobalNetName( **targets.begin() );
                 }
+            } );
+}
 
-                pollProgress( m_progressReporter, childPage.name );
-                m_currentOccRefs = &occurrence.scope.partRefs;
-                m_currentOccUnitRefs = &occurrence.scope.partUnitRefs;
-                m_currentOccProps = &occurrence.scope.partProps;
-                m_currentOccNetNames = &occurrence.scope.netNames;
-                selectOccurrenceAliases( m_currentOccNetNames );
-                m_currentFlatNetSuffix = simpleRepeatedLeafDesign ? flatNetSuffix( *drawn ) : std::string();
-                m_scopeNamedFlatNets = simpleRepeatedLeafDesign;
-                m_scopeGeneratedFlatNets = occurrenceFolderCounts[key] > 1;
-                m_currentUnconnectedInterfaceNetNames = unconnectedInterfaceNetNames( *drawn, m_currentFlatNetSuffix );
-                m_currentInterfaceNetAliases = std::move( childInterfaceAliases );
-                m_currentConnectorInterfaceNetAliases.clear();
-                applyPageSettings( childPage, childScreen );
-                convertPage( childPage, childScreen, childPath, true, drawn->pins.empty() );
-                placeChildren( childPage, occurrence.scope, childSheet, childPath );
-            }
-        };
 
-        placeChildren( rootPage, m_design.occurrenceRoot, aRootSheet, rootPath );
-        m_currentOccRefs = nullptr;
-        m_currentOccUnitRefs = nullptr;
-        m_currentOccProps = nullptr;
-        m_currentOccNetNames = nullptr;
-        m_currentFlatNetSuffix.clear();
-        m_scopeNamedFlatNets = false;
-        m_scopeGeneratedFlatNets = false;
-        m_currentUnconnectedInterfaceNetNames.clear();
-        finishConversion();
-        return aRootSheet;
+ORCAD_CONVERTER::PAGE_SCOPE ORCAD_CONVERTER::occurrenceScope( const ORCAD_OCC_SCOPE& aOcc ) const
+{
+    PAGE_SCOPE scope;
+    scope.occ = &aOcc;
+    scope.occurrenceNetAliases = m_baseOccurrenceNetAliases;
+    auto aliases = m_occurrenceAliasesByScope.find( &aOcc.netNames );
+
+    if( aliases != m_occurrenceAliasesByScope.end() )
+        scope.occurrenceNetAliases.insert( aliases->second.begin(), aliases->second.end() );
+
+    return scope;
+}
+
+
+std::map<std::string, std::string>
+ORCAD_CONVERTER::unconnectedInterfaceNetNames( const ORCAD_DRAWN_INSTANCE& aBlock,
+                                               const std::string&          aFlatNetSuffix ) const
+{
+    std::map<std::string, std::string> result;
+
+    for( const ORCAD_BLOCK_PIN& pin : aBlock.pins )
+    {
+        if( !pin.noConnect || pin.name.empty() || aFlatNetSuffix.empty() )
+            continue;
+
+        std::string localName = canonicalGlobalNetName( pin.name );
+        std::string localKey = OrcadLower( localName );
+
+        if( !m_connectedBlockInterfaceNames.count( localKey ) )
+            continue;
+
+        result.emplace( std::move( localKey ), localName + "_" + aFlatNetSuffix );
     }
 
-    std::function<bool( const std::vector<ORCAD_RAW_PAGE>&, const ORCAD_OCC_SCOPE& )> canBuildFolderHierarchy =
-            [&]( const std::vector<ORCAD_RAW_PAGE>& aPages, const ORCAD_OCC_SCOPE& aScope )
+    return result;
+}
+
+
+SCH_SHEET* ORCAD_CONVERTER::createBlockSheet( SCH_SHEET* aParentSheet, const ORCAD_RAW_PAGE& aParentPage,
+                                              const ORCAD_DRAWN_INSTANCE& aBlock, const ORCAD_OCC_BLOCK& aOccurrence,
+                                              const wxString& aName, const std::string& aFilePageName,
+                                              int aPageIndex )
+{
+    SCH_SCREEN* parentScreen = aParentSheet->GetScreen();
+    SCH_SCREEN* screen = newScreen();
+    SCH_SHEET* sheet = new SCH_SHEET( aParentSheet, OrcadDbuToIu( aBlock.x1, aBlock.y1 ),
+                                      OrcadDbuToIu( aBlock.w, aBlock.h ) );
+    wxString   fileName = MakePageFileName( aPageIndex, aFilePageName );
+    const_cast<KIID&>( sheet->m_Uuid ) = deterministicUuid( "sheet", aPageIndex );
+    sheet->GetField( FIELD_T::SHEET_NAME )->SetText( aName );
+    sheet->GetField( FIELD_T::SHEET_FILENAME )->SetText( fileName );
+    placeHierarchicalBlockFields( sheet, aBlock, aOccurrence.childFolder );
+    sheet->SetScreen( screen );
+    screen->SetFileName( m_schematic->Project().GetProjectPath() + fileName );
+
+    auto implementation = aBlock.props.find( "Implementation" );
+
+    if( implementation != aBlock.props.end() && !implementation->second.empty()
+        && FromOrcadString( implementation->second ).CmpNoCase( FromOrcadString( aOccurrence.childFolder ) ) != 0 )
     {
-        size_t blockCount = 0;
+        sheet->SetExcludedFromBoard( true );
+    }
+
+    for( size_t pinIndex = 0; pinIndex < aBlock.pins.size(); ++pinIndex )
+    {
+        const ORCAD_BLOCK_PIN& sourcePin = aBlock.pins[pinIndex];
+        VECTOR2I               position = OrcadDbuToIu( sourcePin.x, sourcePin.y );
+        std::string            sourceName = canonicalGlobalNetName( sourcePin.name );
+        uint32_t               busNetId = busNetAt( aParentPage, sourcePin );
+        std::string            pinName = busNetId ? connectedBusName( aParentPage, sourcePin, sourceName )
+                                                  : scopedHierBusName( sourceName, aOccurrence.targetDbId );
+
+        if( busNetId && pinName != sourceName )
+        {
+            auto parentBusNames = m_hierBusNamesByScreen.find( parentScreen->GetUuid().AsStdString() );
+
+            if( parentBusNames != m_hierBusNamesByScreen.end() )
+                pinName = scopedHierBusRange( pinName, parentBusNames->second );
+        }
+
+        if( pinName != sourceName )
+            m_hierBusNamesByScreen[screen->GetUuid().AsStdString()][sourceName] = pinName;
+
+        SCH_SHEET_PIN* pin = new SCH_SHEET_PIN( sheet, position, FromOrcadString( pinName ) );
+        const_cast<KIID&>( pin->m_Uuid ) =
+                deterministicUuid( "sheet-pin:" + screen->GetUuid().AsStdString(), pinIndex );
+        pin->SetSide( nearestSheetSide( sourcePin, aBlock ) );
+        pin->SetPosition( position );
+        pin->SetShape( hierarchicalPinShape( sourcePin.portType ) );
+        sheet->AddPin( pin );
+        placeHierarchicalBlockPinFill( parentScreen, pin );
+    }
+
+    parentScreen->Append( sheet );
+    return sheet;
+}
+
+
+std::vector<SCH_SHEET*>
+ORCAD_CONVERTER::createTopLevelSheets( const std::vector<std::pair<wxString, wxString>>& aNamesAndFiles,
+                                       bool aReuseRoot, bool aOrdinalSheetUuids )
+{
+    std::vector<SCH_SHEET*> topSheets;
+
+    if( !aReuseRoot )
+        topSheets = m_schematic->GetTopLevelSheets();
+
+    size_t first = topSheets.size();
+
+    for( size_t i = 0; i < aNamesAndFiles.size(); ++i )
+    {
+        SCH_SHEET* sheet = m_rootSheet;
+
+        if( !aReuseRoot || i > 0 )
+        {
+            SCH_SCREEN* screen = newScreen();
+            sheet = new SCH_SHEET( m_schematic );
+            sheet->SetScreen( screen );
+
+            if( aOrdinalSheetUuids )
+                const_cast<KIID&>( sheet->m_Uuid ) = deterministicUuid( "sheet", i + 1 );
+            else
+                sheet->SyncUuidToScreen();
+        }
+
+        const auto& [name, fileName] = aNamesAndFiles[i];
+        sheet->GetField( FIELD_T::SHEET_NAME )->SetText( name );
+        sheet->GetField( FIELD_T::SHEET_FILENAME )->SetText( fileName );
+        sheet->GetScreen()->SetFileName( m_schematic->Project().GetProjectPath() + fileName );
+        topSheets.push_back( sheet );
+    }
+
+    m_schematic->SetTopLevelSheets( topSheets );
+    return std::vector<SCH_SHEET*>( topSheets.begin() + first, topSheets.end() );
+}
+
+
+void ORCAD_CONVERTER::recordPowerAlias( std::map<std::string, POWER_ALIAS_EVIDENCE>& aCandidates,
+                                        const std::string& aSourceName, const std::string& aElectricalName ) const
+{
+    if( aSourceName.empty() || aElectricalName.empty() )
+        return;
+
+    POWER_ALIAS_EVIDENCE& evidence = aCandidates[OrcadLower( aSourceName )];
+    ++evidence.placements;
+
+    if( !isPowerNetName( aElectricalName ) || OrcadIEquals( aSourceName, aElectricalName ) )
+        return;
+
+    auto& target = evidence.targets[OrcadLower( aElectricalName )];
+    target.first = aElectricalName;
+    ++target.second;
+}
+
+
+void ORCAD_CONVERTER::acceptPowerAliases( const std::map<std::string, POWER_ALIAS_EVIDENCE>& aCandidates )
+{
+    for( const auto& [sourceName, evidence] : aCandidates )
+    {
+        if( evidence.targets.size() != 1 )
+            continue;
+
+        const auto& target = evidence.targets.begin()->second;
+
+        if( target.second * 2 > evidence.placements )
+            m_globalNetAliases[sourceName] = target.first;
+    }
+}
+
+
+SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
+{
+    m_rootSheet = aRootSheet;
+    m_importedScreens.insert( aRootSheet->GetScreen() );
+
+    for( SCH_ITEM* item : aRootSheet->GetScreen()->Items() )
+        m_preExistingItems.insert( item );
+
+    prepareGlobalNetNames();
+    prepareSymbols();
+    prepareOccurrenceNets();
+
+    SCH_SHEET_PATH rootPath;
+    rootPath.push_back( aRootSheet );
+    rootPath.SetPageNumber( wxS( "1" ) );
+
+    bool hasBlocks = !m_design.occurrenceRoot.blocks.empty();
+
+    if( hasBlocks && canBuildFolderHierarchy( m_design.pages, m_design.occurrenceRoot ) )
+    {
+        bool native = m_design.pages.size() == 1
+                      && canBuildNativeHierarchy( m_design.pages.front(), m_design.occurrenceRoot );
+        convertFolderHierarchy( rootPath, native );
+    }
+    else
+    {
+        convertFlatPages( rootPath );
+    }
+
+    m_scope = PAGE_SCOPE();
+    finishConversion();
+    return aRootSheet;
+}
+
+
+bool ORCAD_CONVERTER::canBuildNativeHierarchy( const ORCAD_RAW_PAGE& aPage, const ORCAD_OCC_SCOPE& aScope ) const
+{
+    if( aPage.blocks.size() != aScope.blocks.size() )
+        return false;
+
+    std::set<uint32_t> matchedBlocks;
+
+    for( const ORCAD_OCC_BLOCK& occurrence : aScope.blocks )
+    {
+        auto pages = m_design.childFolderPages.find( OrcadLower( occurrence.childFolder ) );
+
+        if( !matchedBlocks.insert( occurrence.targetDbId ).second
+            || !findDrawnBlock( aPage, occurrence.targetDbId )
+            || pages == m_design.childFolderPages.end() || pages->second.size() != 1
+            || !canBuildNativeHierarchy( pages->second.front(), occurrence.scope ) )
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
+bool ORCAD_CONVERTER::canBuildFolderHierarchy( const std::vector<ORCAD_RAW_PAGE>& aPages,
+                                               const ORCAD_OCC_SCOPE&             aScope ) const
+{
+    size_t blockCount = 0;
+
+    for( const ORCAD_RAW_PAGE& page : aPages )
+        blockCount += page.blocks.size();
+
+    if( blockCount != aScope.blocks.size() )
+        return false;
+
+    std::set<uint32_t> matchedBlocks;
+
+    for( const ORCAD_OCC_BLOCK& occurrence : aScope.blocks )
+    {
+        size_t matches = 0;
 
         for( const ORCAD_RAW_PAGE& page : aPages )
-            blockCount += page.blocks.size();
+        {
+            matches += std::count_if( page.blocks.begin(), page.blocks.end(),
+                                      [&]( const ORCAD_DRAWN_INSTANCE& aBlock )
+                                      {
+                                          return aBlock.dbId == occurrence.targetDbId;
+                                      } );
+        }
 
-        if( blockCount != aScope.blocks.size() )
+        auto pages = m_design.childFolderPages.find( OrcadLower( occurrence.childFolder ) );
+
+        if( matches != 1 || !matchedBlocks.insert( occurrence.targetDbId ).second
+            || pages == m_design.childFolderPages.end() || pages->second.empty()
+            || !canBuildFolderHierarchy( pages->second, occurrence.scope ) )
+        {
             return false;
+        }
+    }
 
-        std::set<uint32_t> matchedBlocks;
+    return true;
+}
+
+
+void ORCAD_CONVERTER::addChildOccurrenceAliases( const ORCAD_RAW_PAGE& aParentPage, const ORCAD_OCC_SCOPE& aParentScope,
+                                                 const ORCAD_DRAWN_INSTANCE& aDrawn,
+                                                 const ORCAD_OCC_SCOPE&      aChildScope )
+{
+    auto& childAliases = m_occurrenceAliasesByScope[&aChildScope.netNames];
+
+    for( const ORCAD_BLOCK_PIN& pin : aDrawn.pins )
+    {
+        std::set<const std::string*> targets = pinOccurrenceTargets( aParentPage, pin, aParentScope.netNames, true );
+
+        if( targets.size() == 1 )
+        {
+            std::string sourceName = OrcadLower( kicadOccurrenceNetName( pin.name ) );
+            std::string targetName = kicadOccurrenceNetName( **targets.begin() );
+
+            if( sourceName != OrcadLower( targetName ) )
+                childAliases[std::move( sourceName )] = std::move( targetName );
+        }
+    }
+}
+
+
+void ORCAD_CONVERTER::collectFolderPowerAliases( std::map<std::string, POWER_ALIAS_EVIDENCE>& aCandidates,
+                                                 std::vector<ORCAD_RAW_PAGE>& aPages, const ORCAD_OCC_SCOPE& aScope )
+{
+    enterScope( occurrenceScope( aScope ) );
+
+    for( ORCAD_RAW_PAGE& page : aPages )
+    {
+        buildNetLookup( page );
+
+        for( const ORCAD_GRAPHIC_INST& global : page.globals )
+            recordPowerAlias( aCandidates, trimmed( global.logicalName ), powerNet( page, global ) );
+    }
+
+    for( const ORCAD_OCC_BLOCK& occurrence : aScope.blocks )
+    {
+        auto [drawn, parentPage] = findDrawnBlock( aPages, occurrence.targetDbId );
+        auto childPages = m_design.childFolderPages.find( OrcadLower( occurrence.childFolder ) );
+
+        if( parentPage && drawn && childPages != m_design.childFolderPages.end() )
+        {
+            addChildOccurrenceAliases( *parentPage, aScope, *drawn, occurrence.scope );
+            collectFolderPowerAliases( aCandidates, childPages->second, occurrence.scope );
+        }
+    }
+}
+
+
+void ORCAD_CONVERTER::convertFolderHierarchy( const SCH_SHEET_PATH& aRootPath, bool aNative )
+{
+    std::function<size_t( const std::vector<ORCAD_RAW_PAGE>&, const ORCAD_OCC_SCOPE& )> countSourcePages =
+            [&]( const std::vector<ORCAD_RAW_PAGE>& aPages, const ORCAD_OCC_SCOPE& aScope )
+    {
+        size_t count = aPages.size();
 
         for( const ORCAD_OCC_BLOCK& occurrence : aScope.blocks )
         {
-            size_t matches = 0;
-
-            for( const ORCAD_RAW_PAGE& page : aPages )
+            if( auto pages = m_design.childFolderPages.find( OrcadLower( occurrence.childFolder ) );
+                pages != m_design.childFolderPages.end() )
             {
-                matches += std::count_if( page.blocks.begin(), page.blocks.end(),
-                                          [&]( const ORCAD_DRAWN_INSTANCE& aBlock )
-                                          {
-                                              return aBlock.dbId == occurrence.targetDbId;
-                                          } );
-            }
-
-            std::string key = occurrence.childFolder;
-            std::transform( key.begin(), key.end(), key.begin(),
-                            []( unsigned char c )
-                            {
-                                return static_cast<char>( std::tolower( c ) );
-                            } );
-
-            auto pages = m_design.childFolderPages.find( key );
-
-            if( matches != 1 || !matchedBlocks.insert( occurrence.targetDbId ).second
-                || pages == m_design.childFolderPages.end() || pages->second.empty()
-                || !canBuildFolderHierarchy( pages->second, occurrence.scope ) )
-            {
-                return false;
+                count += countSourcePages( pages->second, occurrence.scope );
             }
         }
 
-        return true;
+        return count;
     };
 
-    bool folderHierarchy = !m_design.occurrenceRoot.blocks.empty()
-                           && canBuildFolderHierarchy( m_design.pages, m_design.occurrenceRoot );
+    FOLDER_WALK walk;
 
-    struct POWER_ALIAS_EVIDENCE
+    if( aNative )
     {
-        size_t                                                  placements = 0;
-        std::map<std::string, std::pair<std::string, size_t>> targets;
+        walk.numberSourcePages = false;
+        walk.occurrenceAliases = false;
+        walk.interfaceAliases = true;
+        walk.nestedFlatSuffix = false;
+        walk.folderSheetNames = false;
+        walk.rootSharedFolderPage = false;
+    }
+
+    if( walk.occurrenceAliases )
+    {
+        std::map<std::string, POWER_ALIAS_EVIDENCE> powerAliasCandidates;
+        collectFolderPowerAliases( powerAliasCandidates, m_design.pages, m_design.occurrenceRoot );
+        acceptPowerAliases( powerAliasCandidates );
+        m_scope = PAGE_SCOPE();
+    }
+
+    walk.sourcePageCount = countSourcePages( m_design.pages, m_design.occurrenceRoot );
+    placeFolder( walk, m_design.pages, m_design.occurrenceRoot, m_rootSheet, aRootPath, {}, false, {}, {} );
+}
+
+
+void ORCAD_CONVERTER::placeFolder( FOLDER_WALK& aWalk, std::vector<ORCAD_RAW_PAGE>& aPages,
+                                   const ORCAD_OCC_SCOPE& aScope, SCH_SHEET* aFolderSheet,
+                                   const SCH_SHEET_PATH& aFolderPath, const std::string& aOccurrenceSuffix,
+                                   bool                                      aRepeatedFolder,
+                                   const std::map<std::string, std::string>& aUnconnectedInterfaceNetNames,
+                                   std::map<std::string, std::string>        aInterfaceNetAliases )
+{
+    struct PAGE_PLACEMENT
+    {
+        ORCAD_RAW_PAGE* page;
+        SCH_SHEET*      sheet;
+        SCH_SHEET_PATH  path;
     };
 
-    auto lowerPowerName = []( std::string aName )
+    auto numberSourcePage = [&]( ORCAD_RAW_PAGE& aPage )
     {
-        std::transform( aName.begin(), aName.end(), aName.begin(),
-                        []( unsigned char c )
-                        {
-                            return static_cast<char>( std::tolower( c ) );
-                        } );
-        return aName;
-    };
-
-    auto recordPowerAlias = [&]( std::map<std::string, POWER_ALIAS_EVIDENCE>& aCandidates,
-                                 const std::string& aSourceName, const std::string& aElectricalName )
-    {
-        if( aSourceName.empty() || aElectricalName.empty() )
+        if( !aWalk.numberSourcePages )
             return;
 
-        POWER_ALIAS_EVIDENCE& evidence = aCandidates[lowerPowerName( aSourceName )];
-        ++evidence.placements;
-
-        if( !isPowerNetName( aElectricalName )
-            || wxString::FromUTF8( aSourceName ).CmpNoCase( wxString::FromUTF8( aElectricalName ) ) == 0 )
-        {
-            return;
-        }
-
-        auto& target = evidence.targets[lowerPowerName( aElectricalName )];
-        target.first = aElectricalName;
-        ++target.second;
+        aPage.sourcePageNumber = ++aWalk.sourcePageIndex;
+        aPage.sourcePageCount = aWalk.sourcePageCount;
     };
 
-    auto acceptPowerAliases = [&]( const std::map<std::string, POWER_ALIAS_EVIDENCE>& aCandidates )
+    auto folderSheetName = [&]( const std::string& aName )
     {
-        for( const auto& [sourceName, evidence] : aCandidates )
-        {
-            if( evidence.targets.size() != 1 )
-                continue;
-
-            const auto& target = evidence.targets.begin()->second;
-
-            if( target.second * 2 > evidence.placements )
-                m_globalNetAliases[sourceName] = target.first;
-        }
+        wxString name = FromOrcadString( aName );
+        return uniqueSheetName( name.IsEmpty() ? wxString( wxS( "PAGE" ) ) : name );
     };
 
-    if( folderHierarchy )
+    std::vector<PAGE_PLACEMENT> placements;
+    bool                        leafFolder = std::all_of( aPages.begin(), aPages.end(),
+                                                          []( const ORCAD_RAW_PAGE& aPage )
+                                                          {
+                                                              return aPage.blocks.empty();
+                                                          } );
+    PAGE_SCOPE scope = occurrenceScope( aScope );
+    scope.flatNetSuffix = aOccurrenceSuffix;
+    scope.namedFlatNets = m_simpleRepeatedLeafDesign && leafFolder;
+    scope.generatedFlatNets = aRepeatedFolder;
+
+    scope.interfaceNetAliases = std::move( aInterfaceNetAliases );
+
+    if( leafFolder )
+        scope.unconnectedInterfaceNetNames = aUnconnectedInterfaceNetNames;
+
+    enterScope( std::move( scope ) );
+
+    auto convertFolderPage = [&]( ORCAD_RAW_PAGE& aPage, SCH_SHEET* aSheet, const SCH_SHEET_PATH& aPath,
+                                  bool aContainerPage, bool aSharedFolderPage )
     {
-        int    pageIndex = 1;
-        size_t sourcePageIndex = 0;
+        pollProgress( m_progressReporter, aPage.name );
+        numberSourcePage( aPage );
+        applyPageSettings( aPage, aSheet->GetScreen() );
+        convertPage( aPage, aSheet->GetScreen(), aPath, aContainerPage, aSharedFolderPage );
+        placements.push_back( { &aPage, aSheet, aPath } );
+    };
 
-        std::function<size_t( const std::vector<ORCAD_RAW_PAGE>&, const ORCAD_OCC_SCOPE& )> countSourcePages =
-                [&]( const std::vector<ORCAD_RAW_PAGE>& aPages, const ORCAD_OCC_SCOPE& aScope )
-        {
-            size_t count = aPages.size();
+    if( aPages.size() == 1 )
+    {
+        bool root = aFolderSheet == m_rootSheet;
+        convertFolderPage( aPages.front(), aFolderSheet, aFolderPath, !root,
+                           aFolderSheet->GetPins().empty() && ( !root || aWalk.rootSharedFolderPage ) );
+    }
+    else if( aFolderSheet == m_rootSheet )
+    {
+        std::vector<std::pair<wxString, wxString>> names;
 
-            for( const ORCAD_OCC_BLOCK& occurrence : aScope.blocks )
-            {
-                std::string key = occurrence.childFolder;
-                std::transform( key.begin(), key.end(), key.begin(),
-                                []( unsigned char c )
-                                {
-                                    return static_cast<char>( std::tolower( c ) );
-                                } );
+        for( size_t i = 0; i < aPages.size(); ++i )
+            names.emplace_back( folderSheetName( aPages[i].name ),
+                                MakePageFileName( static_cast<int>( i + 1 ), aPages[i].name ) );
 
-                if( auto pages = m_design.childFolderPages.find( key ); pages != m_design.childFolderPages.end() )
-                    count += countSourcePages( pages->second, occurrence.scope );
-            }
+        std::vector<SCH_SHEET*> topSheets = createTopLevelSheets( names, true, true );
+        aWalk.pageIndex = static_cast<int>( aPages.size() );
 
-            return count;
-        };
-
-        size_t sourcePageCount = countSourcePages( m_design.pages, m_design.occurrenceRoot );
-        auto   numberSourcePage = [&]( ORCAD_RAW_PAGE& aPage )
-        {
-            aPage.sourcePageNumber = ++sourcePageIndex;
-            aPage.sourcePageCount = sourcePageCount;
-        };
-
-        auto uniqueSheetName = [&]( const std::string& aName )
-        {
-            wxString name = FromOrcadString( aName );
-
-            if( name.IsEmpty() )
-                name = wxS( "PAGE" );
-
-            wxString base = name;
-
-            for( int suffix = 2; !m_usedSheetNames.insert( name.Lower() ).second; ++suffix )
-                name = wxString::Format( wxS( "%s (%d)" ), base, suffix );
-
-            return name;
-        };
-
+        for( size_t i = 0; i < aPages.size(); ++i )
+            convertFolderPage( aPages[i], topSheets[i], topLevelPath( topSheets[i], i + 1 ), false, true );
+    }
+    else
+    {
         auto interfaceNames = [&]( const ORCAD_RAW_PAGE& aPage )
         {
             std::vector<std::string> names;
@@ -1839,12 +2012,7 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
                     if( name.empty() )
                         name = canonicalGlobalNetName( connector.name );
 
-                    std::string key = name;
-                    std::transform( key.begin(), key.end(), key.begin(),
-                                    []( unsigned char c )
-                                    {
-                                        return static_cast<char>( std::tolower( c ) );
-                                    } );
+                    std::string key = OrcadLower( name );
 
                     if( !name.empty() && seen.insert( key ).second )
                         names.push_back( std::move( name ) );
@@ -1866,549 +2034,178 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
             appendPageItem( aScreen, label );
         };
 
-        auto addChildOccurrenceAliases = [&]( const ORCAD_RAW_PAGE& aParentPage, const ORCAD_OCC_SCOPE& aParentScope,
-                                              const ORCAD_DRAWN_INSTANCE& aDrawn, const ORCAD_OCC_SCOPE& aChildScope )
+        SCH_SCREEN* container = aFolderSheet->GetScreen();
+        container->SetPageSettings( PAGE_INFO( PAGE_SIZE_TYPE::A4 ) );
+        size_t outerOrdinal = 0;
+        auto   folderBusNames = m_hierBusNamesByScreen.find( container->GetUuid().AsStdString() );
+
+        for( const SCH_SHEET_PIN* pin : aFolderSheet->GetPins() )
         {
-            auto lower = []( std::string aName )
-            {
-                std::transform( aName.begin(), aName.end(), aName.begin(),
-                                []( unsigned char c )
-                                {
-                                    return static_cast<char>( std::tolower( c ) );
-                                } );
-                return aName;
-            };
-            auto generated = []( const std::string& aName )
-            {
-                return aName.size() > 1 && aName.front() == 'N'
-                       && std::all_of( aName.begin() + 1, aName.end(),
-                                       []( unsigned char c )
-                                       {
-                                           return std::isdigit( c );
-                                       } );
-            };
+            VECTOR2I position( schIUScale.mmToIU( 20 ),
+                               schIUScale.mmToIU( 20 + 5 * static_cast<int>( outerOrdinal++ ) ) );
+            addContainerLabel( container, pin->GetText(), position, true );
+        }
 
-            auto& childAliases = occurrenceAliasesByScope[&aChildScope.netNames];
-
-            for( const ORCAD_BLOCK_PIN& pin : aDrawn.pins )
-            {
-                std::set<std::string> sourceNames = { lower( canonicalGlobalNetName( pin.name ) ) };
-                std::set<uint32_t>    wireObjectIds;
-
-                for( const ORCAD_WIRE& wire : aParentPage.wires )
-                {
-                    if( wire.isBus || !rawPointOnSegment( pin.x, pin.y, wire ) )
-                        continue;
-
-                    wireObjectIds.insert( wire.dbId );
-                    auto pageName = aParentPage.netmap.find( wire.id );
-
-                    if( pageName != aParentPage.netmap.end() && !pageName->second.empty() )
-                        sourceNames.insert( lower( canonicalGlobalNetName( pageName->second ) ) );
-
-                    auto aliases = aParentPage.netAliases.find( wire.id );
-
-                    if( aliases != aParentPage.netAliases.end() )
-                    {
-                        for( const std::string& alias : aliases->second )
-                            sourceNames.insert( lower( canonicalGlobalNetName( alias ) ) );
-                    }
-                }
-
-                std::set<const std::string*> targets;
-
-                for( const auto& [occurrenceId, occurrenceName] : aParentScope.netNames )
-                {
-                    bool matches = sourceNames.count( lower( canonicalGlobalNetName( occurrenceName ) ) );
-
-                    if( std::optional<uint32_t> objectId = occurrenceNetObjectId( occurrenceName ) )
-                        matches = matches || wireObjectIds.count( *objectId );
-
-                    if( matches && !generated( occurrenceName ) )
-                        targets.insert( &occurrenceName );
-                }
-
-                if( targets.size() == 1 )
-                {
-                    std::string sourceName = lower( kicadOccurrenceNetName( pin.name ) );
-                    std::string targetName = kicadOccurrenceNetName( **targets.begin() );
-
-                    if( sourceName != lower( targetName ) )
-                        childAliases[std::move( sourceName )] = std::move( targetName );
-                }
-            }
-        };
-
-        std::function<void( std::vector<ORCAD_RAW_PAGE>&, const ORCAD_OCC_SCOPE&, SCH_SHEET*, const SCH_SHEET_PATH&,
-                            const std::string&, bool, const std::map<std::string, std::string>& )>
-                placeFolder;
-
-        placeFolder = [&]( std::vector<ORCAD_RAW_PAGE>& aPages, const ORCAD_OCC_SCOPE& aScope, SCH_SHEET* aFolderSheet,
-                           const SCH_SHEET_PATH& aFolderPath, const std::string& aOccurrenceSuffix,
-                           bool                                      aRepeatedFolder,
-                           const std::map<std::string, std::string>& aUnconnectedInterfaceNetNames )
+        for( size_t i = 0; i < aPages.size(); ++i )
         {
-            struct PAGE_PLACEMENT
+            ORCAD_RAW_PAGE&          page = aPages[i];
+            int                      column = static_cast<int>( i % 3 );
+            int                      row = static_cast<int>( i / 3 );
+            std::vector<std::string> names = interfaceNames( page );
+
+            if( folderBusNames != m_hierBusNamesByScreen.end() )
             {
-                ORCAD_RAW_PAGE* page;
-                SCH_SHEET*      sheet;
-                SCH_SCREEN*     screen;
-                SCH_SHEET_PATH  path;
-            };
-
-            std::vector<PAGE_PLACEMENT> placements;
-            bool                        leafFolder = std::all_of( aPages.begin(), aPages.end(),
-                                                                  []( const ORCAD_RAW_PAGE& aPage )
-                                                                  {
-                                               return aPage.blocks.empty();
-                                           } );
-            m_currentFlatNetSuffix = aOccurrenceSuffix;
-            m_scopeNamedFlatNets = simpleRepeatedLeafDesign && leafFolder;
-            m_scopeGeneratedFlatNets = aRepeatedFolder;
-            m_currentUnconnectedInterfaceNetNames =
-                    leafFolder ? aUnconnectedInterfaceNetNames : std::map<std::string, std::string>();
-
-            if( aPages.size() == 1 )
-            {
-                ORCAD_RAW_PAGE& page = aPages.front();
-                pollProgress( m_progressReporter, page.name );
-                m_currentOccRefs = &aScope.partRefs;
-                m_currentOccUnitRefs = &aScope.partUnitRefs;
-                m_currentOccProps = &aScope.partProps;
-                m_currentOccNetNames = &aScope.netNames;
-                selectOccurrenceAliases( m_currentOccNetNames );
-
-                numberSourcePage( page );
-                applyPageSettings( page, aFolderSheet->GetScreen() );
-                convertPage( page, aFolderSheet->GetScreen(), aFolderPath, aFolderSheet != aRootSheet,
-                             aFolderSheet->GetPins().empty() );
-                placements.push_back( { &page, aFolderSheet, aFolderSheet->GetScreen(), aFolderPath } );
-            }
-            else if( aFolderSheet == aRootSheet )
-            {
-                std::vector<SCH_SHEET*>  topSheets;
-                std::vector<SCH_SCREEN*> topScreens;
-
-                for( size_t i = 0; i < aPages.size(); ++i )
+                for( std::string& name : names )
                 {
-                    ORCAD_RAW_PAGE& page = aPages[i];
-                    SCH_SHEET*      pageSheet = i == 0 ? aRootSheet : new SCH_SHEET( m_schematic );
-                    SCH_SCREEN*     pageScreen = i == 0 ? aRootSheet->GetScreen() : new SCH_SCREEN( m_schematic );
-                    int             currentPage = static_cast<int>( i + 1 );
+                    auto renamed = folderBusNames->second.find( name );
 
-                    if( i != 0 )
-                    {
-                        const_cast<KIID&>( pageScreen->GetUuid() ) = deterministicUuid( "screen", m_screenOrdinal++ );
-                        const_cast<KIID&>( pageSheet->m_Uuid ) = deterministicUuid( "sheet", currentPage );
-                        pageSheet->SetScreen( pageScreen );
-                    }
-
-                    wxString fileName = MakePageFileName( currentPage, page.name );
-                    pageSheet->GetField( FIELD_T::SHEET_NAME )->SetText( uniqueSheetName( page.name ) );
-                    pageSheet->GetField( FIELD_T::SHEET_FILENAME )->SetText( fileName );
-                    pageScreen->SetFileName( m_schematic->Project().GetProjectPath() + fileName );
-                    topSheets.push_back( pageSheet );
-                    topScreens.push_back( pageScreen );
-                }
-
-                m_schematic->SetTopLevelSheets( topSheets );
-                pageIndex = static_cast<int>( aPages.size() );
-
-                for( size_t i = 0; i < aPages.size(); ++i )
-                {
-                    ORCAD_RAW_PAGE& page = aPages[i];
-                    SCH_SHEET_PATH  pagePath;
-
-                    for( const SCH_SHEET_PATH& candidate : m_schematic->Hierarchy() )
-                    {
-                        if( candidate.Last() == topSheets[i] )
-                        {
-                            pagePath = candidate;
-                            break;
-                        }
-                    }
-
-                    if( pagePath.empty() )
-                        pagePath.push_back( topSheets[i] );
-
-                    pagePath.SetPageNumber( wxString::Format( wxS( "%zu" ), i + 1 ) );
-                    pollProgress( m_progressReporter, page.name );
-                    m_currentOccRefs = &aScope.partRefs;
-                    m_currentOccUnitRefs = &aScope.partUnitRefs;
-                    m_currentOccProps = &aScope.partProps;
-                    m_currentOccNetNames = &aScope.netNames;
-                    selectOccurrenceAliases( m_currentOccNetNames );
-                    numberSourcePage( page );
-                    applyPageSettings( page, topScreens[i] );
-                    convertPage( page, topScreens[i], pagePath, false, true );
-                    placements.push_back( { &page, topSheets[i], topScreens[i], pagePath } );
-                }
-            }
-            else
-            {
-                SCH_SCREEN* container = aFolderSheet->GetScreen();
-                container->SetPageSettings( PAGE_INFO( PAGE_SIZE_TYPE::A4 ) );
-                size_t outerOrdinal = 0;
-                auto   folderBusNames = m_hierBusNamesByScreen.find( container->GetUuid().AsStdString() );
-
-                for( const SCH_SHEET_PIN* pin : aFolderSheet->GetPins() )
-                {
-                    VECTOR2I position( schIUScale.mmToIU( 20 ),
-                                       schIUScale.mmToIU( 20 + 5 * static_cast<int>( outerOrdinal++ ) ) );
-                    addContainerLabel( container, pin->GetText(), position, true );
-                }
-
-                for( size_t i = 0; i < aPages.size(); ++i )
-                {
-                    ORCAD_RAW_PAGE&          page = aPages[i];
-                    int                      column = static_cast<int>( i % 3 );
-                    int                      row = static_cast<int>( i / 3 );
-                    std::vector<std::string> names = interfaceNames( page );
-
-                    if( folderBusNames != m_hierBusNamesByScreen.end() )
-                    {
-                        for( std::string& name : names )
-                        {
-                            auto renamed = folderBusNames->second.find( name );
-
-                            if( renamed != folderBusNames->second.end() )
-                                name = renamed->second;
-                        }
-                    }
-
-                    int         heightMm = std::max( 25, 10 + 5 * static_cast<int>( names.size() ) );
-                    VECTOR2I    position( schIUScale.mmToIU( 55 + column * 70 ), schIUScale.mmToIU( 15 + row * 70 ) );
-                    VECTOR2I    size( schIUScale.mmToIU( 55 ), schIUScale.mmToIU( heightMm ) );
-                    SCH_SCREEN* pageScreen = new SCH_SCREEN( m_schematic );
-                    const_cast<KIID&>( pageScreen->GetUuid() ) = deterministicUuid( "screen", m_screenOrdinal++ );
-
-                    if( folderBusNames != m_hierBusNamesByScreen.end() )
-                        m_hierBusNamesByScreen[pageScreen->GetUuid().AsStdString()] = folderBusNames->second;
-
-                    SCH_SHEET* pageSheet = new SCH_SHEET( aFolderSheet, position, size );
-                    int        currentPage = ++pageIndex;
-                    const_cast<KIID&>( pageSheet->m_Uuid ) = deterministicUuid( "sheet", currentPage );
-                    wxString fileName = MakePageFileName( currentPage, page.name );
-                    pageSheet->GetField( FIELD_T::SHEET_NAME )->SetText( uniqueSheetName( page.name ) );
-                    pageSheet->GetField( FIELD_T::SHEET_FILENAME )->SetText( fileName );
-                    pageSheet->SetScreen( pageScreen );
-                    pageScreen->SetFileName( m_schematic->Project().GetProjectPath() + fileName );
-
-                    for( size_t pinIndex = 0; pinIndex < names.size(); ++pinIndex )
-                    {
-                        VECTOR2I       pinPosition( position.x,
-                                                    position.y + schIUScale.mmToIU( 5 + 5 * static_cast<int>( pinIndex ) ) );
-                        wxString       name = FromOrcadString( names[pinIndex] );
-                        SCH_SHEET_PIN* pin = new SCH_SHEET_PIN( pageSheet, pinPosition, name );
-                        const_cast<KIID&>( pin->m_Uuid ) =
-                                deterministicUuid( "container-pin:" + pageScreen->GetUuid().AsStdString(), pinIndex );
-                        pin->SetSide( SHEET_SIDE::LEFT );
-                        pin->SetShape( LABEL_FLAG_SHAPE::L_BIDI );
-                        pageSheet->AddPin( pin );
-                        addContainerLabel( container, name, pinPosition, false );
-                    }
-
-                    container->Append( pageSheet );
-                    SCH_SHEET_PATH pagePath = aFolderPath;
-                    pagePath.push_back( pageSheet );
-                    pagePath.SetPageNumber( wxString::Format( wxS( "%d" ), currentPage ) );
-                    pollProgress( m_progressReporter, page.name );
-                    m_currentOccRefs = &aScope.partRefs;
-                    m_currentOccUnitRefs = &aScope.partUnitRefs;
-                    m_currentOccProps = &aScope.partProps;
-                    m_currentOccNetNames = &aScope.netNames;
-                    selectOccurrenceAliases( m_currentOccNetNames );
-                    numberSourcePage( page );
-                    applyPageSettings( page, pageScreen );
-                    convertPage( page, pageScreen, pagePath, true, true );
-                    placements.push_back( { &page, pageSheet, pageScreen, pagePath } );
+                    if( renamed != folderBusNames->second.end() )
+                        name = renamed->second;
                 }
             }
 
-            std::vector<const ORCAD_OCC_BLOCK*> occurrences;
+            int         heightMm = std::max( 25, 10 + 5 * static_cast<int>( names.size() ) );
+            VECTOR2I    position( schIUScale.mmToIU( 55 + column * 70 ), schIUScale.mmToIU( 15 + row * 70 ) );
+            VECTOR2I    size( schIUScale.mmToIU( 55 ), schIUScale.mmToIU( heightMm ) );
+            SCH_SCREEN* pageScreen = newScreen();
 
-            for( const ORCAD_OCC_BLOCK& occurrence : aScope.blocks )
-                occurrences.push_back( &occurrence );
+            if( folderBusNames != m_hierBusNamesByScreen.end() )
+                m_hierBusNamesByScreen[pageScreen->GetUuid().AsStdString()] = folderBusNames->second;
 
-            std::stable_sort( occurrences.begin(), occurrences.end(),
-                              []( const ORCAD_OCC_BLOCK* a, const ORCAD_OCC_BLOCK* b )
-                              {
-                                  wxString aName = FromOrcadString( a->childFolder );
-                                  wxString bName = FromOrcadString( b->childFolder );
-                                  int      aOrder = OrcadPageOrder( aName );
-                                  int      bOrder = OrcadPageOrder( bName );
-                                  int      aKey = aOrder >= 0 ? aOrder : std::numeric_limits<int>::max();
-                                  int      bKey = bOrder >= 0 ? bOrder : std::numeric_limits<int>::max();
+            SCH_SHEET* pageSheet = new SCH_SHEET( aFolderSheet, position, size );
+            int        currentPage = ++aWalk.pageIndex;
+            const_cast<KIID&>( pageSheet->m_Uuid ) = deterministicUuid( "sheet", currentPage );
+            wxString fileName = MakePageFileName( currentPage, page.name );
+            pageSheet->GetField( FIELD_T::SHEET_NAME )->SetText( folderSheetName( page.name ) );
+            pageSheet->GetField( FIELD_T::SHEET_FILENAME )->SetText( fileName );
+            pageSheet->SetScreen( pageScreen );
+            pageScreen->SetFileName( m_schematic->Project().GetProjectPath() + fileName );
 
-                                  if( aKey != bKey )
-                                      return aKey < bKey;
-
-                                  return aName.CmpNoCase( bName ) < 0;
-                              } );
-
-            for( const ORCAD_OCC_BLOCK* occurrencePtr : occurrences )
+            for( size_t pinIndex = 0; pinIndex < names.size(); ++pinIndex )
             {
-                const ORCAD_OCC_BLOCK& occurrence = *occurrencePtr;
-                PAGE_PLACEMENT*        parent = nullptr;
-                ORCAD_DRAWN_INSTANCE*  drawn = nullptr;
-
-                for( PAGE_PLACEMENT& placement : placements )
-                {
-                    auto found = std::find_if( placement.page->blocks.begin(), placement.page->blocks.end(),
-                                               [&]( const ORCAD_DRAWN_INSTANCE& aBlock )
-                                               {
-                                                   return aBlock.dbId == occurrence.targetDbId;
-                                               } );
-
-                    if( found != placement.page->blocks.end() )
-                    {
-                        parent = &placement;
-                        drawn = &*found;
-                        break;
-                    }
-                }
-
-                if( !parent || !drawn )
-                    continue;
-
-                std::string key = occurrence.childFolder;
-                std::transform( key.begin(), key.end(), key.begin(),
-                                []( unsigned char c )
-                                {
-                                    return static_cast<char>( std::tolower( c ) );
-                                } );
-                std::vector<ORCAD_RAW_PAGE>& childPages = m_design.childFolderPages.at( key );
-                SCH_SCREEN*                  childScreen = new SCH_SCREEN( m_schematic );
-                const_cast<KIID&>( childScreen->GetUuid() ) = deterministicUuid( "screen", m_screenOrdinal++ );
-                SCH_SHEET* childSheet = new SCH_SHEET( parent->sheet, OrcadDbuToIu( drawn->x1, drawn->y1 ),
-                                                       OrcadDbuToIu( drawn->w, drawn->h ) );
-                int        currentPage = ++pageIndex;
-                const_cast<KIID&>( childSheet->m_Uuid ) = deterministicUuid( "sheet", currentPage );
-                wxString fileName =
-                        MakePageFileName( currentPage, childPages.size() == 1 ? childPages.front().name
-                                                                              : occurrence.childFolder + " container" );
-                childSheet->GetField( FIELD_T::SHEET_NAME )
-                        ->SetText( uniqueSheetName( drawn->reference.empty() ? occurrence.childFolder
-                                                                             : drawn->reference ) );
-                childSheet->GetField( FIELD_T::SHEET_FILENAME )->SetText( fileName );
-                placeHierarchicalBlockFields( childSheet, *drawn, occurrence.childFolder );
-                childSheet->SetScreen( childScreen );
-                childScreen->SetFileName( m_schematic->Project().GetProjectPath() + fileName );
-
-                auto implementation = drawn->props.find( "Implementation" );
-
-                if( implementation != drawn->props.end() && !implementation->second.empty()
-                    && FromOrcadString( implementation->second )
-                                       .CmpNoCase( FromOrcadString( occurrence.childFolder ) )
-                               != 0 )
-                {
-                    childSheet->SetExcludedFromBoard( true );
-                }
-
-                for( size_t pinIndex = 0; pinIndex < drawn->pins.size(); ++pinIndex )
-                {
-                    const ORCAD_BLOCK_PIN& sourcePin = drawn->pins[pinIndex];
-                    VECTOR2I               position = OrcadDbuToIu( sourcePin.x, sourcePin.y );
-                    std::string            sourceName = canonicalGlobalNetName( sourcePin.name );
-                    uint32_t               busNetId = busNetAt( *parent->page, sourcePin );
-                    std::string            pinName = busNetId ? connectedBusName( *parent->page, sourcePin, sourceName )
-                                                              : scopedHierBusName( sourceName, occurrence.targetDbId );
-
-                    if( busNetId && pinName != sourceName )
-                    {
-                        auto parentBusNames = m_hierBusNamesByScreen.find( parent->screen->GetUuid().AsStdString() );
-
-                        if( parentBusNames != m_hierBusNamesByScreen.end() )
-                            pinName = scopedHierBusRange( pinName, parentBusNames->second );
-                    }
-
-                    if( pinName != sourceName )
-                        m_hierBusNamesByScreen[childScreen->GetUuid().AsStdString()][sourceName] = pinName;
-
-                    SCH_SHEET_PIN* pin = new SCH_SHEET_PIN( childSheet, position, FromOrcadString( pinName ) );
-                    const_cast<KIID&>( pin->m_Uuid ) =
-                            deterministicUuid( "sheet-pin:" + childScreen->GetUuid().AsStdString(), pinIndex );
-                    std::array<std::pair<int, SHEET_SIDE>, 4> sides = {
-                        std::pair{ std::abs( sourcePin.x - drawn->x1 ), SHEET_SIDE::LEFT },
-                        std::pair{ std::abs( sourcePin.x - drawn->x1 - drawn->w ), SHEET_SIDE::RIGHT },
-                        std::pair{ std::abs( sourcePin.y - drawn->y1 ), SHEET_SIDE::TOP },
-                        std::pair{ std::abs( sourcePin.y - drawn->y1 - drawn->h ), SHEET_SIDE::BOTTOM }
-                    };
-                    pin->SetSide( std::min_element( sides.begin(), sides.end(),
-                                                    []( const auto& a, const auto& b )
-                                                    {
-                                                        return a.first < b.first;
-                                                    } )
-                                          ->second );
-                    pin->SetPosition( position );
-                    pin->SetShape( hierarchicalPinShape( sourcePin.portType ) );
-                    childSheet->AddPin( pin );
-                    placeHierarchicalBlockPinFill( parent->screen, pin );
-                }
-
-                parent->screen->Append( childSheet );
-                SCH_SHEET_PATH childPath = parent->path;
-                childPath.push_back( childSheet );
-                childPath.SetPageNumber( wxString::Format( wxS( "%d" ), currentPage ) );
-                std::string childSuffix = aOccurrenceSuffix;
-                std::string childKey = occurrence.childFolder;
-                std::transform( childKey.begin(), childKey.end(), childKey.begin(),
-                                []( unsigned char c )
-                                {
-                                    return static_cast<char>( std::tolower( c ) );
-                                } );
-
-                if( !flatNetSuffix( *drawn ).empty() )
-                {
-                    if( !childSuffix.empty() )
-                        childSuffix += '_';
-
-                    childSuffix += flatNetSuffix( *drawn );
-                }
-
-                auto unconnectedNames = unconnectedInterfaceNetNames( *drawn, childSuffix );
-                addChildOccurrenceAliases( *parent->page, aScope, *drawn, occurrence.scope );
-                placeFolder( childPages, occurrence.scope, childSheet, childPath, childSuffix,
-                             occurrenceFolderCounts[childKey] > 1, unconnectedNames );
-            }
-        };
-
-        std::map<std::string, POWER_ALIAS_EVIDENCE> powerAliasCandidates;
-        std::function<void( std::vector<ORCAD_RAW_PAGE>&, const ORCAD_OCC_SCOPE& )> collectPowerAliases =
-                [&]( std::vector<ORCAD_RAW_PAGE>& aPages, const ORCAD_OCC_SCOPE& aScope )
-        {
-            m_currentOccRefs = &aScope.partRefs;
-            m_currentOccUnitRefs = &aScope.partUnitRefs;
-            m_currentOccProps = &aScope.partProps;
-            m_currentOccNetNames = &aScope.netNames;
-            selectOccurrenceAliases( m_currentOccNetNames );
-
-            for( ORCAD_RAW_PAGE& page : aPages )
-            {
-                buildNetLookup( page );
-
-                for( const ORCAD_GRAPHIC_INST& global : page.globals )
-                {
-                    std::string sourceName = trimmed( global.logicalName );
-                    std::string electricalName = powerNet( page, global );
-                    recordPowerAlias( powerAliasCandidates, sourceName, electricalName );
-                }
+                VECTOR2I       pinPosition( position.x,
+                                            position.y + schIUScale.mmToIU( 5 + 5 * static_cast<int>( pinIndex ) ) );
+                wxString       name = FromOrcadString( names[pinIndex] );
+                SCH_SHEET_PIN* pin = new SCH_SHEET_PIN( pageSheet, pinPosition, name );
+                const_cast<KIID&>( pin->m_Uuid ) =
+                        deterministicUuid( "container-pin:" + pageScreen->GetUuid().AsStdString(), pinIndex );
+                pin->SetSide( SHEET_SIDE::LEFT );
+                pin->SetShape( LABEL_FLAG_SHAPE::L_BIDI );
+                pageSheet->AddPin( pin );
+                addContainerLabel( container, name, pinPosition, false );
             }
 
-            for( const ORCAD_OCC_BLOCK& occurrence : aScope.blocks )
-            {
-                ORCAD_RAW_PAGE*        parentPage = nullptr;
-                ORCAD_DRAWN_INSTANCE* drawn = nullptr;
-
-                for( ORCAD_RAW_PAGE& page : aPages )
-                {
-                    auto found = std::find_if( page.blocks.begin(), page.blocks.end(),
-                                               [&]( const ORCAD_DRAWN_INSTANCE& aBlock )
-                                               {
-                                                   return aBlock.dbId == occurrence.targetDbId;
-                                               } );
-
-                    if( found != page.blocks.end() )
-                    {
-                        parentPage = &page;
-                        drawn = &*found;
-                        break;
-                    }
-                }
-
-                std::string key = lowerPowerName( occurrence.childFolder );
-                auto        childPages = m_design.childFolderPages.find( key );
-
-                if( parentPage && drawn && childPages != m_design.childFolderPages.end() )
-                {
-                    addChildOccurrenceAliases( *parentPage, aScope, *drawn, occurrence.scope );
-                    collectPowerAliases( childPages->second, occurrence.scope );
-                }
-            }
-        };
-
-        collectPowerAliases( m_design.pages, m_design.occurrenceRoot );
-        acceptPowerAliases( powerAliasCandidates );
-
-        m_currentOccRefs = nullptr;
-        m_currentOccUnitRefs = nullptr;
-        m_currentOccProps = nullptr;
-        m_currentOccNetNames = nullptr;
-        m_currentOccurrenceNetAliases.clear();
-
-        placeFolder( m_design.pages, m_design.occurrenceRoot, aRootSheet, rootPath, {}, false, {} );
-        m_currentOccRefs = nullptr;
-        m_currentOccUnitRefs = nullptr;
-        m_currentOccProps = nullptr;
-        m_currentOccNetNames = nullptr;
-        m_currentFlatNetSuffix.clear();
-        m_scopeNamedFlatNets = false;
-        m_scopeGeneratedFlatNets = false;
-        m_currentUnconnectedInterfaceNetNames.clear();
-        m_currentOccurrenceNetAliases.clear();
-        finishConversion();
-        return aRootSheet;
+            container->Append( pageSheet );
+            SCH_SHEET_PATH pagePath = aFolderPath;
+            pagePath.push_back( pageSheet );
+            pagePath.SetPageNumber( wxString::Format( wxS( "%d" ), currentPage ) );
+            convertFolderPage( page, pageSheet, pagePath, true, true );
+        }
     }
 
+    for( const ORCAD_OCC_BLOCK* occurrencePtr : sortedOccurrences( aScope ) )
+    {
+        const ORCAD_OCC_BLOCK&      occurrence = *occurrencePtr;
+        PAGE_PLACEMENT*             parent = nullptr;
+        const ORCAD_DRAWN_INSTANCE* drawn = nullptr;
+
+        for( PAGE_PLACEMENT& placement : placements )
+        {
+            drawn = findDrawnBlock( *placement.page, occurrence.targetDbId );
+
+            if( drawn )
+            {
+                parent = &placement;
+                break;
+            }
+        }
+
+        if( !parent || !drawn )
+            continue;
+
+        std::string                  childKey = OrcadLower( occurrence.childFolder );
+        std::vector<ORCAD_RAW_PAGE>& childPages = m_design.childFolderPages.at( childKey );
+        std::string filePageName =
+                childPages.size() == 1 ? childPages.front().name : occurrence.childFolder + " container";
+        wxString    sheetName;
+
+        if( aWalk.folderSheetNames )
+        {
+            sheetName = folderSheetName( drawn->reference.empty() ? occurrence.childFolder : drawn->reference );
+        }
+        else
+        {
+            sheetName = uniqueSheetName(
+                    FromOrcadString( drawn->reference.empty() ? filePageName : drawn->reference ) );
+        }
+
+        SCH_SHEET* childSheet = createBlockSheet( parent->sheet, *parent->page, *drawn, occurrence, sheetName,
+                                                  filePageName, ++aWalk.pageIndex );
+
+        SCH_SHEET_PATH childPath = parent->path;
+        childPath.push_back( childSheet );
+        childPath.SetPageNumber( wxString::Format( wxS( "%d" ), aWalk.pageIndex ) );
+        std::string childSuffix;
+
+        if( aWalk.nestedFlatSuffix || m_simpleRepeatedLeafDesign )
+            childSuffix = appendOccurrenceSuffix( aOccurrenceSuffix, *drawn );
+
+        std::map<std::string, std::string> interfaceAliases;
+
+        if( aWalk.interfaceAliases )
+        {
+            for( const ORCAD_BLOCK_PIN& pin : drawn->pins )
+            {
+                std::set<const std::string*> targets =
+                        pinOccurrenceTargets( *parent->page, pin, aScope.netNames, false );
+
+                if( targets.size() == 1 )
+                    interfaceAliases[canonicalGlobalNetKey( pin.name )] = canonicalGlobalNetName( **targets.begin() );
+            }
+        }
+
+        auto unconnectedNames = unconnectedInterfaceNetNames( *drawn, childSuffix );
+
+        if( aWalk.occurrenceAliases )
+            addChildOccurrenceAliases( *parent->page, aScope, *drawn, occurrence.scope );
+
+        placeFolder( aWalk, childPages, occurrence.scope, childSheet, childPath, childSuffix,
+                     m_occurrenceFolderCounts[childKey] > 1, unconnectedNames, std::move( interfaceAliases ) );
+    }
+}
+
+
+void ORCAD_CONVERTER::convertFlatPages( const SCH_SHEET_PATH& aRootPath )
+{
     // Page list = root pages + each block occurrence's child pages, tagged w/ scope refs.
     // Child schematic reused N times yields N jobs, each w/ own designators.
     struct PAGE_JOB
     {
-        ORCAD_RAW_PAGE*                        page;
-        const std::map<uint32_t, std::string>* refs;
-        const std::map<uint32_t, std::string>* unitRefs;
-        const std::map<uint32_t, std::map<std::string, std::string>>* props;
-        const std::map<uint32_t, std::string>* netNames;
-        std::string                            flatNetSuffix;
-        bool                                   scopeNamedFlatNets;
-        bool                                   scopeGeneratedFlatNets;
-        std::map<std::string, std::string>     unconnectedInterfaceNetNames;
+        ORCAD_RAW_PAGE* page;
+        PAGE_SCOPE      scope;
+
+        const std::map<uint32_t, std::string>* netNames() const { return &scope.occ->netNames; }
     };
 
     std::vector<PAGE_JOB> jobs;
 
     for( ORCAD_RAW_PAGE& page : m_design.pages )
-        jobs.push_back( { &page,
-                          &m_design.occurrenceRoot.partRefs,
-                          &m_design.occurrenceRoot.partUnitRefs,
-                          &m_design.occurrenceRoot.partProps,
-                          &m_design.occurrenceRoot.netNames,
-                          {},
-                          false,
-                          false,
-                          {} } );
+        jobs.push_back( { &page, occurrenceScope( m_design.occurrenceRoot ) } );
 
-    auto findBlock = [&]( uint32_t aDbId ) -> std::pair<const ORCAD_DRAWN_INSTANCE*, const ORCAD_RAW_PAGE*>
+    auto findBlock = [&]( uint32_t aDbId )
     {
-        auto findInPages = [&]( const std::vector<ORCAD_RAW_PAGE>& aPages )
-                -> std::pair<const ORCAD_DRAWN_INSTANCE*, const ORCAD_RAW_PAGE*>
-        {
-            for( const ORCAD_RAW_PAGE& page : aPages )
-            {
-                for( const ORCAD_DRAWN_INSTANCE& block : page.blocks )
+        std::pair<const ORCAD_DRAWN_INSTANCE*, const ORCAD_RAW_PAGE*> result;
+
+        forEachDesignPage(
+                [&]( const ORCAD_RAW_PAGE& aPage )
                 {
-                    if( block.dbId == aDbId )
-                        return { &block, &page };
-                }
-            }
+                    const ORCAD_DRAWN_INSTANCE* block = result.first ? nullptr : findDrawnBlock( aPage, aDbId );
 
-            return {};
-        };
+                    if( block )
+                        result = { block, &aPage };
+                } );
 
-        auto result = findInPages( m_design.pages );
-
-        if( result.first )
-            return result;
-
-        for( const auto& [folder, pages] : m_design.childFolderPages )
-        {
-            result = findInPages( pages );
-
-            if( result.first )
-                return result;
-        }
-
-        return {};
+        return result;
     };
 
     std::function<void( const ORCAD_OCC_SCOPE&, const std::string& )> expand =
@@ -2416,24 +2213,11 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
     {
         for( const ORCAD_OCC_BLOCK& block : aScope.blocks )
         {
-            std::string key = block.childFolder;
-            std::transform( key.begin(), key.end(), key.begin(),
-                            []( unsigned char c )
-                            {
-                                return static_cast<char>( std::tolower( c ) );
-                            } );
+            std::string key = OrcadLower( block.childFolder );
 
             auto                        it = m_design.childFolderPages.find( key );
             const ORCAD_DRAWN_INSTANCE* drawn = findBlock( block.targetDbId ).first;
-            std::string                 occurrenceSuffix = aParentSuffix;
-
-            if( drawn && !flatNetSuffix( *drawn ).empty() )
-            {
-                if( !occurrenceSuffix.empty() )
-                    occurrenceSuffix += '_';
-
-                occurrenceSuffix += flatNetSuffix( *drawn );
-            }
+            std::string occurrenceSuffix = drawn ? appendOccurrenceSuffix( aParentSuffix, *drawn ) : aParentSuffix;
 
             if( it != m_design.childFolderPages.end() )
             {
@@ -2447,14 +2231,14 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
                 if( drawn )
                     unconnectedNames = unconnectedInterfaceNetNames( *drawn, occurrenceSuffix );
 
+                PAGE_SCOPE scope = occurrenceScope( block.scope );
+                scope.flatNetSuffix = leafFolder ? occurrenceSuffix : std::string();
+                scope.namedFlatNets = m_simpleRepeatedLeafDesign && leafFolder;
+                scope.generatedFlatNets = leafFolder && m_occurrenceFolderCounts[key] > 1;
+                scope.unconnectedInterfaceNetNames = std::move( unconnectedNames );
+
                 for( ORCAD_RAW_PAGE& childPage : it->second )
-                {
-                    jobs.push_back( { &childPage, &block.scope.partRefs, &block.scope.partUnitRefs,
-                                      &block.scope.partProps, &block.scope.netNames,
-                                      leafFolder ? occurrenceSuffix : std::string(),
-                                      simpleRepeatedLeafDesign && leafFolder,
-                                      leafFolder && occurrenceFolderCounts[key] > 1, unconnectedNames } );
-                }
+                    jobs.push_back( { &childPage, scope } );
             }
 
             expand( block.scope, occurrenceSuffix );
@@ -2467,16 +2251,6 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
             interfaceAliasCandidates;
     std::map<const std::map<uint32_t, std::string>*, std::map<std::string, std::set<std::string>>>
             connectorAliasCandidates;
-
-    auto lowerName = []( std::string aName )
-    {
-        std::transform( aName.begin(), aName.end(), aName.begin(),
-                        []( unsigned char c )
-                        {
-                            return static_cast<char>( std::tolower( c ) );
-                        } );
-        return aName;
-    };
 
     using NET_NAME_SCOPE = const std::map<uint32_t, std::string>*;
     std::map<NET_NAME_SCOPE, std::map<std::string, std::set<std::string>>> interfaceNameGraphs;
@@ -2492,7 +2266,7 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
 
             if( primary != job.page->netmap.end() && !primary->second.empty() )
             {
-                std::string name = lowerName( canonicalGlobalNetName( primary->second ) );
+                std::string name = canonicalGlobalNetKey( primary->second );
                 names.insert( name );
                 allPowerNames = isPowerNetName( primary->second );
                 anyPowerName = allPowerNames;
@@ -2502,7 +2276,7 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
             {
                 if( !alias.empty() )
                 {
-                    names.insert( lowerName( canonicalGlobalNetName( alias ) ) );
+                    names.insert( canonicalGlobalNetKey( alias ) );
                     allPowerNames = allPowerNames && isPowerNetName( alias );
                     anyPowerName = anyPowerName || isPowerNetName( alias );
                 }
@@ -2513,7 +2287,7 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
 
             for( const std::string& name : names )
             {
-                auto& neighbors = interfaceNameGraphs[job.netNames][name];
+                auto& neighbors = interfaceNameGraphs[job.netNames()][name];
                 neighbors.insert( names.begin(), names.end() );
             }
         }
@@ -2528,7 +2302,7 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
             for( const std::string& alias : aliases )
             {
                 if( !alias.empty() )
-                    distinctAliases.insert( lowerName( alias ) );
+                    distinctAliases.insert( OrcadLower( alias ) );
             }
 
             auto primary = job.page->netmap.find( netId );
@@ -2545,9 +2319,9 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
                                                 return !aName.empty();
                                             } );
 
-            for( const auto& [occurrenceId, occurrenceName] : *job.netNames )
+            for( const auto& [occurrenceId, occurrenceName] : *job.netNames() )
             {
-                if( lowerName( primary->second ) == lowerName( occurrenceName ) )
+                if( OrcadLower( primary->second ) == OrcadLower( occurrenceName ) )
                     effectiveName = canonicalGlobalNetName( occurrenceName );
             }
 
@@ -2581,13 +2355,13 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
                                             return false;
                                         }
 
-                                        std::string aliasName = lowerName( aAlias.name );
+                                        std::string aliasName = OrcadLower( aAlias.name );
 
                                         return std::none_of( aliases.begin(), aliases.end(),
                                                              [&]( const std::string& aName )
                                                              {
                                                                  return isOffpageNetName( aName )
-                                                                        && lowerName( aName ).find( aliasName )
+                                                                        && OrcadLower( aName ).find( aliasName )
                                                                                    != std::string::npos;
                                                              } );
                                     } );
@@ -2598,7 +2372,7 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
                             for( const ORCAD_ALIAS& alias : wire.aliases )
                             {
                                 if( alias.name.empty() || isOffpageNetName( alias.name ) || firstAlias == aliases.end()
-                                    || lowerName( alias.name ) != lowerName( *firstAlias ) )
+                                    || OrcadLower( alias.name ) != OrcadLower( *firstAlias ) )
                                 {
                                     continue;
                                 }
@@ -2649,9 +2423,8 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
                                                     return std::any_of( aWire.aliases.begin(), aWire.aliases.end(),
                                                                         [&]( const ORCAD_ALIAS& aAlias )
                                                                         {
-                                                                            return lowerName( canonicalGlobalNetName(
-                                                                                           aAlias.name ) )
-                                                                                   == lowerName( effectiveName );
+                                                                            return canonicalGlobalNetKey( aAlias.name )
+                                                                                   == OrcadLower( effectiveName );
                                                                         } );
                                                 } );
                                     } );
@@ -2665,11 +2438,11 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
             {
                 if( isOffpageNetName( alias ) )
                 {
-                    std::string sourceName = lowerName( canonicalGlobalNetName( alias ) );
-                    interfaceAliasCandidates[job.netNames][sourceName].insert( effectiveName );
+                    std::string sourceName = canonicalGlobalNetKey( alias );
+                    interfaceAliasCandidates[job.netNames()][sourceName].insert( effectiveName );
 
                     if( connectorAlias )
-                        connectorAliasCandidates[job.netNames][sourceName].insert( effectiveName );
+                        connectorAliasCandidates[job.netNames()][sourceName].insert( effectiveName );
                 }
             }
         }
@@ -2691,20 +2464,20 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
             if( selected == effectiveNames.end() )
                 continue;
 
-            bool sourceIsOccurrenceName = std::any_of(
-                    scope->begin(), scope->end(),
-                    [&]( const auto& aOccurrenceNet )
-                    {
-                        return lowerName( canonicalGlobalNetName( aOccurrenceNet.second ) ) == sourceName;
-                    } );
-            bool selectedIsOccurrenceName = std::any_of(
-                    scope->begin(), scope->end(),
-                    [&]( const auto& aOccurrenceNet )
-                    {
-                        return lowerName( canonicalGlobalNetName( aOccurrenceNet.second ) ) == lowerName( *selected );
-                    } );
+            bool sourceIsOccurrenceName =
+                    std::any_of( scope->begin(), scope->end(),
+                                 [&]( const auto& aOccurrenceNet )
+                                 {
+                                     return canonicalGlobalNetKey( aOccurrenceNet.second ) == sourceName;
+                                 } );
+            bool selectedIsOccurrenceName =
+                    std::any_of( scope->begin(), scope->end(),
+                                 [&]( const auto& aOccurrenceNet )
+                                 {
+                                     return canonicalGlobalNetKey( aOccurrenceNet.second ) == OrcadLower( *selected );
+                                 } );
 
-            if( sourceIsOccurrenceName && selectedIsOccurrenceName && lowerName( *selected ) != sourceName )
+            if( sourceIsOccurrenceName && selectedIsOccurrenceName && OrcadLower( *selected ) != sourceName )
                 continue;
 
             bool uniqueLength = std::none_of( effectiveNames.begin(), effectiveNames.end(),
@@ -2760,7 +2533,7 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
 
             for( const auto& [occurrenceId, occurrenceName] : *scope )
             {
-                std::string key = lowerName( canonicalGlobalNetName( occurrenceName ) );
+                std::string key = canonicalGlobalNetKey( occurrenceName );
 
                 if( component.count( key ) )
                     authoritativeNames.insert( canonicalGlobalNetName( occurrenceName ) );
@@ -2775,7 +2548,6 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
                     continue;
 
                 interfaceAliasesByScope[scope][sourceName] = *authoritativeNames.begin();
-                connectorAliasesByScope[scope].erase( sourceName );
             }
         }
     }
@@ -2796,44 +2568,10 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
                     if( pin.name.empty() )
                         continue;
 
-                    std::set<std::string> sourceNames = { lowerName( canonicalGlobalNetName( pin.name ) ) };
-                    std::set<uint32_t>    wireObjectIds;
-
-                    for( const ORCAD_WIRE& wire : parentPage->wires )
-                    {
-                        if( wire.isBus || !rawPointOnSegment( pin.x, pin.y, wire ) )
-                            continue;
-
-                        wireObjectIds.insert( wire.dbId );
-                        auto pageName = parentPage->netmap.find( wire.id );
-
-                        if( pageName != parentPage->netmap.end() && !pageName->second.empty() )
-                            sourceNames.insert( lowerName( canonicalGlobalNetName( pageName->second ) ) );
-
-                        auto aliases = parentPage->netAliases.find( wire.id );
-
-                        if( aliases != parentPage->netAliases.end() )
-                        {
-                            for( const std::string& alias : aliases->second )
-                                sourceNames.insert( lowerName( canonicalGlobalNetName( alias ) ) );
-                        }
-                    }
-
-                    std::set<const std::string*> targets;
-
-                    for( const auto& [occurrenceId, occurrenceName] : aParentScope.netNames )
-                    {
-                        std::string occurrenceKey = lowerName( canonicalGlobalNetName( occurrenceName ) );
-                        bool        matches = sourceNames.count( occurrenceKey );
-
-                        if( std::optional<uint32_t> objectId = occurrenceNetObjectId( occurrenceName ) )
-                            matches = matches || wireObjectIds.count( *objectId );
-
-                        if( matches )
-                            targets.insert( &occurrenceName );
-                    }
-
-                    std::string targetName;
+                    std::set<std::string>        sourceNames;
+                    std::set<const std::string*> targets =
+                            pinOccurrenceTargets( *parentPage, pin, aParentScope.netNames, false, &sourceNames );
+                    std::string                  targetName;
 
                     if( targets.size() == 1 )
                         targetName = canonicalGlobalNetName( **targets.begin() );
@@ -2849,14 +2587,13 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
                     }
 
                     if( !targetName.empty() )
-                        childAliases[lowerName( canonicalGlobalNetName( pin.name ) )] = std::move( targetName );
-
+                        childAliases[canonicalGlobalNetKey( pin.name )] = std::move( targetName );
                 }
             }
 
             for( auto& [sourceName, targetName] : childAliases )
             {
-                auto inherited = parentAliases.find( lowerName( canonicalGlobalNetName( targetName ) ) );
+                auto inherited = parentAliases.find( canonicalGlobalNetKey( targetName ) );
 
                 if( inherited != parentAliases.end() )
                     targetName = inherited->second;
@@ -2864,7 +2601,7 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
 
             for( const auto& [occurrenceId, occurrenceName] : block.scope.netNames )
             {
-                std::string sourceName = lowerName( canonicalGlobalNetName( occurrenceName ) );
+                std::string sourceName = canonicalGlobalNetKey( occurrenceName );
                 auto        inherited = parentAliases.find( sourceName );
 
                 if( inherited != parentAliases.end() )
@@ -2876,21 +2613,19 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
     };
     propagateInterfaceAliases( m_design.occurrenceRoot );
 
+    auto jobScope = [&]( const PAGE_JOB& aJob )
+    {
+        PAGE_SCOPE scope = aJob.scope;
+        scope.interfaceNetAliases = interfaceAliasesByScope[aJob.netNames()];
+        scope.connectorInterfaceNetAliases = connectorAliasesByScope[aJob.netNames()];
+        return scope;
+    };
+
     std::map<std::string, POWER_ALIAS_EVIDENCE> powerAliasCandidates;
 
     for( const PAGE_JOB& job : jobs )
     {
-        m_currentOccRefs = job.refs;
-        m_currentOccUnitRefs = job.unitRefs;
-        m_currentOccProps = job.props;
-        m_currentOccNetNames = job.netNames;
-        selectOccurrenceAliases( m_currentOccNetNames );
-        m_currentFlatNetSuffix = job.flatNetSuffix;
-        m_scopeNamedFlatNets = job.scopeNamedFlatNets;
-        m_scopeGeneratedFlatNets = job.scopeGeneratedFlatNets;
-        m_currentUnconnectedInterfaceNetNames = job.unconnectedInterfaceNetNames;
-        m_currentInterfaceNetAliases = interfaceAliasesByScope[job.netNames];
-        m_currentConnectorInterfaceNetAliases = connectorAliasesByScope[job.netNames];
+        enterScope( jobScope( job ) );
         buildNetLookup( *job.page );
 
         for( const ORCAD_GRAPHIC_INST& global : job.page->globals )
@@ -2902,47 +2637,17 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
     }
 
     acceptPowerAliases( powerAliasCandidates );
-
-    m_currentOccRefs = nullptr;
-    m_currentOccUnitRefs = nullptr;
-    m_currentOccProps = nullptr;
-    m_currentOccNetNames = nullptr;
-    m_currentFlatNetSuffix.clear();
-    m_scopeNamedFlatNets = false;
-    m_scopeGeneratedFlatNets = false;
-    m_currentUnconnectedInterfaceNetNames.clear();
-    m_currentInterfaceNetAliases.clear();
-    m_currentConnectorInterfaceNetAliases.clear();
-    m_currentOccurrenceNetAliases.clear();
+    m_scope = PAGE_SCOPE();
 
     if( jobs.size() == 1 )
     {
         PAGE_JOB& job = jobs[0];
 
         pollProgress( m_progressReporter, job.page->name );
-        m_currentOccRefs = job.refs;
-        m_currentOccUnitRefs = job.unitRefs;
-        m_currentOccProps = job.props;
-        m_currentOccNetNames = job.netNames;
-        selectOccurrenceAliases( m_currentOccNetNames );
-        m_currentFlatNetSuffix = job.flatNetSuffix;
-        m_scopeNamedFlatNets = job.scopeNamedFlatNets;
-        m_scopeGeneratedFlatNets = job.scopeGeneratedFlatNets;
-        m_currentUnconnectedInterfaceNetNames = job.unconnectedInterfaceNetNames;
-        m_currentInterfaceNetAliases = interfaceAliasesByScope[job.netNames];
-        m_currentConnectorInterfaceNetAliases = connectorAliasesByScope[job.netNames];
-        applyPageSettings( *job.page, rootScreen );
-        convertPage( *job.page, rootScreen, rootPath );
-        m_currentOccRefs = nullptr;
-        m_currentOccUnitRefs = nullptr;
-        m_currentOccProps = nullptr;
-        m_currentOccNetNames = nullptr;
-        m_currentFlatNetSuffix.clear();
-        m_scopeNamedFlatNets = false;
-        m_scopeGeneratedFlatNets = false;
-        m_currentUnconnectedInterfaceNetNames.clear();
-        m_currentInterfaceNetAliases.clear();
-        m_currentConnectorInterfaceNetAliases.clear();
+        enterScope( jobScope( job ) );
+        applyPageSettings( *job.page, m_rootSheet->GetScreen() );
+        convertPage( *job.page, m_rootSheet->GetScreen(), aRootPath );
+        m_scope = PAGE_SCOPE();
     }
     else
     {
@@ -3004,95 +2709,27 @@ SCH_SHEET* ORCAD_CONVERTER::Convert( SCH_SHEET* aRootSheet )
             }
         }
 
-        std::vector<SCH_SHEET*>  topSheets;
-        std::vector<SCH_SCREEN*> topScreens;
+        std::vector<std::pair<wxString, wxString>> names;
 
         for( size_t i = 0; i < sheetJobs.size(); ++i )
         {
-            SHEET_JOB& sj = sheetJobs[i];
-
-            SCH_SHEET*  sheet;
-            SCH_SCREEN* screen;
-
-            if( i == 0 )
-            {
-                // Reuse sheet the loader created for first page
-                sheet = aRootSheet;
-                screen = rootScreen;
-            }
-            else
-            {
-                screen = new SCH_SCREEN( m_schematic );
-                const_cast<KIID&>( screen->GetUuid() ) = deterministicUuid( "screen", m_screenOrdinal++ );
-                sheet = new SCH_SHEET( m_schematic );
-                sheet->SetScreen( screen );
-                sheet->SyncUuidToScreen();
-            }
-
-            wxString base = sj.name;
-
-            for( int suffix = 2; !m_usedSheetNames.insert( sj.name.Lower() ).second; ++suffix )
-                sj.name = wxString::Format( wxS( "%s (%d)" ), base, suffix );
-
-            wxString fileName = MakePageFileName( static_cast<int>( i + 1 ), sj.job.page->name );
-
-            sheet->GetField( FIELD_T::SHEET_NAME )->SetText( sj.name );
-            sheet->GetField( FIELD_T::SHEET_FILENAME )->SetText( fileName );
-            screen->SetFileName( m_schematic->Project().GetProjectPath() + fileName );
-
-            topSheets.push_back( sheet );
-            topScreens.push_back( screen );
+            names.emplace_back( uniqueSheetName( sheetJobs[i].name ),
+                                MakePageFileName( static_cast<int>( i + 1 ), sheetJobs[i].job.page->name ) );
         }
 
-        m_schematic->SetTopLevelSheets( topSheets );
+        std::vector<SCH_SHEET*> topSheets = createTopLevelSheets( names, true, false );
 
         for( size_t i = 0; i < sheetJobs.size(); ++i )
         {
             SHEET_JOB&     sj = sheetJobs[i];
-            SCH_SHEET_PATH pagePath;
-
-            for( const SCH_SHEET_PATH& candidate : m_schematic->Hierarchy() )
-            {
-                if( candidate.Last() == topSheets[i] )
-                {
-                    pagePath = candidate;
-                    break;
-                }
-            }
-
-            if( pagePath.empty() )
-                pagePath.push_back( topSheets[i] );
-
-            pagePath.SetPageNumber( wxString::Format( wxS( "%zu" ), i + 1 ) );
+            SCH_SHEET_PATH pagePath = topLevelPath( topSheets[i], i + 1 );
             pollProgress( m_progressReporter, sj.job.page->name );
-            m_currentOccRefs = sj.job.refs;
-            m_currentOccUnitRefs = sj.job.unitRefs;
-            m_currentOccProps = sj.job.props;
-            m_currentOccNetNames = sj.job.netNames;
-            selectOccurrenceAliases( m_currentOccNetNames );
-            m_currentFlatNetSuffix = sj.job.flatNetSuffix;
-            m_scopeNamedFlatNets = sj.job.scopeNamedFlatNets;
-            m_scopeGeneratedFlatNets = sj.job.scopeGeneratedFlatNets;
-            m_currentUnconnectedInterfaceNetNames = sj.job.unconnectedInterfaceNetNames;
-            m_currentInterfaceNetAliases = interfaceAliasesByScope[sj.job.netNames];
-            m_currentConnectorInterfaceNetAliases = connectorAliasesByScope[sj.job.netNames];
-            applyPageSettings( *sj.job.page, topScreens[i] );
-            convertPage( *sj.job.page, topScreens[i], pagePath );
-            m_currentOccRefs = nullptr;
-            m_currentOccUnitRefs = nullptr;
-            m_currentOccProps = nullptr;
-            m_currentOccNetNames = nullptr;
-            m_currentFlatNetSuffix.clear();
-            m_scopeNamedFlatNets = false;
-            m_scopeGeneratedFlatNets = false;
-            m_currentUnconnectedInterfaceNetNames.clear();
-            m_currentInterfaceNetAliases.clear();
-            m_currentConnectorInterfaceNetAliases.clear();
+            enterScope( jobScope( sj.job ) );
+            applyPageSettings( *sj.job.page, topSheets[i]->GetScreen() );
+            convertPage( *sj.job.page, topSheets[i]->GetScreen(), pagePath );
+            m_scope = PAGE_SCOPE();
         }
     }
-
-    finishConversion();
-    return aRootSheet;
 }
 
 
@@ -3114,36 +2751,15 @@ void ORCAD_CONVERTER::convertUnreferencedPages()
             usedFileNames.insert( wxFileName( path.LastScreen()->GetFileName() ).GetFullName().Lower() );
     }
 
-    size_t fileIndex = topSheets.size() + 1;
+    size_t                                     fileIndex = topSheets.size() + 1;
+    std::vector<ORCAD_RAW_PAGE*>               pages;
+    std::vector<std::pair<wxString, wxString>> names;
 
-    struct PAGE_SHEET
+    for( auto& [folder, folderPages] : m_design.unreferencedFolderPages )
     {
-        ORCAD_RAW_PAGE* page;
-        SCH_SHEET*      sheet;
-        SCH_SCREEN*     screen;
-        size_t          pageNumber;
-    };
-
-    std::vector<PAGE_SHEET> pageSheets;
-
-    for( auto& [folder, pages] : m_design.unreferencedFolderPages )
-    {
-        for( ORCAD_RAW_PAGE& page : pages )
+        for( ORCAD_RAW_PAGE& page : folderPages )
         {
-            SCH_SCREEN* screen = new SCH_SCREEN( m_schematic );
-            const_cast<KIID&>( screen->GetUuid() ) = deterministicUuid( "screen", m_screenOrdinal++ );
-            SCH_SHEET* sheet = new SCH_SHEET( m_schematic );
-            sheet->SetScreen( screen );
-            const_cast<KIID&>( sheet->m_Uuid ) = screen->GetUuid();
-            sheet->SetExcludedFromBoard( true );
-
-            wxString name = FromOrcadString( page.name );
-            wxString base = name;
-
-            for( int suffix = 2; !m_usedSheetNames.insert( name.Lower() ).second; ++suffix )
-                name = wxString::Format( wxS( "%s (%d)" ), base, suffix );
-
-            size_t   pageNumber = topSheets.size() + 1;
+            wxString name = uniqueSheetName( FromOrcadString( page.name ) );
             wxString fileName;
 
             do
@@ -3151,50 +2767,26 @@ void ORCAD_CONVERTER::convertUnreferencedPages()
                 fileName = MakePageFileName( static_cast<int>( fileIndex++ ), page.name );
             } while( !usedFileNames.insert( fileName.Lower() ).second );
 
-            sheet->GetField( FIELD_T::SHEET_NAME )->SetText( name );
-            sheet->GetField( FIELD_T::SHEET_FILENAME )->SetText( fileName );
-            screen->SetFileName( m_schematic->Project().GetProjectPath() + fileName );
-            topSheets.push_back( sheet );
-            pageSheets.push_back( { &page, sheet, screen, pageNumber } );
+            pages.push_back( &page );
+            names.emplace_back( name, fileName );
         }
     }
 
-    m_schematic->SetTopLevelSheets( topSheets );
-    m_currentOccRefs = nullptr;
-    m_currentOccUnitRefs = nullptr;
-    m_currentOccProps = nullptr;
-    m_currentOccNetNames = nullptr;
-    m_currentFlatNetSuffix.clear();
-    m_scopeNamedFlatNets = false;
-    m_scopeGeneratedFlatNets = false;
-    m_currentUnconnectedInterfaceNetNames.clear();
-    m_currentInterfaceNetAliases.clear();
-    m_currentOccurrenceNetAliases.clear();
-    m_currentConnectorInterfaceNetAliases.clear();
+    std::vector<SCH_SHEET*> sheets = createTopLevelSheets( names, false, false );
+    m_scope = PAGE_SCOPE();
 
-    for( PAGE_SHEET& pageSheet : pageSheets )
+    for( size_t i = 0; i < pages.size(); ++i )
     {
-        SCH_SHEET_PATH path;
+        SCH_SCREEN*    screen = sheets[i]->GetScreen();
+        SCH_SHEET_PATH path = topLevelPath( sheets[i], topSheets.size() + i + 1 );
 
-        for( const SCH_SHEET_PATH& candidate : m_schematic->Hierarchy() )
-        {
-            if( candidate.Last() == pageSheet.sheet )
-            {
-                path = candidate;
-                break;
-            }
-        }
-
-        if( path.empty() )
-            path.push_back( pageSheet.sheet );
-
-        path.SetPageNumber( wxString::Format( wxS( "%zu" ), pageSheet.pageNumber ) );
-        pollProgress( m_progressReporter, pageSheet.page->name );
-        applyPageSettings( *pageSheet.page, pageSheet.screen );
-        convertPage( *pageSheet.page, pageSheet.screen, path );
+        sheets[i]->SetExcludedFromBoard( true );
+        pollProgress( m_progressReporter, pages[i]->name );
+        applyPageSettings( *pages[i], screen );
+        convertPage( *pages[i], screen, path );
 
         // Top-level sheet attributes are not serialized in schematic files.
-        for( SCH_ITEM* item : pageSheet.screen->Items().OfType( SCH_SYMBOL_T ) )
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
             static_cast<SCH_SYMBOL*>( item )->SetExcludedFromBoard( true );
     }
 }
@@ -3244,7 +2836,7 @@ void ORCAD_CONVERTER::appendNetIntent( SCH_SCREEN* aScreen, SCH_LABEL* aLabel, b
     m_netLabelIntents.push_back( { aScreen, aLabel, aExplicitName } );
 
     if( aNetId )
-        m_labelSourceNets[aLabel] = { aScreen, aNetId };
+        m_labelSourceNets.push_back( { aLabel, { aScreen, aNetId } } );
 }
 
 
@@ -3359,12 +2951,12 @@ void ORCAD_CONVERTER::minimizeNetLabels()
             for( MEMBER& member : partition.members )
                 keyed.emplace_back( itemKey( member.second ), std::move( member ) );
 
+            // Order sheets by UUID path, not by sheet address, so naming does not vary run to run
             std::sort( keyed.begin(), keyed.end(),
                        []( const auto& left, const auto& right )
                        {
-                           return left.second.first == right.second.first
-                                          ? left.first < right.first
-                                          : left.second.first < right.second.first;
+                           int sheetOrder = left.second.first.Cmp( right.second.first );
+                           return sheetOrder == 0 ? left.first < right.first : sheetOrder < 0;
                        } );
 
             for( size_t i = 0; i < keyed.size(); ++i )
@@ -3464,7 +3056,12 @@ void ORCAD_CONVERTER::minimizeNetLabels()
     for( size_t index = 0; index < partitions.size(); ++index )
     {
         SOURCE_PARTITION& partition = partitions[index];
-        std::map<SCH_SHEET_PATH, std::map<COMPONENT, std::vector<MEMBER>>> bySheet;
+        auto sheetLess = []( const SCH_SHEET_PATH& aLeft, const SCH_SHEET_PATH& aRight )
+        {
+            return aLeft.Cmp( aRight ) < 0;
+        };
+
+        std::map<SCH_SHEET_PATH, std::map<COMPONENT, std::vector<MEMBER>>, decltype( sheetLess )> bySheet( sheetLess );
         bool hasExplicitDriver = false;
         bool needsDriver = false;
         wxString name;
@@ -3557,8 +3154,21 @@ void ORCAD_CONVERTER::minimizeNetLabels()
             if( components.size() < 2 && !needsName )
                 continue;
 
+            // Components are keyed by subgraph address; add their labels in member order instead
+            std::vector<const std::vector<MEMBER>*> ordered;
+
             for( const auto& [key, members] : components )
+                ordered.push_back( &members );
+
+            std::sort( ordered.begin(), ordered.end(),
+                       [&]( const std::vector<MEMBER>* aLeft, const std::vector<MEMBER>* aRight )
+                       {
+                           return itemKey( aLeft->front().second ) < itemKey( aRight->front().second );
+                       } );
+
+            for( const std::vector<MEMBER>* componentMembers : ordered )
             {
+                const std::vector<MEMBER>& members = *componentMembers;
                 bool alreadyNamed = std::any_of( members.begin(), members.end(),
                         [&]( const MEMBER& member )
                         {
@@ -3651,17 +3261,17 @@ void ORCAD_CONVERTER::minimizeNetLabels()
 
 std::optional<uint32_t> ORCAD_CONVERTER::occurrenceNetIdFor( const std::string* aName ) const
 {
-    if( !m_currentOccNetNames || !aName )
+    if( !m_scope.occ || !aName )
         return std::nullopt;
 
     // The occurrence table owns the strings, so identity is the only reliable match.
-    auto entry = std::find_if( m_currentOccNetNames->begin(), m_currentOccNetNames->end(),
+    auto entry = std::find_if( m_scope.occ->netNames.begin(), m_scope.occ->netNames.end(),
                                [&]( const auto& aEntry )
                                {
                                    return &aEntry.second == aName;
                                } );
 
-    if( entry == m_currentOccNetNames->end() )
+    if( entry == m_scope.occ->netNames.end() )
         return std::nullopt;
 
     return entry->first;
@@ -4050,6 +3660,7 @@ void ORCAD_CONVERTER::finishConversion()
     convertUnreferencedPages();
     finalizeNativePowerPackages();
     finalizeNetNames();
+    assignRemainingUuids();
 }
 
 
@@ -4143,37 +3754,28 @@ void ORCAD_CONVERTER::convertPage( ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScreen, c
     m_pageItems.clear();
     m_sourcePages[aScreen] = &aPage;
     std::vector<wxString> occurrencePath = { FromOrcadString( m_design.library.schematicName ) };
-    std::vector<std::vector<wxString>> exactOccurrences;
-    std::vector<std::vector<wxString>> equivalentOccurrences;
-    std::function<void( const ORCAD_OCC_SCOPE& )> findOccurrences = [&]( const ORCAD_OCC_SCOPE& scope )
+    std::function<bool( const ORCAD_OCC_SCOPE& )> findOccurrence = [&]( const ORCAD_OCC_SCOPE& aScope )
     {
-        if( m_currentOccRefs == &scope.partRefs || m_currentOccNetNames == &scope.netNames )
-            exactOccurrences.push_back( occurrencePath );
-        else if( m_currentOccRefs && m_currentOccNetNames && *m_currentOccRefs == scope.partRefs
-                 && *m_currentOccNetNames == scope.netNames )
-            equivalentOccurrences.push_back( occurrencePath );
+        if( &aScope == m_scope.occ )
+            return true;
 
-        for( const ORCAD_OCC_BLOCK& block : scope.blocks )
+        for( const ORCAD_OCC_BLOCK& block : aScope.blocks )
         {
             occurrencePath.push_back( wxString::Format( wxS( "%u" ), block.targetDbId ) );
             occurrencePath.push_back( FromOrcadString( block.childFolder ) );
-            findOccurrences( block.scope );
+
+            if( findOccurrence( block.scope ) )
+                return true;
+
             occurrencePath.pop_back();
             occurrencePath.pop_back();
         }
-    };
-    findOccurrences( m_design.occurrenceRoot );
 
-    if( exactOccurrences.size() == 1 )
-        occurrencePath = exactOccurrences.front();
-    else if( equivalentOccurrences.size() == 1 )
-        occurrencePath = equivalentOccurrences.front();
-    else if( m_currentOccRefs || m_currentOccNetNames )
-    {
-        // Keep ambiguous source occurrences distinct without assigning another occurrence's identity.
-        for( size_t index = 0; index < aSheetPath.size(); ++index )
-            occurrencePath.push_back( aSheetPath.at( index )->m_Uuid.AsString() );
-    }
+        return false;
+    };
+
+    if( m_scope.occ )
+        findOccurrence( m_design.occurrenceRoot );
 
     m_sourceOccurrences[aScreen] = std::move( occurrencePath );
 
@@ -4239,11 +3841,13 @@ void ORCAD_CONVERTER::convertPage( ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScreen, c
 
 void ORCAD_CONVERTER::placePageFrame( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScreen )
 {
-    if( !aPage.borderPrinted && !aPage.gridRefPrinted )
+    const ORCAD_PAGE_SETTINGS& settings = aPage.settings;
+
+    if( !settings.borderPrinted && !settings.gridRefPrinted )
         return;
 
-    int widthDbu = KiROUND( aPage.isMetric ? aPage.width / 254.0 : aPage.width / 10.0 );
-    int heightDbu = KiROUND( aPage.isMetric ? aPage.height / 254.0 : aPage.height / 10.0 );
+    int widthDbu = KiROUND( settings.isMetric ? settings.width / 254.0 : settings.width / 10.0 );
+    int heightDbu = KiROUND( settings.isMetric ? settings.height / 254.0 : settings.height / 10.0 );
 
     if( widthDbu <= 0 || heightDbu <= 0 )
         return;
@@ -4266,12 +3870,12 @@ void ORCAD_CONVERTER::placePageFrame( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* a
 
     addLine( { { 0, 0 }, { widthDbu, 0 }, { widthDbu, heightDbu }, { 0, heightDbu }, { 0, 0 } } );
 
-    if( !aPage.gridRefPrinted )
+    if( !settings.gridRefPrinted )
         return;
 
-    int horizontalBand = KiROUND( aPage.isMetric ? aPage.horizontalWidth / 254.0
-                                                  : aPage.horizontalWidth / 10.0 );
-    int verticalBand = KiROUND( aPage.isMetric ? aPage.verticalWidth / 254.0 : aPage.verticalWidth / 10.0 );
+    int horizontalBand = KiROUND( settings.isMetric ? settings.horizontalWidth / 254.0
+                                                    : settings.horizontalWidth / 10.0 );
+    int verticalBand = KiROUND( settings.isMetric ? settings.verticalWidth / 254.0 : settings.verticalWidth / 10.0 );
     horizontalBand = std::clamp( horizontalBand, 0, heightDbu / 2 );
     verticalBand = std::clamp( verticalBand, 0, widthDbu / 2 );
 
@@ -4294,13 +3898,13 @@ void ORCAD_CONVERTER::placePageFrame( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* a
         appendPageItem( aScreen, label );
     };
 
-    for( int i = 0; i < aPage.horizontalCount; ++i )
+    for( int i = 0; i < settings.horizontalCount; ++i )
     {
-        int left = KiROUND( static_cast<double>( widthDbu ) * i / aPage.horizontalCount );
-        int right = KiROUND( static_cast<double>( widthDbu ) * ( i + 1 ) / aPage.horizontalCount );
-        int value = aPage.horizontalAscending ? i : aPage.horizontalCount - i - 1;
-        wxString label = aPage.horizontalChar ? wxString( static_cast<wxUniChar>( 'A' + value ) )
-                                              : wxString::Format( wxS( "%d" ), value + 1 );
+        int left = KiROUND( static_cast<double>( widthDbu ) * i / settings.horizontalCount );
+        int right = KiROUND( static_cast<double>( widthDbu ) * ( i + 1 ) / settings.horizontalCount );
+        int value = settings.horizontalAscending ? i : settings.horizontalCount - i - 1;
+        wxString label = settings.horizontalChar ? wxString( static_cast<wxUniChar>( 'A' + value ) )
+                                                 : wxString::Format( wxS( "%d" ), value + 1 );
 
         if( i > 0 )
         {
@@ -4312,13 +3916,13 @@ void ORCAD_CONVERTER::placePageFrame( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* a
         addLabel( label, ( left + right ) / 2, heightDbu - horizontalBand / 2 );
     }
 
-    for( int i = 0; i < aPage.verticalCount; ++i )
+    for( int i = 0; i < settings.verticalCount; ++i )
     {
-        int top = KiROUND( static_cast<double>( heightDbu ) * i / aPage.verticalCount );
-        int bottom = KiROUND( static_cast<double>( heightDbu ) * ( i + 1 ) / aPage.verticalCount );
-        int value = aPage.verticalAscending ? i : aPage.verticalCount - i - 1;
-        wxString label = aPage.verticalChar ? wxString( static_cast<wxUniChar>( 'A' + value ) )
-                                            : wxString::Format( wxS( "%d" ), value + 1 );
+        int top = KiROUND( static_cast<double>( heightDbu ) * i / settings.verticalCount );
+        int bottom = KiROUND( static_cast<double>( heightDbu ) * ( i + 1 ) / settings.verticalCount );
+        int value = settings.verticalAscending ? i : settings.verticalCount - i - 1;
+        wxString label = settings.verticalChar ? wxString( static_cast<wxUniChar>( 'A' + value ) )
+                                               : wxString::Format( wxS( "%d" ), value + 1 );
 
         if( i > 0 )
         {
@@ -4372,10 +3976,12 @@ wxString ORCAD_CONVERTER::SanitizeFileName( const std::string& aName )
 
 void ORCAD_CONVERTER::applyPageSettings( ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScreen )
 {
-    if( aPage.width > 0 && aPage.height > 0 )
+    const ORCAD_PAGE_SETTINGS& settings = aPage.settings;
+
+    if( settings.width > 0 && settings.height > 0 )
     {
-        double widthMils = aPage.isMetric ? aPage.width / 25.4 : aPage.width;
-        double heightMils = aPage.isMetric ? aPage.height / 25.4 : aPage.height;
+        double widthMils = settings.isMetric ? settings.width / 25.4 : settings.width;
+        double heightMils = settings.isMetric ? settings.height / 25.4 : settings.height;
 
         PAGE_INFO::SetCustomWidthMils( widthMils );
         PAGE_INFO::SetCustomHeightMils( heightMils );
@@ -4389,9 +3995,9 @@ void ORCAD_CONVERTER::applyPageSettings( ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScr
     BOX2I extent = pageExtentDbu( aPage );
 
     // Nominal paper from stored page size; mils, or micrometres when metric.
-    double k = aPage.isMetric ? 0.001 : 0.0254;
-    double nominalWmm = aPage.width * k;
-    double nominalHmm = aPage.height * k;
+    double k = settings.isMetric ? 0.001 : 0.0254;
+    double nominalWmm = settings.width * k;
+    double nominalHmm = settings.height * k;
 
     // The clearance shift below pushes a full-page drawing past its own paper, so a
     // named size only survives while the content stays at source coordinates
@@ -4578,30 +4184,7 @@ void ORCAD_CONVERTER::offsetPage( ORCAD_RAW_PAGE& aPage, int aDx, int aDy )
             return;
 
         for( ORCAD_PRIMITIVE& prim : aInst.nested->primitives )
-        {
-            prim.x1 += aDx;
-            prim.y1 += aDy;
-            prim.x2 += aDx;
-            prim.y2 += aDy;
-
-            for( ORCAD_POINT& pt : prim.points )
-            {
-                pt.x += aDx;
-                pt.y += aDy;
-            }
-
-            if( prim.start )
-            {
-                prim.start->x += aDx;
-                prim.start->y += aDy;
-            }
-
-            if( prim.end )
-            {
-                prim.end->x += aDx;
-                prim.end->y += aDy;
-            }
-        }
+            OrcadOffsetPrimitive( prim, aDx, aDy );
     };
 
     for( std::vector<ORCAD_GRAPHIC_INST>* list :
@@ -4633,80 +4216,89 @@ void ORCAD_CONVERTER::offsetPage( ORCAD_RAW_PAGE& aPage, int aDx, int aDy )
 }
 
 
+const ORCAD_SYMBOL_DEF* ORCAD_CONVERTER::graphicDefinition( const ORCAD_GRAPHIC_INST& aInst ) const
+{
+    auto symbolIt = m_design.symbols.find( aInst.name );
+
+    if( symbolIt == m_design.symbols.end() )
+        return nullptr;
+
+    const ORCAD_SYMBOL_DEF* symbolDef = &symbolIt->second;
+
+    auto normalizedPath = []( std::string aPath )
+    {
+        std::transform( aPath.begin(), aPath.end(), aPath.begin(),
+                        []( unsigned char aChar )
+                        {
+                            return aChar == '\\' ? '/' : static_cast<char>( std::tolower( aChar ) );
+                        } );
+        return aPath;
+    };
+
+    bool sourceMatched = false;
+
+    if( auto source = aInst.props.find( "Source Library" );
+        source != aInst.props.end() && !source->second.empty() )
+    {
+        std::string sourceKey = normalizedPath( source->second );
+
+        if( normalizedPath( symbolDef->sourceLib ) == sourceKey )
+        {
+            sourceMatched = true;
+        }
+        else
+        {
+            for( const ORCAD_SYMBOL_DEF& variant : symbolIt->second.variants )
+            {
+                if( normalizedPath( variant.sourceLib ) == sourceKey )
+                {
+                    symbolDef = &variant;
+                    sourceMatched = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    bool dimensionsEncoded = aInst.bbox.x2 < aInst.bbox.x1 || aInst.bbox.y2 < aInst.bbox.y1;
+    int  placedWidth = std::abs( dimensionsEncoded ? aInst.bbox.x2 : aInst.bbox.x2 - aInst.bbox.x1 );
+    int  placedHeight = std::abs( dimensionsEncoded ? aInst.bbox.y2 : aInst.bbox.y2 - aInst.bbox.y1 );
+
+    auto matchesPlacedBounds = [&]( const ORCAD_SYMBOL_DEF& aDefinition )
+    {
+        if( !aDefinition.bbox )
+            return false;
+
+        int width = std::abs( aDefinition.bbox->x2 - aDefinition.bbox->x1 );
+        int height = std::abs( aDefinition.bbox->y2 - aDefinition.bbox->y1 );
+
+        if( aInst.rotation & 1 )
+            std::swap( width, height );
+
+        return width == placedWidth && height == placedHeight;
+    };
+
+    if( !sourceMatched && !matchesPlacedBounds( *symbolDef ) )
+    {
+        for( const ORCAD_SYMBOL_DEF& variant : symbolIt->second.variants )
+        {
+            if( matchesPlacedBounds( variant ) )
+            {
+                symbolDef = &variant;
+                break;
+            }
+        }
+    }
+
+    return symbolDef;
+}
+
+
 void ORCAD_CONVERTER::applyTitleBlock( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScreen )
 {
     for( const ORCAD_GRAPHIC_INST& tbInst : aPage.titleBlocks )
     {
-        auto symbolIt = m_design.symbols.find( tbInst.name );
-        const ORCAD_SYMBOL_DEF* symbolDef = symbolIt != m_design.symbols.end() ? &symbolIt->second : nullptr;
-
-        if( symbolDef )
-        {
-            auto normalizedPath = []( std::string aPath )
-            {
-                std::transform( aPath.begin(), aPath.end(), aPath.begin(),
-                                []( unsigned char aChar )
-                                {
-                                    return aChar == '\\' ? '/' : static_cast<char>( std::tolower( aChar ) );
-                                } );
-                return aPath;
-            };
-
-            bool sourceMatched = false;
-
-            if( auto source = tbInst.props.find( "Source Library" );
-                source != tbInst.props.end() && !source->second.empty() )
-            {
-                std::string sourceKey = normalizedPath( source->second );
-
-                if( normalizedPath( symbolDef->sourceLib ) == sourceKey )
-                {
-                    sourceMatched = true;
-                }
-                else
-                {
-                    for( const ORCAD_SYMBOL_DEF& variant : symbolIt->second.variants )
-                    {
-                        if( normalizedPath( variant.sourceLib ) == sourceKey )
-                        {
-                            symbolDef = &variant;
-                            sourceMatched = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            bool dimensionsEncoded = tbInst.bbox.x2 < tbInst.bbox.x1 || tbInst.bbox.y2 < tbInst.bbox.y1;
-            int  placedWidth = std::abs( dimensionsEncoded ? tbInst.bbox.x2 : tbInst.bbox.x2 - tbInst.bbox.x1 );
-            int  placedHeight = std::abs( dimensionsEncoded ? tbInst.bbox.y2 : tbInst.bbox.y2 - tbInst.bbox.y1 );
-
-            auto matchesPlacedBounds = [&]( const ORCAD_SYMBOL_DEF& aDefinition )
-            {
-                if( !aDefinition.bbox )
-                    return false;
-
-                int width = std::abs( aDefinition.bbox->x2 - aDefinition.bbox->x1 );
-                int height = std::abs( aDefinition.bbox->y2 - aDefinition.bbox->y1 );
-
-                if( tbInst.rotation & 1 )
-                    std::swap( width, height );
-
-                return width == placedWidth && height == placedHeight;
-            };
-
-            if( !sourceMatched && !matchesPlacedBounds( *symbolDef ) )
-            {
-                for( const ORCAD_SYMBOL_DEF& variant : symbolIt->second.variants )
-                {
-                    if( matchesPlacedBounds( variant ) )
-                    {
-                        symbolDef = &variant;
-                        break;
-                    }
-                }
-            }
-        }
+        const ORCAD_SYMBOL_DEF* symbolDef = graphicDefinition( tbInst );
 
         auto calendarDate = [&]( uint32_t aTimestamp )
         {
@@ -4752,15 +4344,15 @@ void ORCAD_CONVERTER::applyTitleBlock( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* 
                 return aPage.pageSize == "Custom" ? "N/A" : aPage.pageSize;
 
             if( ( aKey == "Page Modify Date" || aKey == "Schematic Modify Date" )
-                && aPage.modifyTimestamp != 0 )
-                return calendarDate( aPage.modifyTimestamp );
+                && aPage.settings.modifyTimestamp != 0 )
+                return calendarDate( aPage.settings.modifyTimestamp );
 
             if( aKey == "Design Modify Date" && m_design.library.modifyTimestamp != 0 )
                 return calendarDate( m_design.library.modifyTimestamp );
 
             if( ( aKey == "Page Create Date" || aKey == "Schematic Create Date" )
-                && aPage.createTimestamp != 0 )
-                return calendarDate( aPage.createTimestamp );
+                && aPage.settings.createTimestamp != 0 )
+                return calendarDate( aPage.settings.createTimestamp );
 
             if( aKey == "Design Create Date" && m_design.library.createTimestamp != 0 )
                 return calendarDate( m_design.library.createTimestamp );
@@ -4781,7 +4373,7 @@ void ORCAD_CONVERTER::applyTitleBlock( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* 
             }
 
             if( aKey == "Page Modify Date" )
-                return calendarDate( aPage.modifyTimestamp );
+                return calendarDate( aPage.settings.modifyTimestamp );
 
             return {};
         };
@@ -4820,13 +4412,9 @@ void ORCAD_CONVERTER::applyTitleBlock( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* 
 
             int      fontId = displayFontId( dp );
             bool     templateFont = displayUsesTemplateFont( dp );
-            int      size = textSizeIU( fontId, templateFont );
-            int      baseline = textBaselineOffset( size, fontId, templateFont );
-            bool     vertical = ( dp.rotation & 1 ) != 0;
-            VECTOR2I position = OrcadDbuToIu( tbInst.bbox.x1 + dp.x, tbInst.bbox.y1 + dp.y )
-                                + ( vertical ? VECTOR2I( baseline, 0 ) : VECTOR2I( 0, baseline ) );
+            VECTOR2I position = displayPropPosition( dp, OrcadDbuToIu( tbInst.bbox.x1 + dp.x, tbInst.bbox.y1 + dp.y ) );
             SCH_TEXT* text = new SCH_TEXT( position, content, LAYER_NOTES );
-            text->SetTextAngle( vertical ? ANGLE_VERTICAL : ANGLE_HORIZONTAL );
+            text->SetTextAngle( ( dp.rotation & 1 ) ? ANGLE_VERTICAL : ANGLE_HORIZONTAL );
             text->SetTextSize( textSize( fontId, templateFont ) );
             applyFont( text, fontId, templateFont );
             applyMultilineSpacing( text, fontId, templateFont );
@@ -4888,7 +4476,7 @@ void ORCAD_CONVERTER::applyTitleBlock( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* 
 
 void ORCAD_CONVERTER::placeDefinitionVectors( const ORCAD_SYMBOL_DEF& aDefinition, int aBaseX, int aBaseY, int aOrient,
                                               SCH_SCREEN* aScreen, double aTextScaleX, double aTextScaleY,
-                                              bool aUseGenericTextBaseline, const std::string& aTextFaceOverride )
+                                              bool aUseGenericTextBaseline )
 {
     ORCAD_BBOX bbox = aDefinition.bbox.value_or( ORCAD_BBOX() );
     int        width = bbox.x2 - bbox.x1;
@@ -4906,89 +4494,67 @@ void ORCAD_CONVERTER::placeDefinitionVectors( const ORCAD_SYMBOL_DEF& aDefinitio
     graphic.textScaleY = aTextScaleY;
     graphic.useGenericTextBaseline = aUseGenericTextBaseline;
     graphic.useSymbolLineWidths = true;
-    graphic.textFaceOverride = aTextFaceOverride;
     graphic.nested = std::make_unique<ORCAD_SYMBOL_DEF>();
 
-    std::function<void( const std::vector<ORCAD_PRIMITIVE>&, int, int )> appendVectors =
-            [&]( const std::vector<ORCAD_PRIMITIVE>& aPrimitives, int aOffsetX, int aOffsetY )
-    {
-        for( const ORCAD_PRIMITIVE& source : aPrimitives )
-        {
-            if( source.kind == ORCAD_PRIM_KIND::GROUP_PRIM )
+    OrcadForEachLeafPrimitive(
+            aDefinition.primitives,
+            [&]( const ORCAD_PRIMITIVE& source, int aOffsetX, int aOffsetY )
             {
-                appendVectors( source.children, aOffsetX + source.x1, aOffsetY + source.y1 );
-                continue;
-            }
+                if( source.kind == ORCAD_PRIM_KIND::IMAGE )
+                    return;
 
-            if( source.kind == ORCAD_PRIM_KIND::IMAGE )
-                continue;
+                ORCAD_PRIMITIVE primitive = source;
 
-            ORCAD_PRIMITIVE primitive = source;
-
-            auto transformBox = [&]
-            {
-                std::array<VECTOR2I, 4> corners = { transform( aOffsetX + source.x1, aOffsetY + source.y1 ),
-                                                    transform( aOffsetX + source.x2, aOffsetY + source.y1 ),
-                                                    transform( aOffsetX + source.x2, aOffsetY + source.y2 ),
-                                                    transform( aOffsetX + source.x1, aOffsetY + source.y2 ) };
-
-                primitive.x1 = primitive.x2 = corners[0].x;
-                primitive.y1 = primitive.y2 = corners[0].y;
-
-                for( const VECTOR2I& corner : corners )
+                auto transformBox = [&]
                 {
-                    primitive.x1 = std::min( primitive.x1, corner.x );
-                    primitive.y1 = std::min( primitive.y1, corner.y );
-                    primitive.x2 = std::max( primitive.x2, corner.x );
-                    primitive.y2 = std::max( primitive.y2, corner.y );
+                    std::array<VECTOR2I, 4> corners = { transform( aOffsetX + source.x1, aOffsetY + source.y1 ),
+                                                        transform( aOffsetX + source.x2, aOffsetY + source.y1 ),
+                                                        transform( aOffsetX + source.x2, aOffsetY + source.y2 ),
+                                                        transform( aOffsetX + source.x1, aOffsetY + source.y2 ) };
+
+                    primitive.x1 = primitive.x2 = corners[0].x;
+                    primitive.y1 = primitive.y2 = corners[0].y;
+
+                    for( const VECTOR2I& corner : corners )
+                    {
+                        primitive.x1 = std::min( primitive.x1, corner.x );
+                        primitive.y1 = std::min( primitive.y1, corner.y );
+                        primitive.x2 = std::max( primitive.x2, corner.x );
+                        primitive.y2 = std::max( primitive.y2, corner.y );
+                    }
+                };
+
+                if( source.kind == ORCAD_PRIM_KIND::LINE )
+                {
+                    VECTOR2I p1 = transform( aOffsetX + source.x1, aOffsetY + source.y1 );
+                    VECTOR2I p2 = transform( aOffsetX + source.x2, aOffsetY + source.y2 );
+                    primitive.x1 = p1.x;
+                    primitive.y1 = p1.y;
+                    primitive.x2 = p2.x;
+                    primitive.y2 = p2.y;
                 }
-            };
+                else if( source.kind == ORCAD_PRIM_KIND::TEXT )
+                {
+                    VECTOR2I anchor = transform( aOffsetX + source.x1, aOffsetY + source.y1 );
+                    primitive.textBoundsStart.reset();
+                    primitive.x1 = primitive.x2 = anchor.x;
+                    primitive.y1 = primitive.y2 = anchor.y;
+                }
+                else
+                {
+                    transformBox();
+                }
 
-            if( source.kind == ORCAD_PRIM_KIND::LINE )
-            {
-                VECTOR2I p1 = transform( aOffsetX + source.x1, aOffsetY + source.y1 );
-                VECTOR2I p2 = transform( aOffsetX + source.x2, aOffsetY + source.y2 );
-                primitive.x1 = p1.x;
-                primitive.y1 = p1.y;
-                primitive.x2 = p2.x;
-                primitive.y2 = p2.y;
-            }
-            else if( source.kind == ORCAD_PRIM_KIND::TEXT )
-            {
-                VECTOR2I anchor = transform( aOffsetX + source.x1, aOffsetY + source.y1 );
-                primitive.textBoundsStart.reset();
-                primitive.x1 = primitive.x2 = anchor.x;
-                primitive.y1 = primitive.y2 = anchor.y;
-            }
-            else
-            {
-                transformBox();
-            }
+                OrcadTransformPrimitivePoints( primitive,
+                                               [&]( const ORCAD_POINT& aPoint )
+                                               {
+                                                   VECTOR2I transformed =
+                                                           transform( aOffsetX + aPoint.x, aOffsetY + aPoint.y );
+                                                   return ORCAD_POINT{ transformed.x, transformed.y };
+                                               } );
 
-            for( ORCAD_POINT& point : primitive.points )
-            {
-                VECTOR2I transformed = transform( aOffsetX + point.x, aOffsetY + point.y );
-                point.x = transformed.x;
-                point.y = transformed.y;
-            }
-
-            if( primitive.start )
-            {
-                VECTOR2I transformed = transform( aOffsetX + primitive.start->x, aOffsetY + primitive.start->y );
-                primitive.start = ORCAD_POINT{ transformed.x, transformed.y };
-            }
-
-            if( primitive.end )
-            {
-                VECTOR2I transformed = transform( aOffsetX + primitive.end->x, aOffsetY + primitive.end->y );
-                primitive.end = ORCAD_POINT{ transformed.x, transformed.y };
-            }
-
-            graphic.nested->primitives.push_back( std::move( primitive ) );
-        }
-    };
-
-    appendVectors( aDefinition.primitives, 0, 0 );
+                graphic.nested->primitives.push_back( std::move( primitive ) );
+            } );
 
     ORCAD_RAW_PAGE page;
     page.graphics.push_back( std::move( graphic ) );
@@ -5003,47 +4569,123 @@ void ORCAD_CONVERTER::placeDefinitionImages( const ORCAD_SYMBOL_DEF& aDefinition
     int        width = bbox.x2 - bbox.x1;
     int        height = bbox.y2 - bbox.y1;
 
-    std::function<void( const std::vector<ORCAD_PRIMITIVE>&, int, int )> placeImages =
-            [&]( const std::vector<ORCAD_PRIMITIVE>& aPrimitives, int aOffsetX, int aOffsetY )
-    {
-        for( const ORCAD_PRIMITIVE& primitive : aPrimitives )
-        {
-            if( primitive.kind == ORCAD_PRIM_KIND::GROUP_PRIM )
-            {
-                placeImages( primitive.children, aOffsetX + primitive.x1, aOffsetY + primitive.y1 );
-                continue;
-            }
+    OrcadForEachLeafPrimitive( aDefinition.primitives,
+                               [&]( const ORCAD_PRIMITIVE& primitive, int aOffsetX, int aOffsetY )
+                               {
+                                   if( primitive.kind != ORCAD_PRIM_KIND::IMAGE )
+                                       return;
 
-            if( primitive.kind != ORCAD_PRIM_KIND::IMAGE )
-                continue;
-
-            VECTOR2I        center = OrcadTransformPoint( aOrient, width, height, aBaseX, aBaseY,
-                                                          aOffsetX + ( primitive.x1 + primitive.x2 ) / 2,
-                                                          aOffsetY + ( primitive.y1 + primitive.y2 ) / 2 );
-            int             imageWidth = std::abs( primitive.x2 - primitive.x1 );
-            int             imageHeight = std::abs( primitive.y2 - primitive.y1 );
-            ORCAD_PRIMITIVE image = primitive;
-            image.x1 = center.x - imageWidth / 2;
-            image.y1 = center.y - imageHeight / 2;
-            image.x2 = image.x1 + imageWidth;
-            image.y2 = image.y1 + imageHeight;
-            placeBitmap( image, aScreen, aOrient );
-        }
-    };
-
-    placeImages( aDefinition.primitives, 0, 0 );
+                                   VECTOR2I center =
+                                           OrcadTransformPoint( aOrient, width, height, aBaseX, aBaseY,
+                                                                aOffsetX + ( primitive.x1 + primitive.x2 ) / 2,
+                                                                aOffsetY + ( primitive.y1 + primitive.y2 ) / 2 );
+                                   int             imageWidth = std::abs( primitive.x2 - primitive.x1 );
+                                   int             imageHeight = std::abs( primitive.y2 - primitive.y1 );
+                                   ORCAD_PRIMITIVE image = primitive;
+                                   image.x1 = center.x - imageWidth / 2;
+                                   image.y1 = center.y - imageHeight / 2;
+                                   image.x2 = image.x1 + imageWidth;
+                                   image.y2 = image.y1 + imageHeight;
+                                   placeBitmap( image, aScreen, aOrient );
+                               } );
 }
 
 
 void ORCAD_CONVERTER::buildNetLookup( const ORCAD_RAW_PAGE& aPage )
 {
-    m_wireEndpoints.clear();
+    m_netIndex = PAGE_NET_INDEX();
+    m_netIndex.page = &aPage;
 
     for( const ORCAD_WIRE& wire : aPage.wires )
     {
-        m_wireEndpoints[{ wire.x1, wire.y1 }].push_back( &wire );
-        m_wireEndpoints[{ wire.x2, wire.y2 }].push_back( &wire );
+        m_netIndex.wireEndpoints[{ wire.x1, wire.y1 }].push_back( &wire );
+        m_netIndex.wireEndpoints[{ wire.x2, wire.y2 }].push_back( &wire );
     }
+
+    for( const ORCAD_PLACED_INSTANCE& instance : aPage.instances )
+    {
+        for( const ORCAD_PIN_INST& pin : instance.pins )
+        {
+            std::set<uint32_t>& netIds = m_netIndex.pinNets[&pin];
+
+            if( pin.wordB )
+                netIds.insert( pin.wordB );
+
+            for( const ORCAD_WIRE& wire : aPage.wires )
+            {
+                if( wire.id == pin.wordB || wire.dbId == pin.wordA || rawPointOnSegment( pin.x, pin.y, wire ) )
+                    netIds.insert( wire.id );
+            }
+        }
+    }
+
+    m_netIndex.junctions = computeJunctions( aPage );
+
+    if( m_scope.occ )
+    {
+        for( const auto& [occurrenceId, occurrenceName] : m_scope.occ->netNames )
+        {
+            if( std::optional<uint32_t> objectId = occurrenceNetObjectId( occurrenceName ) )
+            {
+                auto sourceWire = std::find_if( aPage.wires.begin(), aPage.wires.end(),
+                                                [&]( const ORCAD_WIRE& aWire )
+                                                {
+                                                    return aWire.dbId == *objectId;
+                                                } );
+
+                if( sourceWire != aPage.wires.end() )
+                {
+                    m_netIndex.occurrenceNamesByNetId[sourceWire->id].insert( &occurrenceName );
+                    continue;
+                }
+
+                auto sourceInstance = std::find_if( aPage.instances.begin(), aPage.instances.end(),
+                                                    [&]( const ORCAD_PLACED_INSTANCE& aInstance )
+                                                    {
+                                                        return aInstance.dbId == *objectId;
+                                                    } );
+
+                if( sourceInstance == aPage.instances.end() )
+                    continue;
+
+                std::string occurrenceKey = OrcadLower( occurrenceName );
+
+                auto matchesOccurrenceName = [&]( uint32_t aNetId )
+                {
+                    std::set<std::string> localNames = pageNetNames( aPage, aNetId );
+
+                    return std::any_of( localNames.begin(), localNames.end(),
+                                        [&]( std::string aName )
+                                        {
+                                            aName = OrcadLower( aName );
+                                            return occurrenceKey == aName
+                                                   || ( occurrenceKey.size() > aName.size()
+                                                        && occurrenceKey[aName.size()] == '_'
+                                                        && occurrenceKey.compare( 0, aName.size(), aName ) == 0 );
+                                        } );
+                };
+
+                for( const ORCAD_PIN_INST& pin : sourceInstance->pins )
+                {
+                    for( uint32_t netId : pinNetIds( pin ) )
+                    {
+                        if( matchesOccurrenceName( netId ) )
+                            m_netIndex.occurrenceNamesByNetId[netId].insert( &occurrenceName );
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+const std::set<uint32_t>& ORCAD_CONVERTER::pinNetIds( const ORCAD_PIN_INST& aPin ) const
+{
+    static const std::set<uint32_t> none;
+    auto                            netIds = m_netIndex.pinNets.find( &aPin );
+
+    wxCHECK_MSG( netIds != m_netIndex.pinNets.end(), none, wxS( "Pin is not on the indexed page" ) );
+    return netIds->second;
 }
 
 
@@ -5079,9 +4721,9 @@ std::string ORCAD_CONVERTER::netAt( const ORCAD_RAW_PAGE& aPage, int aX, int aY 
         return net != aPage.netmap.end() ? net->second : std::string();
     };
 
-    auto endIt = m_wireEndpoints.find( { aX, aY } );
+    auto endIt = m_netIndex.wireEndpoints.find( { aX, aY } );
 
-    const std::vector<const ORCAD_WIRE*>* endWires = endIt != m_wireEndpoints.end() ? &endIt->second : nullptr;
+    const std::vector<const ORCAD_WIRE*>* endWires = endIt != m_netIndex.wireEndpoints.end() ? &endIt->second : nullptr;
 
     if( endWires )
     {
@@ -5112,20 +4754,33 @@ std::string ORCAD_CONVERTER::netAt( const ORCAD_RAW_PAGE& aPage, int aX, int aY 
 
 std::string ORCAD_CONVERTER::powerNet( const ORCAD_RAW_PAGE& aPage, const ORCAD_GRAPHIC_INST& aInst ) const
 {
+    wxASSERT( m_netIndex.page == &aPage );
+
+    auto memo = m_netIndex.powerNets.find( &aInst );
+
+    if( memo == m_netIndex.powerNets.end() )
+        memo = m_netIndex.powerNets.emplace( &aInst, resolvePowerNet( aPage, aInst ) ).first;
+
+    return memo->second;
+}
+
+
+std::string ORCAD_CONVERTER::resolvePowerNet( const ORCAD_RAW_PAGE& aPage, const ORCAD_GRAPHIC_INST& aInst ) const
+{
     VECTOR2I                                         pin = powerPinPos( aPage, aInst );
     std::string                                      net = netAt( aPage, pin.x, pin.y );
     auto                                             nameIt = aInst.props.find( "Name" );
     std::string propertyName = nameIt != aInst.props.end() ? trimmed( nameIt->second ) : std::string();
     std::string logicalName = trimmed( aInst.logicalName );
 
-    bool                                             authoritativeOccurrenceNet = false;
-    std::map<uint32_t, std::set<const std::string*>> occurrenceNamesByPageNetId;
+    bool        authoritativeOccurrenceNet = false;
+    const auto& occurrenceNamesByPageNetId = m_netIndex.occurrenceNamesByNetId;
     auto occurrenceElectricalName = [&]( const std::string* aName )
     {
         return aName ? *aName : std::string();
     };
 
-    if( m_currentOccNetNames )
+    if( m_scope.occ )
     {
         std::set<const std::string*> generatedNamesAtPin;
 
@@ -5153,7 +4808,7 @@ std::string ORCAD_CONVERTER::powerNet( const ORCAD_RAW_PAGE& aPage, const ORCAD_
 
                 std::string generatedName = generatedPinNetName( instance.dbId, pinIndex );
 
-                for( const auto& [occurrenceId, occurrenceName] : *m_currentOccNetNames )
+                for( const auto& [occurrenceId, occurrenceName] : m_scope.occ->netNames )
                 {
                     if( occurrenceName == generatedName )
                         generatedNamesAtPin.insert( &occurrenceName );
@@ -5168,11 +4823,9 @@ std::string ORCAD_CONVERTER::powerNet( const ORCAD_RAW_PAGE& aPage, const ORCAD_
         {
             std::set<const std::string*> matchingNames;
 
-            for( const auto& [occurrenceId, occurrenceName] : *m_currentOccNetNames )
+            for( const auto& [occurrenceId, occurrenceName] : m_scope.occ->netNames )
             {
-                if( wxString::FromUTF8( kicadOccurrenceNetName( occurrenceName ) )
-                            .CmpNoCase( wxString::FromUTF8( logicalName ) )
-                    == 0 )
+                if( OrcadIEquals( kicadOccurrenceNetName( occurrenceName ), logicalName ) )
                 {
                     matchingNames.insert( &occurrenceName );
                 }
@@ -5182,84 +4835,6 @@ std::string ORCAD_CONVERTER::powerNet( const ORCAD_RAW_PAGE& aPage, const ORCAD_
             {
                 if( std::optional<uint32_t> occurrenceId = occurrenceNetIdFor( *matchingNames.begin() ) )
                     return occurrenceElectricalNetName( *occurrenceId, **matchingNames.begin() );
-            }
-        }
-
-        for( const auto& [occurrenceId, occurrenceName] : *m_currentOccNetNames )
-        {
-            if( std::optional<uint32_t> objectId = occurrenceNetObjectId( occurrenceName ) )
-            {
-                auto sourceWire = std::find_if( aPage.wires.begin(), aPage.wires.end(),
-                                                [&]( const ORCAD_WIRE& aWire )
-                                                {
-                                                    return aWire.dbId == *objectId;
-                                                } );
-
-                if( sourceWire != aPage.wires.end() )
-                {
-                    occurrenceNamesByPageNetId[sourceWire->id].insert( &occurrenceName );
-                    continue;
-                }
-
-                auto sourceInstance = std::find_if( aPage.instances.begin(), aPage.instances.end(),
-                                                    [&]( const ORCAD_PLACED_INSTANCE& aInstance )
-                                                    {
-                                                        return aInstance.dbId == *objectId;
-                                                    } );
-
-                if( sourceInstance == aPage.instances.end() )
-                    continue;
-
-                std::string occurrenceKey = occurrenceName;
-                std::transform( occurrenceKey.begin(), occurrenceKey.end(), occurrenceKey.begin(),
-                                []( unsigned char c )
-                                {
-                                    return static_cast<char>( std::tolower( c ) );
-                                } );
-
-                auto matchesOccurrenceName = [&]( uint32_t aNetId )
-                {
-                    std::set<std::string> localNames;
-                    auto                  pageName = aPage.netmap.find( aNetId );
-
-                    if( pageName != aPage.netmap.end() )
-                        localNames.insert( pageName->second );
-
-                    auto aliases = aPage.netAliases.find( aNetId );
-
-                    if( aliases != aPage.netAliases.end() )
-                        localNames.insert( aliases->second.begin(), aliases->second.end() );
-
-                    return std::any_of( localNames.begin(), localNames.end(),
-                                        [&]( std::string aName )
-                                        {
-                                            std::transform( aName.begin(), aName.end(), aName.begin(),
-                                                            []( unsigned char c )
-                                                            {
-                                                                return static_cast<char>( std::tolower( c ) );
-                                                            } );
-                                            return occurrenceKey == aName
-                                                   || ( occurrenceKey.size() > aName.size()
-                                                        && occurrenceKey[aName.size()] == '_'
-                                                        && occurrenceKey.compare( 0, aName.size(), aName ) == 0 );
-                                        } );
-                };
-
-                for( const ORCAD_PIN_INST& sourcePin : sourceInstance->pins )
-                {
-                    if( sourcePin.wordB && matchesOccurrenceName( sourcePin.wordB ) )
-                        occurrenceNamesByPageNetId[sourcePin.wordB].insert( &occurrenceName );
-
-                    for( const ORCAD_WIRE& wire : aPage.wires )
-                    {
-                        if( matchesOccurrenceName( wire.id )
-                            && ( wire.id == sourcePin.wordB || wire.dbId == sourcePin.wordA
-                                 || rawPointOnSegment( sourcePin.x, sourcePin.y, wire ) ) )
-                        {
-                            occurrenceNamesByPageNetId[wire.id].insert( &occurrenceName );
-                        }
-                    }
-                }
             }
         }
 
@@ -5283,9 +4858,9 @@ std::string ORCAD_CONVERTER::powerNet( const ORCAD_RAW_PAGE& aPage, const ORCAD_
             if( pageNet == aPage.netmap.end() || pageNet->second.empty() )
                 continue;
 
-            for( const auto& [occurrenceId, occurrenceName] : *m_currentOccNetNames )
+            for( const auto& [occurrenceId, occurrenceName] : m_scope.occ->netNames )
             {
-                if( wxString::FromUTF8( pageNet->second ).CmpNoCase( wxString::FromUTF8( occurrenceName ) ) == 0 )
+                if( OrcadIEquals( pageNet->second, occurrenceName ) )
                     occurrenceNets.insert( &occurrenceName );
             }
         }
@@ -5302,7 +4877,7 @@ std::string ORCAD_CONVERTER::powerNet( const ORCAD_RAW_PAGE& aPage, const ORCAD_
         }
     }
 
-    if( m_currentOccNetNames && !authoritativeOccurrenceNet )
+    if( m_scope.occ && !authoritativeOccurrenceNet )
     {
         std::set<const std::string*> directPinNets;
 
@@ -5333,31 +4908,9 @@ std::string ORCAD_CONVERTER::powerNet( const ORCAD_RAW_PAGE& aPage, const ORCAD_
         }
     }
 
-    if( m_currentOccNetNames && !authoritativeOccurrenceNet )
+    if( m_scope.occ && !authoritativeOccurrenceNet )
     {
-        std::string        sourceName = trimmed( aInst.logicalName );
-        std::set<uint32_t> matchingNetIds;
-
-        for( const auto& [netId, pageName] : aPage.netmap )
-        {
-            bool matches = wxString::FromUTF8( pageName ).CmpNoCase( wxString::FromUTF8( sourceName ) ) == 0;
-            auto aliases = aPage.netAliases.find( netId );
-
-            if( aliases != aPage.netAliases.end() )
-            {
-                matches = matches
-                          || std::any_of( aliases->second.begin(), aliases->second.end(),
-                                          [&]( const std::string& aAlias )
-                                          {
-                                              return wxString::FromUTF8( aAlias ).CmpNoCase(
-                                                             wxString::FromUTF8( sourceName ) )
-                                                     == 0;
-                                          } );
-            }
-
-            if( matches )
-                matchingNetIds.insert( netId );
-        }
+        std::set<uint32_t> matchingNetIds = pageNetIdsNamed( aPage, trimmed( aInst.logicalName ) );
 
         if( matchingNetIds.size() == 1 )
         {
@@ -5384,27 +4937,17 @@ std::string ORCAD_CONVERTER::powerNet( const ORCAD_RAW_PAGE& aPage, const ORCAD_
 
                 for( uint32_t netId : { componentPin.wordB, componentPin.wordA } )
                 {
-                    std::set<std::string> sourceNames;
-                    auto                  netName = aPage.netmap.find( netId );
-
-                    if( netName != aPage.netmap.end() && !netName->second.empty() )
-                        sourceNames.insert( netName->second );
-
-                    auto aliases = aPage.netAliases.find( netId );
-
-                    if( aliases != aPage.netAliases.end() )
-                        sourceNames.insert( aliases->second.begin(), aliases->second.end() );
+                    std::set<std::string> sourceNames = pageNetNames( aPage, netId );
 
                     std::set<std::string> occurrenceNames;
 
-                    if( m_currentOccNetNames )
+                    if( m_scope.occ )
                     {
                         for( const std::string& sourceName : sourceNames )
                         {
-                            for( const auto& [occurrenceId, occurrenceName] : *m_currentOccNetNames )
+                            for( const auto& [occurrenceId, occurrenceName] : m_scope.occ->netNames )
                             {
-                                if( wxString::FromUTF8( sourceName ).CmpNoCase( wxString::FromUTF8( occurrenceName ) )
-                                    == 0 )
+                                if( OrcadIEquals( sourceName, occurrenceName ) )
                                 {
                                     occurrenceNames.insert( occurrenceName );
                                 }
@@ -5424,11 +4967,6 @@ std::string ORCAD_CONVERTER::powerNet( const ORCAD_RAW_PAGE& aPage, const ORCAD_
             net = *pinNetNames.begin();
     }
 
-    auto        namesEqual = []( const std::string& aLeft, const std::string& aRight )
-    {
-        return wxString::FromUTF8( aLeft ).CmpNoCase( wxString::FromUTF8( aRight ) ) == 0;
-    };
-
     std::string physicalName = !propertyName.empty() ? propertyName : logicalName;
 
     if( !physicalName.empty() )
@@ -5440,37 +4978,25 @@ std::string ORCAD_CONVERTER::powerNet( const ORCAD_RAW_PAGE& aPage, const ORCAD_
             if( !endpoint && !onSegment( pin.x, pin.y, wire ) )
                 continue;
 
-            std::vector<std::string> names;
-            auto                     pageName = aPage.netmap.find( wire.id );
-
-            if( pageName != aPage.netmap.end() )
-                names.push_back( pageName->second );
-
-            auto aliases = aPage.netAliases.find( wire.id );
-
-            if( aliases != aPage.netAliases.end() )
-                names.insert( names.end(), aliases->second.begin(), aliases->second.end() );
-
+            std::set<std::string> names = pageNetNames( aPage, wire.id );
             std::set<std::string> distinctNames;
 
-            for( std::string name : names )
-            {
-                std::transform( name.begin(), name.end(), name.begin(),
-                                []( unsigned char aChar ) { return static_cast<char>( std::tolower( aChar ) ); } );
-                distinctNames.insert( std::move( name ) );
-            }
+            for( const std::string& name : names )
+                distinctNames.insert( OrcadLower( name ) );
 
             bool hasPhysicalName = std::any_of( names.begin(), names.end(),
                                                 [&]( const std::string& aName )
-                                                { return namesEqual( aName, physicalName ); } );
+                                                {
+                                                    return OrcadIEquals( aName, physicalName );
+                                                } );
 
-            if( ( !m_currentOccNetNames || m_currentOccNetNames->empty() ) && distinctNames.size() > 1
+            if( ( !m_scope.occ || m_scope.occ->netNames.empty() ) && distinctNames.size() > 1
                 && hasPhysicalName )
                 return canonicalGlobalNetName( physicalName );
         }
     }
 
-    if( m_currentOccNetNames && m_currentOccNetNames->empty() && !net.empty() && !isPowerNetName( net ) )
+    if( m_scope.occ && m_scope.occ->netNames.empty() && !net.empty() && !isPowerNetName( net ) )
     {
         std::string sourcePowerName = !logicalName.empty() ? logicalName : propertyName;
 
@@ -5478,7 +5004,7 @@ std::string ORCAD_CONVERTER::powerNet( const ORCAD_RAW_PAGE& aPage, const ORCAD_
             net = std::move( sourcePowerName );
     }
 
-    if( m_currentOccNetNames && !authoritativeOccurrenceNet )
+    if( m_scope.occ && !authoritativeOccurrenceNet )
     {
         std::set<const std::string*> occurrenceAliases;
 
@@ -5496,9 +5022,9 @@ std::string ORCAD_CONVERTER::powerNet( const ORCAD_RAW_PAGE& aPage, const ORCAD_
 
             for( const std::string& alias : aliases->second )
             {
-                for( const auto& [occurrenceId, occurrenceName] : *m_currentOccNetNames )
+                for( const auto& [occurrenceId, occurrenceName] : m_scope.occ->netNames )
                 {
-                    if( wxString::FromUTF8( alias ).CmpNoCase( wxString::FromUTF8( occurrenceName ) ) == 0 )
+                    if( OrcadIEquals( alias, occurrenceName ) )
                         occurrenceAliases.insert( &occurrenceName );
                 }
             }
@@ -5508,14 +5034,7 @@ std::string ORCAD_CONVERTER::powerNet( const ORCAD_RAW_PAGE& aPage, const ORCAD_
             net = occurrenceElectricalName( *occurrenceAliases.begin() );
     }
 
-    bool implicitGeneratedName = net.size() > 1 && net[0] == 'N'
-                                 && std::all_of( net.begin() + 1, net.end(),
-                                                 []( unsigned char c )
-                                                 {
-                                                     return std::isdigit( c );
-                                                 } );
-
-    if( net.empty() || ( implicitGeneratedName && !authoritativeOccurrenceNet ) )
+    if( net.empty() || ( isImplicitGeneratedName( net ) && !authoritativeOccurrenceNet ) )
     {
         if( !logicalName.empty() )
             net = logicalName;
@@ -5532,12 +5051,12 @@ std::string ORCAD_CONVERTER::powerNet( const ORCAD_RAW_PAGE& aPage, const ORCAD_
 
 VECTOR2I ORCAD_CONVERTER::graphicPinPos( const ORCAD_GRAPHIC_INST& aInst ) const
 {
-    auto symIt = m_design.symbols.find( aInst.name );
+    const ORCAD_SYMBOL_DEF* definition = graphicDefinition( aInst );
 
-    if( symIt == m_design.symbols.end() || symIt->second.pins.empty() )
+    if( !definition || definition->pins.empty() )
         return VECTOR2I( aInst.x, aInst.y );
 
-    const ORCAD_SYMBOL_DEF& sym = symIt->second;
+    const ORCAD_SYMBOL_DEF& sym = *definition;
     int                     baseX = std::min( aInst.bbox.x1, aInst.bbox.x2 );
     int                     baseY = std::min( aInst.bbox.y1, aInst.bbox.y2 );
 
@@ -5568,11 +5087,7 @@ VECTOR2I ORCAD_CONVERTER::namedGraphicPinPos( const ORCAD_RAW_PAGE& aPage, const
     std::string   logicalName = trimmed( aInst.logicalName );
     constexpr int MAX_PIN_SNAP_DISTANCE = 20;
 
-    std::transform( logicalName.begin(), logicalName.end(), logicalName.begin(),
-                    []( unsigned char c )
-                    {
-                        return static_cast<char>( std::tolower( c ) );
-                    } );
+    logicalName = OrcadLower( logicalName );
 
     if( logicalName.empty() )
         return candidate;
@@ -5583,12 +5098,7 @@ VECTOR2I ORCAD_CONVERTER::namedGraphicPinPos( const ORCAD_RAW_PAGE& aPage, const
         matchingConnectors += std::count_if( aConnectors.begin(), aConnectors.end(),
                                              [&]( const ORCAD_GRAPHIC_INST& aConnector )
                                              {
-                                                 std::string name = trimmed( aConnector.logicalName );
-                                                 std::transform( name.begin(), name.end(), name.begin(),
-                                                                 []( unsigned char c )
-                                                                 {
-                                                                     return static_cast<char>( std::tolower( c ) );
-                                                                 } );
+                                                 std::string name = OrcadLower( trimmed( aConnector.logicalName ) );
                                                  return name == logicalName;
                                              } );
     };
@@ -5608,12 +5118,7 @@ VECTOR2I ORCAD_CONVERTER::namedGraphicPinPos( const ORCAD_RAW_PAGE& aPage, const
         if( netIt == aPage.netmap.end() )
             continue;
 
-        std::string wireName = trimmed( netIt->second );
-        std::transform( wireName.begin(), wireName.end(), wireName.begin(),
-                        []( unsigned char c )
-                        {
-                            return static_cast<char>( std::tolower( c ) );
-                        } );
+        std::string wireName = OrcadLower( trimmed( netIt->second ) );
 
         if( wireName != logicalName )
             continue;
@@ -5652,11 +5157,6 @@ VECTOR2I ORCAD_CONVERTER::powerPinPos( const ORCAD_RAW_PAGE& aPage, const ORCAD_
             powerName = trimmed( property->second );
     }
 
-    auto namesEqual = []( const std::string& aLeft, const std::string& aRight )
-    {
-        return wxString::FromUTF8( aLeft ).CmpNoCase( wxString::FromUTF8( aRight ) ) == 0;
-    };
-
     for( const ORCAD_PLACED_INSTANCE& instance : aPage.instances )
     {
         for( const ORCAD_PIN_INST& pin : instance.pins )
@@ -5664,22 +5164,17 @@ VECTOR2I ORCAD_CONVERTER::powerPinPos( const ORCAD_RAW_PAGE& aPage, const ORCAD_
             if( pin.IsNoConnect() || pin.wordA != std::numeric_limits<uint32_t>::max() || !pin.wordB )
                 continue;
 
-            std::vector<std::string> pinNetNames;
-            auto                     pageName = aPage.netmap.find( pin.wordB );
+            std::set<std::string> pinNetNames = pageNetNames( aPage, pin.wordB );
+            auto                  pageName = aPage.netmap.find( pin.wordB );
 
             if( pageName != aPage.netmap.end() && !trimmed( pageName->second ).empty() )
-                pinNetNames.push_back( trimmed( pageName->second ) );
-
-            auto aliases = aPage.netAliases.find( pin.wordB );
-
-            if( aliases != aPage.netAliases.end() )
-                pinNetNames.insert( pinNetNames.end(), aliases->second.begin(), aliases->second.end() );
+                pinNetNames.insert( trimmed( pageName->second ) );
 
             if( !powerName.empty() && !pinNetNames.empty()
                 && std::none_of( pinNetNames.begin(), pinNetNames.end(),
                                  [&]( const std::string& aName )
                                  {
-                                     return namesEqual( aName, powerName );
+                                     return OrcadIEquals( aName, powerName );
                                  } ) )
             {
                 continue;
@@ -5759,89 +5254,10 @@ VECTOR2I ORCAD_CONVERTER::placedPinElectricalPosition( const ORCAD_PLACED_INSTAN
 
 std::vector<ORCAD_CONVERTER::OFFPAGE_NET> ORCAD_CONVERTER::offpageNets( const ORCAD_RAW_PAGE& aPage ) const
 {
-    std::vector<OFFPAGE_NET>                         out;
-    std::map<uint32_t, std::set<const std::string*>> occurrenceNamesByPageNetId;
+    wxASSERT( m_netIndex.page == &aPage );
 
-    if( m_currentOccNetNames )
-    {
-        for( const auto& [occurrenceId, occurrenceName] : *m_currentOccNetNames )
-        {
-            if( std::optional<uint32_t> objectId = occurrenceNetObjectId( occurrenceName ) )
-            {
-                auto sourceWire = std::find_if( aPage.wires.begin(), aPage.wires.end(),
-                                                [&]( const ORCAD_WIRE& aWire )
-                                                {
-                                                    return aWire.dbId == *objectId;
-                                                } );
-
-                if( sourceWire != aPage.wires.end() )
-                {
-                    occurrenceNamesByPageNetId[sourceWire->id].insert( &occurrenceName );
-                    continue;
-                }
-
-                auto sourceInstance = std::find_if( aPage.instances.begin(), aPage.instances.end(),
-                                                    [&]( const ORCAD_PLACED_INSTANCE& aInstance )
-                                                    {
-                                                        return aInstance.dbId == *objectId;
-                                                    } );
-
-                if( sourceInstance == aPage.instances.end() )
-                    continue;
-
-                std::string occurrenceKey = occurrenceName;
-                std::transform( occurrenceKey.begin(), occurrenceKey.end(), occurrenceKey.begin(),
-                                []( unsigned char c )
-                                {
-                                    return static_cast<char>( std::tolower( c ) );
-                                } );
-
-                auto matchesOccurrenceName = [&]( uint32_t aNetId )
-                {
-                    std::set<std::string> localNames;
-                    auto                  pageName = aPage.netmap.find( aNetId );
-
-                    if( pageName != aPage.netmap.end() )
-                        localNames.insert( pageName->second );
-
-                    auto aliases = aPage.netAliases.find( aNetId );
-
-                    if( aliases != aPage.netAliases.end() )
-                        localNames.insert( aliases->second.begin(), aliases->second.end() );
-
-                    return std::any_of( localNames.begin(), localNames.end(),
-                                        [&]( std::string aName )
-                                        {
-                                            std::transform( aName.begin(), aName.end(), aName.begin(),
-                                                            []( unsigned char c )
-                                                            {
-                                                                return static_cast<char>( std::tolower( c ) );
-                                                            } );
-                                            return occurrenceKey == aName
-                                                   || ( occurrenceKey.size() > aName.size()
-                                                        && occurrenceKey[aName.size()] == '_'
-                                                        && occurrenceKey.compare( 0, aName.size(), aName ) == 0 );
-                                        } );
-                };
-
-                for( const ORCAD_PIN_INST& pin : sourceInstance->pins )
-                {
-                    if( pin.wordB && matchesOccurrenceName( pin.wordB ) )
-                        occurrenceNamesByPageNetId[pin.wordB].insert( &occurrenceName );
-
-                    for( const ORCAD_WIRE& wire : aPage.wires )
-                    {
-                        if( matchesOccurrenceName( wire.id )
-                            && ( wire.id == pin.wordB || wire.dbId == pin.wordA
-                                 || rawPointOnSegment( pin.x, pin.y, wire ) ) )
-                        {
-                            occurrenceNamesByPageNetId[wire.id].insert( &occurrenceName );
-                        }
-                    }
-                }
-            }
-        }
-    }
+    std::vector<OFFPAGE_NET> out;
+    const auto&              occurrenceNamesByPageNetId = m_netIndex.occurrenceNamesByNetId;
 
     for( size_t i = 0; i < aPage.offpage.size(); ++i )
     {
@@ -5866,28 +5282,7 @@ std::vector<ORCAD_CONVERTER::OFFPAGE_NET> ORCAD_CONVERTER::offpageNets( const OR
                 occurrenceNets.insert( *occurrenceNames->second.begin() );
         }
 
-        std::set<uint32_t> matchingNetIds;
-
-        for( const auto& [netId, pageName] : aPage.netmap )
-        {
-            bool matches = wxString::FromUTF8( pageName ).CmpNoCase( wxString::FromUTF8( conn.logicalName ) ) == 0;
-            auto aliases = aPage.netAliases.find( netId );
-
-            if( aliases != aPage.netAliases.end() )
-            {
-                matches = matches
-                          || std::any_of( aliases->second.begin(), aliases->second.end(),
-                                          [&]( const std::string& aAlias )
-                                          {
-                                              return wxString::FromUTF8( aAlias ).CmpNoCase(
-                                                             wxString::FromUTF8( conn.logicalName ) )
-                                                     == 0;
-                                          } );
-            }
-
-            if( matches )
-                matchingNetIds.insert( netId );
-        }
+        std::set<uint32_t> matchingNetIds = pageNetIdsNamed( aPage, conn.logicalName );
 
         if( occurrenceNets.empty() )
         {
@@ -5916,12 +5311,11 @@ std::vector<ORCAD_CONVERTER::OFFPAGE_NET> ORCAD_CONVERTER::offpageNets( const OR
                                                      return wire.dbId == *objectId;
                                                  } );
             bool declaredNet = attachedNetIds.size() == 1 && matchingNetIds.count( *attachedNetIds.begin() );
-            bool declaredOccurrence = m_currentOccNetNames
-                                      && std::any_of( m_currentOccNetNames->begin(), m_currentOccNetNames->end(),
+            bool declaredOccurrence = m_scope.occ
+                                      && std::any_of( m_scope.occ->netNames.begin(), m_scope.occ->netNames.end(),
                                                       [&]( const auto& occurrence )
                                                       {
-                                                          return FromOrcadString( occurrence.second ).CmpNoCase(
-                                                                         FromOrcadString( conn.logicalName ) ) == 0;
+                                                          return OrcadIEquals( occurrence.second, conn.logicalName );
                                                       } );
 
             // Capture can retain an obsolete instance-derived occurrence after off-page connectors
@@ -6037,7 +5431,7 @@ std::vector<VECTOR2I> ORCAD_CONVERTER::computeJunctions( const ORCAD_RAW_PAGE& a
 
 void ORCAD_CONVERTER::placeJunctions( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScreen )
 {
-    for( const VECTOR2I& pt : computeJunctions( aPage ) )
+    for( const VECTOR2I& pt : m_netIndex.junctions )
         appendPageItem( aScreen, new SCH_JUNCTION( OrcadDbuToIu( pt.x, pt.y ) ) );
 }
 
@@ -6061,17 +5455,12 @@ static std::optional<std::vector<SEG>> eligibleSourceConnectivityWires(
             return std::any_of( aNames.begin(), aNames.end(),
                                 [&]( const std::string& aCandidate )
                                 {
-                                    return !aCandidate.empty()
-                                           && FromOrcadString( aName ).CmpNoCase(
-                                                      FromOrcadString( aCandidate ) ) == 0;
+                                    return !aCandidate.empty() && OrcadIEquals( aName, aCandidate );
                                 } );
         };
-        auto name = aPage.netmap.find( wire.id );
-        auto aliases = aPage.netAliases.find( wire.id );
+        std::set<std::string> names = pageNetNames( aPage, wire.id );
 
-        if( ( name != aPage.netmap.end() && matchesName( name->second ) )
-            || ( aliases != aPage.netAliases.end()
-                 && std::any_of( aliases->second.begin(), aliases->second.end(), matchesName ) ) )
+        if( std::any_of( names.begin(), names.end(), matchesName ) )
             matchingNets.insert( wire.id );
     }
 
@@ -6095,7 +5484,7 @@ static std::optional<std::vector<SEG>> eligibleSourceConnectivityWires(
 void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScreen, bool aHierarchical,
                                   bool aNestedHierarchy, bool aSharedFolderPage )
 {
-    bool sharedFlatFolder = aSharedFolderPage && !m_scopeNamedFlatNets && !m_scopeGeneratedFlatNets;
+    bool sharedFlatFolder = aSharedFolderPage && !m_scope.namedFlatNets && !m_scope.generatedFlatNets;
     std::map<uint32_t, const std::string*>               generatedNamesByObjectId;
     std::map<uint32_t, const std::string*>               occurrenceNamesByNetId;
     std::set<uint32_t>                                   localizedOwnedOccurrenceNetIds;
@@ -6118,9 +5507,9 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
     const std::map<std::string, std::string>*            hierBusNames = nullptr;
     std::iota( wireParents.begin(), wireParents.end(), 0 );
 
-    if( m_currentOccNetNames )
+    if( m_scope.occ )
     {
-        for( const auto& [occurrenceId, name] : *m_currentOccNetNames )
+        for( const auto& [occurrenceId, name] : m_scope.occ->netNames )
             occurrenceElectricalNames[&name] = occurrenceElectricalNetName( occurrenceId, name );
     }
 
@@ -6163,7 +5552,7 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
             powerWireIndicesByNetId[aPage.wires[i].id].push_back( i );
     }
 
-    std::vector<VECTOR2I> junctions = computeJunctions( aPage );
+    const std::vector<VECTOR2I>& junctions = m_netIndex.junctions;
 
     for( const auto& [netId, indices] : powerWireIndicesByNetId )
     {
@@ -6308,24 +5697,12 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
         }
     }
 
-    auto isImplicitGeneratedName = []( const std::string& aName )
-    {
-        if( aName.size() < 2 || aName[0] != 'N' || !std::isdigit( static_cast<unsigned char>( aName[1] ) ) )
-            return false;
-
-        return std::all_of( aName.begin() + 1, aName.end(),
-                            []( unsigned char c )
-                            {
-                                return std::isdigit( c );
-                            } );
-    };
-
     auto busNames = m_hierBusNamesByScreen.find( aScreen->GetUuid().AsStdString() );
 
     if( busNames != m_hierBusNamesByScreen.end() )
         hierBusNames = &busNames->second;
 
-    if( m_currentOccNetNames )
+    if( m_scope.occ )
     {
         std::map<uint32_t, uint32_t>                     netIdByWireObjectId;
         std::map<uint32_t, std::set<const std::string*>> objectNamesByNetId;
@@ -6333,27 +5710,12 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
         for( const ORCAD_WIRE& wire : aPage.wires )
             netIdByWireObjectId[wire.dbId] = wire.id;
 
-        auto lower = []( const std::string& aName )
-        {
-            std::string result = aName;
-            std::transform( result.begin(), result.end(), result.begin(),
-                            []( unsigned char c )
-                            {
-                                return static_cast<char>( std::tolower( c ) );
-                            } );
-            return result;
-        };
         for( const auto& [netId, localName] : aPage.netmap )
         {
-            std::set<std::string>        localNames = { localName };
+            std::set<std::string>        localNames = pageNetNames( aPage, netId );
             std::set<const std::string*> candidates;
             std::set<const std::string*> ownedCandidates;
             bool                         localizedOwnedCandidate = false;
-
-            auto aliases = aPage.netAliases.find( netId );
-
-            if( aliases != aPage.netAliases.end() )
-                localNames.insert( aliases->second.begin(), aliases->second.end() );
 
             bool directOffpage = std::any_of(
                     aPage.offpage.begin(), aPage.offpage.end(),
@@ -6361,22 +5723,22 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
                     {
                         std::string connectorName = aConnector.logicalName.empty() ? aConnector.name
                                                                                    : aConnector.logicalName;
-                        std::string connectorKey = lower( connectorName );
+                        std::string connectorKey = OrcadLower( connectorName );
                         return std::any_of( localNames.begin(), localNames.end(),
                                             [&]( const std::string& aName )
                                             {
-                                                return lower( aName ) == connectorKey;
+                                                return OrcadLower( aName ) == connectorKey;
                                             } );
                     } );
 
             for( const std::string& candidateLocalName : localNames )
             {
                 bool        implicitGenerated = isImplicitGeneratedName( candidateLocalName );
-                std::string localKey = lower( candidateLocalName );
+                std::string localKey = OrcadLower( candidateLocalName );
 
-                for( const auto& [occurrenceId, occurrenceName] : *m_currentOccNetNames )
+                for( const auto& [occurrenceId, occurrenceName] : m_scope.occ->netNames )
                 {
-                    std::string occurrenceKey = lower( occurrenceName );
+                    std::string occurrenceKey = OrcadLower( occurrenceName );
                     bool        occurrenceOwnedByNet = false;
 
                     if( std::optional<uint32_t> objectId = occurrenceNetObjectId( occurrenceName ) )
@@ -6388,23 +5750,11 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
                                     if( aInstance.dbId != *objectId )
                                         return false;
 
-                                    return std::any_of(
-                                            aInstance.pins.begin(), aInstance.pins.end(),
-                                            [&]( const ORCAD_PIN_INST& aPin )
-                                            {
-                                                if( aPin.wordB == netId )
-                                                    return true;
-
-                                                return std::any_of(
-                                                        aPage.wires.begin(), aPage.wires.end(),
-                                                        [&]( const ORCAD_WIRE& aWire )
+                                    return std::any_of( aInstance.pins.begin(), aInstance.pins.end(),
+                                                        [&]( const ORCAD_PIN_INST& aPin )
                                                         {
-                                                            return aWire.id == netId
-                                                                   && ( aPin.wordA == aWire.dbId
-                                                                        || rawPointOnSegment( aPin.x, aPin.y,
-                                                                                              aWire ) );
+                                                            return pinNetIds( aPin ).count( netId ) > 0;
                                                         } );
-                                            } );
                                 } );
                     }
 
@@ -6437,18 +5787,18 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
                 occurrenceNamesByNetId[netId] = *candidates.begin();
 
                 const std::string* selected = *candidates.begin();
-                std::string        selectedKey = lower( kicadOccurrenceNetName( *selected ) );
-                bool localOffpage = std::any_of( localNames.begin(), localNames.end(),
-                                                 [&]( const std::string& aName )
-                                                 {
-                                                     return isOffpageNetName( aName )
-                                                            && lower( aName ) == selectedKey;
-                                                 } );
+                std::string        selectedKey = OrcadLower( kicadOccurrenceNetName( *selected ) );
+                bool               localOffpage =
+                        std::any_of( localNames.begin(), localNames.end(),
+                                     [&]( const std::string& aName )
+                                     {
+                                         return isOffpageNetName( aName ) && OrcadLower( aName ) == selectedKey;
+                                     } );
                 bool competingSuffixedOccurrence = std::any_of(
-                        m_currentOccNetNames->begin(), m_currentOccNetNames->end(),
+                        m_scope.occ->netNames.begin(), m_scope.occ->netNames.end(),
                         [&]( const auto& aOccurrence )
                         {
-                            std::string key = lower( kicadOccurrenceNetName( aOccurrence.second ) );
+                            std::string key = OrcadLower( kicadOccurrenceNetName( aOccurrence.second ) );
                             return &aOccurrence.second != selected && key.size() > selectedKey.size()
                                    && key[selectedKey.size()] == '_'
                                    && key.compare( 0, selectedKey.size(), selectedKey ) == 0
@@ -6461,22 +5811,11 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
 
                     for( const ORCAD_PLACED_INSTANCE& instance : aPage.instances )
                     {
-                        bool connected = std::any_of(
-                                instance.pins.begin(), instance.pins.end(),
-                                [&]( const ORCAD_PIN_INST& aPin )
-                                {
-                                    if( aPin.wordB == netId )
-                                        return true;
-
-                                    return std::any_of( aPage.wires.begin(), aPage.wires.end(),
-                                                        [&]( const ORCAD_WIRE& aWire )
-                                                        {
-                                                            return aWire.id == netId
-                                                                   && ( aPin.wordA == aWire.dbId
-                                                                        || rawPointOnSegment( aPin.x, aPin.y,
-                                                                                              aWire ) );
-                                                        } );
-                                } );
+                        bool connected = std::any_of( instance.pins.begin(), instance.pins.end(),
+                                                      [&]( const ORCAD_PIN_INST& aPin )
+                                                      {
+                                                          return pinNetIds( aPin ).count( netId ) > 0;
+                                                      } );
 
                         if( connected && ( !componentId || instance.dbId < *componentId ) )
                             componentId = instance.dbId;
@@ -6494,7 +5833,7 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
             }
         }
 
-        for( const auto& [occurrenceId, name] : *m_currentOccNetNames )
+        for( const auto& [occurrenceId, name] : m_scope.occ->netNames )
         {
             occurrenceNames.insert( name );
 
@@ -6537,10 +5876,8 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
                                                 [&]( const auto& aPageNet )
                                                 {
                                                     return aPageNet.first != netId
-                                                           && wxString::FromUTF8(
-                                                                      kicadElectricalNetName( aPageNet.second ) )
-                                                                      .CmpNoCase( wxString::FromUTF8( electricalName ) )
-                                                                      == 0;
+                                                           && OrcadIEquals( kicadElectricalNetName( aPageNet.second ),
+                                                                            electricalName );
                                                 } );
 
             if( !collides )
@@ -6640,7 +5977,7 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
         std::string name = occurrence != occurrenceNamesByNetId.end()
                                    ? kicadOccurrenceNetName( *occurrence->second ) : sourceName;
 
-        if( m_scopeGeneratedFlatNets && isImplicitGeneratedName( name ) )
+        if( m_scope.generatedFlatNets && isImplicitGeneratedName( name ) )
         {
             // Cadence qualifies a reused sheet's generated net with its occurrence id, and that is
             // the spelling the paired board carries, so prefer it over our own flat suffix.
@@ -6655,10 +5992,10 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
             }
             else
             {
-                if( m_currentFlatNetSuffix.empty() )
+                if( m_scope.flatNetSuffix.empty() )
                     continue;
 
-                std::string suffix = m_currentFlatNetSuffix;
+                std::string suffix = m_scope.flatNetSuffix;
                 std::transform( suffix.begin(), suffix.end(), suffix.begin(),
                                 []( unsigned char c )
                                 {
@@ -6678,12 +6015,7 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
 
     for( const auto& [netId, occurrenceName] : occurrenceNamesByNetId )
     {
-        std::string occurrenceKey = kicadOccurrenceNetName( *occurrenceName );
-        std::transform( occurrenceKey.begin(), occurrenceKey.end(), occurrenceKey.begin(),
-                        []( unsigned char c )
-                        {
-                            return static_cast<char>( std::tolower( c ) );
-                        } );
+        std::string occurrenceKey = OrcadLower( kicadOccurrenceNetName( *occurrenceName ) );
         auto occurrenceDepth = m_occurrenceNetNameMinDepth.find( occurrenceKey );
 
         if( occurrenceDepth == m_occurrenceNetNameMinDepth.end() )
@@ -6691,27 +6023,13 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
 
         std::map<size_t, std::set<std::string>> candidatesByDepth;
         std::set<std::string>                   sourceNames;
-        auto                                    pageName = aPage.netmap.find( netId );
 
-        if( pageName != aPage.netmap.end() && !pageName->second.empty() )
-            sourceNames.insert( canonicalGlobalNetName( pageName->second ) );
-
-        auto aliases = aPage.netAliases.find( netId );
-
-        if( aliases != aPage.netAliases.end() )
-        {
-            for( const std::string& alias : aliases->second )
-                sourceNames.insert( canonicalGlobalNetName( alias ) );
-        }
+        for( const std::string& name : pageNetNames( aPage, netId ) )
+            sourceNames.insert( canonicalGlobalNetName( name ) );
 
         for( const std::string& sourceName : sourceNames )
         {
-            std::string sourceKey = sourceName;
-            std::transform( sourceKey.begin(), sourceKey.end(), sourceKey.begin(),
-                            []( unsigned char c )
-                            {
-                                return static_cast<char>( std::tolower( c ) );
-                            } );
+            std::string sourceKey = OrcadLower( sourceName );
             auto sourceDepth = m_occurrenceNetNameMinDepth.find( sourceKey );
 
             if( sourceDepth != m_occurrenceNetNameMinDepth.end() && sourceDepth->second < occurrenceDepth->second )
@@ -6768,21 +6086,16 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
         }
     }
 
-    if( !m_currentUnconnectedInterfaceNetNames.empty() )
+    if( !m_scope.unconnectedInterfaceNetNames.empty() )
     {
         for( const ORCAD_GRAPHIC_INST& port : aPage.ports )
         {
             std::string name = canonicalGlobalNetName( port.logicalName.empty() ? port.name : port.logicalName );
-            std::string key = name;
-            std::transform( key.begin(), key.end(), key.begin(),
-                            []( unsigned char c )
-                            {
-                                return static_cast<char>( std::tolower( c ) );
-                            } );
+            std::string key = OrcadLower( name );
 
-            auto targetName = m_currentUnconnectedInterfaceNetNames.find( key );
+            auto targetName = m_scope.unconnectedInterfaceNetNames.find( key );
 
-            if( targetName == m_currentUnconnectedInterfaceNetNames.end() )
+            if( targetName == m_scope.unconnectedInterfaceNetNames.end() )
                 continue;
 
             VECTOR2I pin = namedGraphicPinPos( aPage, port );
@@ -6884,16 +6197,10 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
         if( selectedName == netNamesById.end() || selectedName->second != name )
             continue;
 
-        std::string sourceName = kicadOccurrenceNetName( *name );
+        std::string sourceName = OrcadLower( kicadOccurrenceNetName( *name ) );
 
-        std::transform( sourceName.begin(), sourceName.end(), sourceName.begin(),
-                        []( unsigned char c )
-                        {
-                            return static_cast<char>( std::tolower( c ) );
-                        } );
-
-        if( !sharedFlatFolder && ( m_scopeNamedFlatNets || m_scopeGeneratedFlatNets || aNestedHierarchy )
-            && !m_currentInterfaceNetAliases.count( sourceName )
+        if( !sharedFlatFolder && ( m_scope.namedFlatNets || m_scope.generatedFlatNets || aNestedHierarchy )
+            && !m_scope.interfaceNetAliases.count( sourceName )
             && m_occurrenceNetNameScopeCounts[sourceName] > 1 )
         {
             continue;
@@ -6901,7 +6208,7 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
 
         if( !aNestedHierarchy
             && ( localizedOwnedOccurrenceNetIds.count( netId )
-                 || !m_currentConnectorInterfaceNetAliases.count( sourceName ) ) )
+                 || !m_scope.connectorInterfaceNetAliases.count( sourceName ) ) )
         {
             globalInterfaceNamesByNetId[netId].clear();
             globalInterfaceNamesByNetId[netId].insert( occurrenceElectricalName( name ) );
@@ -6915,7 +6222,7 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
             addInterfacePoint( VECTOR2I( pin.x, pin.y ), nullptr, std::nullopt );
     }
 
-    if( m_scopeNamedFlatNets && !m_currentFlatNetSuffix.empty() )
+    if( m_scope.namedFlatNets && !m_scope.flatNetSuffix.empty() )
     {
         for( const auto& [netId, name] : aPage.netmap )
         {
@@ -6929,7 +6236,7 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
                 continue;
 
             std::string& flattened = flattenedNamesByNetId[netId];
-            flattened = name + "_" + m_currentFlatNetSuffix;
+            flattened = name + "_" + m_scope.flatNetSuffix;
             netNamesById[netId] = &flattened;
             renamedNetIds.insert( netId );
         }
@@ -6948,10 +6255,10 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
 
         if( generatedName != generatedNamesByObjectId.end() )
         {
-            if( m_scopeGeneratedFlatNets && !m_currentFlatNetSuffix.empty() && !interfaceNetIds.count( wire.id ) )
+            if( m_scope.generatedFlatNets && !m_scope.flatNetSuffix.empty() && !interfaceNetIds.count( wire.id ) )
             {
                 std::string& flattened = flattenedNamesByNetId[wire.id];
-                flattened = *generatedName->second + "_" + m_currentFlatNetSuffix;
+                flattened = *generatedName->second + "_" + m_scope.flatNetSuffix;
                 netNamesById[wire.id] = &flattened;
                 renamedNetIds.insert( wire.id );
             }
@@ -7214,14 +6521,9 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
             }
             else if( !ambiguousPhysicalNet && netName != netNamesById.end() )
             {
-                std::string key = *netName->second;
-                std::transform( key.begin(), key.end(), key.begin(),
-                                []( unsigned char c )
-                                {
-                                    return static_cast<char>( std::tolower( c ) );
-                                } );
+                std::string key = OrcadLower( *netName->second );
 
-                if( !m_currentConnectorInterfaceNetAliases.count( key ) )
+                if( !m_scope.connectorInterfaceNetAliases.count( key ) )
                     names.insert( *netName->second );
             }
 
@@ -7360,7 +6662,7 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
                 applyFont( label, fontId );
                 label->SetTextColor( OrcadColor( alias.color ) );
                 appendPageItem( aScreen, label );
-                m_labelSourceNets[label] = { aScreen, wire.id };
+                m_labelSourceNets.push_back( { label, { aScreen, wire.id } } );
             }
             else
             {
@@ -7465,16 +6767,11 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
                 {
                     name = occurrenceElectricalName( occurrenceName->second );
                     std::string sourceName = kicadOccurrenceNetName( *occurrenceName->second );
-                    std::string key = sourceName;
-                    std::transform( key.begin(), key.end(), key.begin(),
-                                    []( unsigned char c )
-                                    {
-                                        return static_cast<char>( std::tolower( c ) );
-                                    } );
+                    std::string key = OrcadLower( sourceName );
                     globalName = !localizedOwnedOccurrenceNetIds.count( pin.wordB )
                                  && ( sharedFlatFolder
-                                      || !( m_scopeNamedFlatNets || m_scopeGeneratedFlatNets || aNestedHierarchy )
-                                      || m_currentInterfaceNetAliases.count( key )
+                                      || !( m_scope.namedFlatNets || m_scope.generatedFlatNets || aNestedHierarchy )
+                                      || m_scope.interfaceNetAliases.count( key )
                                       || m_occurrenceNetNameScopeCounts[key] == 1 );
 
                 }
@@ -7538,9 +6835,9 @@ void ORCAD_CONVERTER::placeWires( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
 
             uint32_t sourceNetId = pin.wordB;
 
-            if( m_currentOccNetNames )
+            if( m_scope.occ )
             {
-                for( const auto& [id, occurrenceName] : *m_currentOccNetNames )
+                for( const auto& [id, occurrenceName] : m_scope.occ->netNames )
                 {
                     if( kicadOccurrenceNetName( occurrenceName ) == name )
                     {
@@ -7593,56 +6890,32 @@ void ORCAD_CONVERTER::placeHierarchicalBlockFields( SCH_SHEET* aSheet, const ORC
 
     const ORCAD_DISPLAY_PROP* referenceDisplay = nullptr;
     const ORCAD_DISPLAY_PROP* valueDisplay = nullptr;
-    auto namesEqual = []( const std::string& aLeft, std::string_view aRight )
-    {
-        return aLeft.size() == aRight.size()
-               && std::equal( aLeft.begin(), aLeft.end(), aRight.begin(),
-                              []( unsigned char a, unsigned char b )
-                              {
-                                  return std::tolower( a ) == std::tolower( b );
-                              } );
-    };
-
     for( const ORCAD_DISPLAY_PROP& display : aBlock.displayProps )
     {
-        if( namesEqual( display.name, "Part Reference" ) )
+        if( OrcadIEquals( display.name, "Part Reference" ) )
             referenceDisplay = &display;
-        else if( namesEqual( display.name, "Reference" ) && !referenceDisplay )
+        else if( OrcadIEquals( display.name, "Reference" ) && !referenceDisplay )
             referenceDisplay = &display;
-        else if( namesEqual( display.name, "Value" ) )
+        else if( OrcadIEquals( display.name, "Value" ) )
             valueDisplay = &display;
     }
 
-    auto applyDisplay = [&]( SCH_FIELD* aField, const ORCAD_DISPLAY_PROP& aDisplay )
-    {
-        int      fontId = displayFontId( aDisplay );
-        bool     templateFont = displayUsesTemplateFont( aDisplay );
-        int      size = textSizeIU( fontId, templateFont );
-        int      baseline = textBaselineOffset( size, fontId, templateFont );
-        bool     vertical = ( aDisplay.rotation & 1 ) != 0;
-        VECTOR2I position = OrcadDbuToIu( aBlock.x1 + aDisplay.x, aBlock.y1 + aDisplay.y )
-                            + ( vertical ? VECTOR2I( baseline, 0 ) : VECTOR2I( 0, baseline ) );
-
-        aField->SetPosition( position );
-        aField->SetTextAngle( vertical ? ANGLE_VERTICAL : ANGLE_HORIZONTAL );
-        aField->SetTextSize( textSize( fontId, templateFont ) );
-        applyFont( aField, fontId, templateFont );
-        aField->SetTextColor( OrcadColor( aDisplay.color ) );
-        aField->SetEffectiveHorizJustify( GR_TEXT_H_ALIGN_LEFT );
-        aField->SetEffectiveVertJustify( GR_TEXT_V_ALIGN_TOP );
-        aField->SetVisible( OrcadDisplayPropVisible( aDisplay ) );
-        aField->SetNameShown( OrcadDisplayPropShowsName( aDisplay ) );
-    };
+    auto applyDisplay =
+            [&]( SCH_FIELD& aField, const ORCAD_DISPLAY_PROP& aDisplay )
+            {
+                applyDisplayProp( aField, aDisplay, OrcadDbuToIu( aBlock.x1 + aDisplay.x, aBlock.y1 + aDisplay.y ),
+                                  false );
+            };
 
     if( referenceDisplay )
-        applyDisplay( sheetName, *referenceDisplay );
+        applyDisplay( *sheetName, *referenceDisplay );
 
     if( valueDisplay )
     {
         auto value = std::find_if( aBlock.props.begin(), aBlock.props.end(),
                                    [&]( const auto& aProperty )
                                    {
-                                       return namesEqual( aProperty.first, "Value" );
+                                       return OrcadIEquals( aProperty.first, "Value" );
                                    } );
         std::string valueText;
 
@@ -7659,7 +6932,7 @@ void ORCAD_CONVERTER::placeHierarchicalBlockFields( SCH_SHEET* aSheet, const ORC
         {
             SCH_FIELD implementation( aSheet, FIELD_T::USER, wxS( "Implementation" ) );
             implementation.SetText( FromOrcadString( valueText ) );
-            applyDisplay( &implementation, *valueDisplay );
+            applyDisplay( implementation, *valueDisplay );
             aSheet->AddField( implementation );
         }
     }
@@ -7740,10 +7013,23 @@ void ORCAD_CONVERTER::placeGraphicDisplayText( const ORCAD_GRAPHIC_INST& aGraphi
 }
 
 
+/** Bus labels fall back to bus wires; a net label with no eligible net wire may still sit on a bus */
+static std::optional<std::vector<SEG>> interfaceSourceWires( const ORCAD_RAW_PAGE& aPage, const VECTOR2I& aPosition,
+                                                             const std::set<std::string>& aNames,
+                                                             const std::string&           aNet )
+{
+    bool bus = SCH_CONNECTION::IsBusLabel( FromOrcadString( aNet ) );
+    auto sourceWires = eligibleSourceConnectivityWires( aPage, aPosition, aNames, bus );
+
+    if( !bus && sourceWires && sourceWires->empty() )
+        sourceWires = eligibleSourceConnectivityWires( aPage, aPosition, aNames, true );
+
+    return sourceWires;
+}
 
 
 static std::optional<VECTOR2I> safeConnectivityLabelPosition( SCH_SCREEN* aScreen, const VECTOR2I& aPosition,
-                                                           const std::optional<std::vector<SEG>>& aSourceWires )
+                                                              const std::optional<std::vector<SEG>>& aSourceWires )
 {
     if( !aSourceWires )
         return std::nullopt;
@@ -7764,7 +7050,10 @@ static std::optional<VECTOR2I> safeConnectivityLabelPosition( SCH_SCREEN* aScree
         }
         else if( item->Type() == SCH_SYMBOL_T )
         {
-            for( SCH_PIN* pin : static_cast<SCH_SYMBOL*>( item )->GetPins() )
+            // Since the screen may be instantiated multiple times with different instances
+            // of this symbol (all potentially with different units/bodystyles), about all
+            // we can do is consider all unit/bodystyle pins to be present.
+            for( SCH_PIN* pin : static_cast<SCH_SYMBOL*>( item )->GetGraphicalPins( ALL_UNITS, ALL_BODY_STYLES ) )
                 pins.insert( pin->GetPosition() );
         }
         else if( item->Type() == SCH_SHEET_T )
@@ -7783,40 +7072,49 @@ static std::optional<VECTOR2I> safeConnectivityLabelPosition( SCH_SCREEN* aScree
         }
     }
 
-    auto safe = [&]( const VECTOR2I& aCandidate )
-    {
-        if( busEntries.count( aCandidate ) )
-            return false;
+    auto safe =
+            [&]( const VECTOR2I& aCandidate )
+            {
+                if( busEntries.count( aCandidate ) )
+                    return false;
 
-        int contacts = std::count_if( wires.begin(), wires.end(),
-                                      [&]( const SEG& wire ) { return wire.Contains( aCandidate ); } );
+                int contacts = std::count_if( wires.begin(), wires.end(),
+                                              [&]( const SEG& wire )
+                                              {
+                                                  return wire.Contains( aCandidate );
+                                              } );
 
-        if( aSourceWires->empty() )
-        {
-            // Coincident pins can require a junction dot without any crossing wires.
-            return aCandidate == aPosition && contacts == 0
-                   && ( !junctions.count( aCandidate ) || pins.count( aCandidate ) );
-        }
+                if( aSourceWires->empty() )
+                {
+                    // Coincident pins can require a junction dot without any crossing wires.
+                    return aCandidate == aPosition && contacts == 0
+                           && ( !junctions.count( aCandidate ) || pins.count( aCandidate ) );
+                }
 
-        return !junctions.count( aCandidate ) && !pins.count( aCandidate ) && contacts <= 1;
-    };
+                return !junctions.count( aCandidate ) && !pins.count( aCandidate ) && contacts <= 1;
+            };
 
-    auto supported = [&]( const SEG& aWire, const VECTOR2I& aCandidate )
-    {
-        return aWire.Contains( aCandidate )
-               && std::any_of( aSourceWires->begin(), aSourceWires->end(),
-                               [&]( const SEG& aSource )
-                               {
-                                   return aSource.A != aSource.B && aSource.Contains( aCandidate )
-                                          && ( aSource.B - aSource.A ).Cross( aWire.B - aWire.A ) == 0;
-                               } );
-    };
+    auto supported =
+            [&]( const SEG& aWire, const VECTOR2I& aCandidate )
+            {
+                return aWire.Contains( aCandidate )
+                       && std::any_of( aSourceWires->begin(), aSourceWires->end(),
+                                       [&]( const SEG& aSource )
+                                       {
+                                           return aSource.A != aSource.B && aSource.Contains( aCandidate )
+                                                  && ( aSource.B - aSource.A ).Cross( aWire.B - aWire.A ) == 0;
+                                       } );
+            };
 
     if( safe( aPosition )
-        && ( aSourceWires->empty()
-             || std::any_of( wires.begin(), wires.end(),
-                             [&]( const SEG& aWire ) { return supported( aWire, aPosition ); } ) ) )
+        && ( aSourceWires->empty() || std::any_of( wires.begin(), wires.end(),
+                                                   [&]( const SEG& aWire )
+                                                   {
+                                                       return supported( aWire, aPosition );
+                                                   } ) ) )
+    {
         return aPosition;
+    }
 
     std::set<VECTOR2I> candidates;
 
@@ -7841,24 +7139,28 @@ static std::optional<VECTOR2I> safeConnectivityLabelPosition( SCH_SCREEN* aScree
 
         VECTOR2I step = delta / steps;
         std::set<int> offsets = { 0, steps, steps / 2 };
-        auto addOffset = [&]( long double aOffset )
-        {
-            if( aOffset < -2 || aOffset > steps + 2.0L )
-                return;
 
-            int offset = static_cast<int>( std::floor( aOffset ) );
+        auto addOffset =
+                [&]( long double aOffset )
+                {
+                    if( aOffset < -2 || aOffset > steps + 2.0L )
+                        return;
 
-            for( int adjacent = -1; adjacent <= 2; ++adjacent )
-            {
-                if( offset + adjacent >= 0 && offset + adjacent <= steps )
-                    offsets.insert( offset + adjacent );
-            }
-        };
-        auto projection = [&]( const VECTOR2I& aPoint ) -> long double
-        {
-            return step.x ? ( (long double) aPoint.x - wire.A.x ) / step.x
-                          : ( (long double) aPoint.y - wire.A.y ) / step.y;
-        };
+                    int offset = static_cast<int>( std::floor( aOffset ) );
+
+                    for( int adjacent = -1; adjacent <= 2; ++adjacent )
+                    {
+                        if( offset + adjacent >= 0 && offset + adjacent <= steps )
+                            offsets.insert( offset + adjacent );
+                    }
+                };
+
+        auto projection =
+                [&]( const VECTOR2I& aPoint ) -> long double
+                {
+                    return step.x ? ( (long double) aPoint.x - wire.A.x ) / step.x
+                                  : ( (long double) aPoint.y - wire.A.y ) / step.y;
+                };
 
         addOffset( projection( aPosition ) );
         long double inset = schIUScale.MilsToIU( 50 ) / std::hypot( step.x, step.y );
@@ -7947,14 +7249,8 @@ void ORCAD_CONVERTER::placeOffpageConnectors( const ORCAD_RAW_PAGE& aPage, SCH_S
         }
 
         const ORCAD_GRAPHIC_INST& connector = aPage.offpage[offpage.index];
-        bool bus = SCH_CONNECTION::IsBusLabel( FromOrcadString( net ) );
-        auto sourceWires = eligibleSourceConnectivityWires(
-                aPage, VECTOR2I( offpage.x, offpage.y ), { connector.logicalName, offpage.net }, bus );
-
-        if( !bus && sourceWires && sourceWires->empty() )
-            sourceWires = eligibleSourceConnectivityWires(
-                    aPage, VECTOR2I( offpage.x, offpage.y ), { connector.logicalName, offpage.net }, true );
-
+        auto                      sourceWires = interfaceSourceWires( aPage, VECTOR2I( offpage.x, offpage.y ),
+                                                                      { connector.logicalName, offpage.net }, net );
 
         VECTOR2I originalPosition = OrcadDbuToIu( offpage.x, offpage.y );
         std::optional<VECTOR2I> position = safeConnectivityLabelPosition( aScreen, originalPosition, sourceWires );
@@ -7968,56 +7264,11 @@ void ORCAD_CONVERTER::placeOffpageConnectors( const ORCAD_RAW_PAGE& aPage, SCH_S
         }
 
         SCH_GLOBALLABEL* label = new SCH_GLOBALLABEL( *position, FromOrcadString( net ) );
+        SPIN_STYLE       spin = spinAwayFromWire( VECTOR2I( offpage.x, offpage.y ) );
         label->SetShape( LABEL_FLAG_SHAPE::L_BIDI );
-        label->SetTextColor( OrcadColor( aPage.offpage[offpage.index].color ) );
-
-        // Point label away from attached wire; vertical wire gives up/down, horizontal left/right.
-        SPIN_STYLE spin = SPIN_STYLE::RIGHT;
-        auto       endIt = m_wireEndpoints.find( { offpage.x, offpage.y } );
-
-        if( endIt != m_wireEndpoints.end() && !endIt->second.empty() )
-        {
-            const ORCAD_WIRE* wire = endIt->second.front();
-            int64_t           dx = (int64_t) wire->x1 + wire->x2 - 2LL * offpage.x;
-            int64_t           dy = (int64_t) wire->y1 + wire->y2 - 2LL * offpage.y;
-
-            if( std::abs( dx ) >= std::abs( dy ) )
-                spin = dx > 0 ? SPIN_STYLE::LEFT : SPIN_STYLE::RIGHT;
-            else
-                spin = dy > 0 ? SPIN_STYLE::UP : SPIN_STYLE::BOTTOM;
-        }
-
         label->SetSpinStyle( spin );
 
-        if( SCH_FIELD* refs = label->GetField( FIELD_T::INTERSHEET_REFS ) )
-            refs->SetVisible( false );
-
-        auto displayedName = std::find_if( connector.displayProps.begin(), connector.displayProps.end(),
-                                           []( const ORCAD_DISPLAY_PROP& aProp )
-                                           {
-                                               return aProp.name == "Name";
-                                           } );
-        auto displayedIref = std::find_if( connector.displayProps.begin(), connector.displayProps.end(),
-                                           []( const ORCAD_DISPLAY_PROP& aProp )
-                                           {
-                                               return aProp.name == "IREF";
-                                           } );
-        auto storedIref = connector.props.find( "IREF" );
-
-        if( displayedName != connector.displayProps.end() )
-        {
-            label->SetTextSize( textSize( OrcadDisplayFontId( *displayedName ) ) );
-            applyFont( label, OrcadDisplayFontId( *displayedName ) );
-        }
-
-        if( storedIref != connector.props.end() && displayedIref != connector.displayProps.end()
-            && OrcadDisplayPropVisible( *displayedIref ) )
-        {
-            placeGraphicDisplayText( connector, *displayedIref, storedIref->second, aScreen );
-        }
-
-        appendPageItem( aScreen, label );
-        rememberInterfaceLabelSource( aScreen, label, *sourceWires );
+        const ORCAD_DISPLAY_PROP* displayedName = finishInterfaceLabel( connector, label, *sourceWires, aScreen );
 
         // Some source off-page connectors also bind a drawn block's parent sheet pin.
         const auto& parentPins = aSheetPath.Last()->GetPins();
@@ -8035,7 +7286,7 @@ void ORCAD_CONVERTER::placeOffpageConnectors( const ORCAD_RAW_PAGE& aPage, SCH_S
             parentLabel->SetTextColor( label->GetTextColor() );
             parentLabel->SetTextSize( label->GetTextSize() );
 
-            if( displayedName != connector.displayProps.end() )
+            if( displayedName )
                 applyFont( parentLabel, OrcadDisplayFontId( *displayedName ) );
 
             appendPageItem( aScreen, parentLabel );
@@ -8060,27 +7311,13 @@ void ORCAD_CONVERTER::placePorts( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
                 continue;
 
             std::set<std::string> sourceNames;
-            auto                  pageName = aPage.netmap.find( wire.id );
 
-            if( pageName != aPage.netmap.end() && !pageName->second.empty() )
-                sourceNames.insert( canonicalGlobalNetName( pageName->second ) );
-
-            auto aliases = aPage.netAliases.find( wire.id );
-
-            if( aliases != aPage.netAliases.end() )
-            {
-                for( const std::string& alias : aliases->second )
-                    sourceNames.insert( canonicalGlobalNetName( alias ) );
-            }
+            for( const std::string& name : pageNetNames( aPage, wire.id ) )
+                sourceNames.insert( canonicalGlobalNetName( name ) );
 
             for( const std::string& sourceName : sourceNames )
             {
-                std::string key = sourceName;
-                std::transform( key.begin(), key.end(), key.begin(),
-                                []( unsigned char c )
-                                {
-                                    return static_cast<char>( std::tolower( c ) );
-                                } );
+                std::string key = OrcadLower( sourceName );
                 auto depth = m_occurrenceNetNameMinDepth.find( key );
 
                 if( depth != m_occurrenceNetNameMinDepth.end() )
@@ -8102,12 +7339,7 @@ void ORCAD_CONVERTER::placePorts( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
         if( net.empty() )
             continue;
 
-        bool bus = SCH_CONNECTION::IsBusLabel( FromOrcadString( net ) );
-        auto sourceWires = eligibleSourceConnectivityWires(
-                aPage, pos, { port.logicalName, net }, bus );
-
-        if( !bus && sourceWires && sourceWires->empty() )
-            sourceWires = eligibleSourceConnectivityWires( aPage, pos, { port.logicalName, net }, true );
+        auto sourceWires = interfaceSourceWires( aPage, pos, { port.logicalName, net }, net );
 
         std::optional<VECTOR2I> position = safeConnectivityLabelPosition(
                 aScreen, OrcadDbuToIu( pos.x, pos.y ), sourceWires );
@@ -8136,59 +7368,71 @@ void ORCAD_CONVERTER::placePorts( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aScre
             label = new SCH_GLOBALLABEL( *position, FromOrcadString( net ) );
 
         label->SetShape( shape );
-        label->SetSpinStyle( SPIN_STYLE::RIGHT );
-
-        auto end = m_wireEndpoints.find( { pos.x, pos.y } );
-
-        if( end != m_wireEndpoints.end() && !end->second.empty() )
-        {
-            const ORCAD_WIRE& wire = *end->second.front();
-            int64_t dx = static_cast<int64_t>( wire.x1 ) + wire.x2 - 2LL * pos.x;
-            int64_t dy = static_cast<int64_t>( wire.y1 ) + wire.y2 - 2LL * pos.y;
-
-            if( std::abs( dx ) >= std::abs( dy ) )
-                label->SetSpinStyle( dx > 0 ? SPIN_STYLE::LEFT : SPIN_STYLE::RIGHT );
-            else
-                label->SetSpinStyle( dy > 0 ? SPIN_STYLE::UP : SPIN_STYLE::BOTTOM );
-        }
-
-        label->SetTextColor( OrcadColor( port.color ) );
-
-        if( SCH_GLOBALLABEL* global = dynamic_cast<SCH_GLOBALLABEL*>( label ) )
-        {
-            if( SCH_FIELD* refs = global->GetField( FIELD_T::INTERSHEET_REFS ) )
-                refs->SetVisible( false );
-        }
-
-        auto displayedName = std::find_if( port.displayProps.begin(), port.displayProps.end(),
-                                           []( const ORCAD_DISPLAY_PROP& aProp )
-                                           {
-                                               return aProp.name == "Name";
-                                           } );
-
-        if( displayedName != port.displayProps.end() )
-        {
-            int fontId = OrcadDisplayFontId( *displayedName );
-            label->SetTextSize( textSize( fontId ) );
-            applyFont( label, fontId );
-        }
-
-        auto storedIref = port.props.find( "IREF" );
-        auto displayedIref = std::find_if( port.displayProps.begin(), port.displayProps.end(),
-                                           []( const ORCAD_DISPLAY_PROP& aProp )
-                                           {
-                                               return aProp.name == "IREF";
-                                           } );
-
-        if( storedIref != port.props.end() && displayedIref != port.displayProps.end()
-            && OrcadDisplayPropVisible( *displayedIref ) )
-        {
-            placeGraphicDisplayText( port, *displayedIref, storedIref->second, aScreen );
-        }
-
-        appendPageItem( aScreen, label );
-        rememberInterfaceLabelSource( aScreen, label, *sourceWires );
+        label->SetSpinStyle( spinAwayFromWire( pos ) );
+        finishInterfaceLabel( port, label, *sourceWires, aScreen );
     }
+}
+
+
+SPIN_STYLE ORCAD_CONVERTER::spinAwayFromWire( const VECTOR2I& aPosDbu ) const
+{
+    auto end = m_netIndex.wireEndpoints.find( { aPosDbu.x, aPosDbu.y } );
+
+    if( end == m_netIndex.wireEndpoints.end() || end->second.empty() )
+        return SPIN_STYLE::RIGHT;
+
+    // A vertical wire gives up/down, a horizontal one left/right
+    const ORCAD_WIRE& wire = *end->second.front();
+    int64_t           dx = static_cast<int64_t>( wire.x1 ) + wire.x2 - 2LL * aPosDbu.x;
+    int64_t           dy = static_cast<int64_t>( wire.y1 ) + wire.y2 - 2LL * aPosDbu.y;
+
+    if( std::abs( dx ) >= std::abs( dy ) )
+        return dx > 0 ? SPIN_STYLE::LEFT : SPIN_STYLE::RIGHT;
+
+    return dy > 0 ? SPIN_STYLE::UP : SPIN_STYLE::BOTTOM;
+}
+
+
+const ORCAD_DISPLAY_PROP* ORCAD_CONVERTER::finishInterfaceLabel( const ORCAD_GRAPHIC_INST& aGraphic,
+                                                                 SCH_LABEL_BASE*           aLabel,
+                                                                 const std::vector<SEG>&   aSourceWires,
+                                                                 SCH_SCREEN*               aScreen )
+{
+    auto findDisplay = [&]( const char* aName ) -> const ORCAD_DISPLAY_PROP*
+    {
+        auto it = std::find_if( aGraphic.displayProps.begin(), aGraphic.displayProps.end(),
+                                [&]( const ORCAD_DISPLAY_PROP& aProp )
+                                {
+                                    return aProp.name == aName;
+                                } );
+        return it != aGraphic.displayProps.end() ? &*it : nullptr;
+    };
+
+    aLabel->SetTextColor( OrcadColor( aGraphic.color ) );
+
+    if( SCH_GLOBALLABEL* global = dynamic_cast<SCH_GLOBALLABEL*>( aLabel ) )
+    {
+        if( SCH_FIELD* refs = global->GetField( FIELD_T::INTERSHEET_REFS ) )
+            refs->SetVisible( false );
+    }
+
+    const ORCAD_DISPLAY_PROP* displayedName = findDisplay( "Name" );
+    const ORCAD_DISPLAY_PROP* displayedIref = findDisplay( "IREF" );
+    auto                      storedIref = aGraphic.props.find( "IREF" );
+
+    if( displayedName )
+    {
+        int fontId = OrcadDisplayFontId( *displayedName );
+        aLabel->SetTextSize( textSize( fontId ) );
+        applyFont( aLabel, fontId );
+    }
+
+    if( storedIref != aGraphic.props.end() && displayedIref && OrcadDisplayPropVisible( *displayedIref ) )
+        placeGraphicDisplayText( aGraphic, *displayedIref, storedIref->second, aScreen );
+
+    appendPageItem( aScreen, aLabel );
+    rememberInterfaceLabelSource( aScreen, aLabel, aSourceWires );
+    return displayedName;
 }
 
 
@@ -8199,48 +7443,15 @@ void ORCAD_CONVERTER::placeGraphics( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aS
         if( !gfx.nested )
             continue;
 
-        KIGFX::COLOR4D                                          graphicColor = OrcadColor( gfx.color );
+        KIGFX::COLOR4D sourceColor = OrcadColor( gfx.color );
+        bool           invisibleColor =
+                sourceColor == KIGFX::COLOR4D::UNSPECIFIED || sourceColor == KIGFX::COLOR4D( 1.0, 1.0, 1.0, 1.0 );
+        KIGFX::COLOR4D graphicColor = invisibleColor ? KIGFX::COLOR4D( 0.0, 0.0, 0.0, 1.0 ) : sourceColor;
 
-        if( graphicColor == KIGFX::COLOR4D::UNSPECIFIED
-            || graphicColor == KIGFX::COLOR4D( 1.0, 1.0, 1.0, 1.0 ) )
+        auto placePrimitive = [&]( const ORCAD_PRIMITIVE& aSource, int aOffsetX, int aOffsetY )
         {
-            graphicColor = KIGFX::COLOR4D( 0.0, 0.0, 0.0, 1.0 );
-        }
-
-        std::function<void( const ORCAD_PRIMITIVE&, int, int )> placePrimitive =
-                [&]( const ORCAD_PRIMITIVE& aSource, int aOffsetX, int aOffsetY )
-        {
-            if( aSource.kind == ORCAD_PRIM_KIND::GROUP_PRIM )
-            {
-                for( const ORCAD_PRIMITIVE& child : aSource.children )
-                    placePrimitive( child, aOffsetX + aSource.x1, aOffsetY + aSource.y1 );
-
-                return;
-            }
-
             ORCAD_PRIMITIVE prim = aSource;
-            prim.x1 += aOffsetX;
-            prim.y1 += aOffsetY;
-            prim.x2 += aOffsetX;
-            prim.y2 += aOffsetY;
-
-            for( ORCAD_POINT& point : prim.points )
-            {
-                point.x += aOffsetX;
-                point.y += aOffsetY;
-            }
-
-            if( prim.start )
-            {
-                prim.start->x += aOffsetX;
-                prim.start->y += aOffsetY;
-            }
-
-            if( prim.end )
-            {
-                prim.end->x += aOffsetX;
-                prim.end->y += aOffsetY;
-            }
+            OrcadOffsetPrimitive( prim, aOffsetX, aOffsetY );
 
             switch( prim.kind )
             {
@@ -8260,14 +7471,7 @@ void ORCAD_CONVERTER::placeGraphics( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aS
                 if( gfx.typeId == ORCAD_ST_GRAPHIC_OLE_INST )
                 {
                     ORCAD_PRIMITIVE frame = prim;
-                    KIGFX::COLOR4D  frameColor = OrcadColor( gfx.color );
-
-                    if( frameColor == KIGFX::COLOR4D::UNSPECIFIED
-                        || frameColor == KIGFX::COLOR4D( 1.0, 1.0, 1.0, 1.0 ) )
-                    {
-                        frameColor = usedEmbeddedEmf ? OrcadColor( 8 )
-                                                     : KIGFX::COLOR4D( 0.0, 0.0, 0.0, 1.0 );
-                    }
+                    KIGFX::COLOR4D  frameColor = invisibleColor && usedEmbeddedEmf ? OrcadColor( 8 ) : graphicColor;
 
                     frame.kind = ORCAD_PRIM_KIND::RECTANGLE;
                     frame.lineStyle = 0;
@@ -8294,9 +7498,7 @@ void ORCAD_CONVERTER::placeGraphics( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aS
                 if( prim.fontIdx > 0 && prim.fontIdx <= static_cast<int>( m_design.library.fonts.size() ) )
                 {
                     sourceFont = &m_design.library.fonts[prim.fontIdx - 1];
-                    sourceFace = sourceFont->face;
-                    std::transform( sourceFace.begin(), sourceFace.end(), sourceFace.begin(),
-                                    []( unsigned char aChar ) { return std::tolower( aChar ); } );
+                    sourceFace = OrcadLower( sourceFont->face );
                 }
 
                 if( sourceFace == "greekc" )
@@ -8308,19 +7510,6 @@ void ORCAD_CONVERTER::placeGraphics( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aS
                     break;
 
                 VECTOR2I  scaledTextSize = textSize( prim.fontIdx, false );
-
-                if( !gfx.textFaceOverride.empty() && prim.fontIdx > 0
-                    && prim.fontIdx <= static_cast<int>( m_design.library.fonts.size() ) )
-                {
-                    const ORCAD_FONT& sourceFontDef = m_design.library.fonts[prim.fontIdx - 1];
-
-                    if( sourceFace == "arial narrow" )
-                    {
-                        double widthScale = sourceFontDef.width == 0 ? 35.0 / 32.0 : 8.0 / 9.0;
-                        scaledTextSize.x = KiROUND( scaledTextSize.x * widthScale );
-                    }
-                }
-
                 scaledTextSize.x = KiROUND( scaledTextSize.x * gfx.textScaleX );
                 scaledTextSize.y = KiROUND( scaledTextSize.y * gfx.textScaleY );
 
@@ -8354,12 +7543,6 @@ void ORCAD_CONVERTER::placeGraphics( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aS
 
                 if( sourceFace == "greekc" || sourceFace == "commercialpi bt" )
                     text->SetFont( KIFONT::FONT::GetFont( wxS( "Arial" ), text->IsBold(), text->IsItalic() ) );
-
-                if( !gfx.textFaceOverride.empty() )
-                {
-                    text->SetFont( KIFONT::FONT::GetFont( FromOrcadString( gfx.textFaceOverride ), text->IsBold(),
-                                                         text->IsItalic() ) );
-                }
 
                 auto sourceCellWidthDbu = [&]()
                 {
@@ -8590,8 +7773,7 @@ void ORCAD_CONVERTER::placeGraphics( const ORCAD_RAW_PAGE& aPage, SCH_SCREEN* aS
             }
         };
 
-        for( const ORCAD_PRIMITIVE& sourcePrimitive : gfx.nested->primitives )
-            placePrimitive( sourcePrimitive, 0, 0 );
+        OrcadForEachLeafPrimitive( gfx.nested->primitives, placePrimitive );
     }
 }
 

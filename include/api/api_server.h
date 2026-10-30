@@ -37,6 +37,7 @@
 #include <api/api_handler.h>
 #include <api/common/commands/base_commands.pb.h>
 #include <api/common/events.pb.h>
+#include <api/common/types/base_types.pb.h>
 
 class API_HANDLER;
 class API_HANDLER_FALLBACK;
@@ -216,6 +217,22 @@ public:
      */
     void NotifyNetSettingsChanged();
 
+    /**
+     * Notifies the host application that a document was saved to a new path.
+     * Must be called from the main thread.
+     */
+    void NotifyDocumentRenamed( kiapi::common::types::DocumentType aType, const wxString& aOldPath,
+                                const wxString& aNewPath );
+
+    /**
+     * Installs a callback to be invoked by NotifyDocumentRenamed.
+     */
+    void SetRenameListener( std::function<void( kiapi::common::types::DocumentType,
+                                                const wxString&, const wxString& )> aListener )
+    {
+        m_renameListener = std::move( aListener );
+    }
+
 private:
 
     /**
@@ -276,6 +293,8 @@ private:
     std::condition_variable m_wakeCondition;
 
     bool m_requestPending;
+
+    std::function<void( kiapi::common::types::DocumentType, const wxString&, const wxString& )> m_renameListener;
 
     wxString m_socketPathOverride;
 

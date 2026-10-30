@@ -26,7 +26,6 @@
 #include <dialog_pin_properties.h>
 #include <confirm.h>
 #include <kiplatform/ui.h>
-#include <widgets/tab_traversal.h>
 #include <widgets/wx_grid.h>
 #include <grid_tricks.h>
 #include <widgets/grid_icon_text_helpers.h>
@@ -369,9 +368,9 @@ bool DIALOG_PIN_PROPERTIES::TransferDataToWindow()
     m_numberSize.SetValue( m_pin->GetNumberTextSize() );
     m_pinLength.SetValue( m_pin->GetLength() );
     m_checkApplyToAllParts->Enable( m_pin->GetParentSymbol()->IsMultiUnit() );
-    m_checkApplyToAllParts->SetValue( m_pin->GetParentSymbol()->IsMultiUnit() && m_pin->GetUnit() == 0 );
+    m_checkApplyToAllParts->SetValue( m_pin->GetParentSymbol()->IsMultiUnit() && m_pin->GetUnit() == ALL_UNITS );
     m_checkApplyToAllBodyStyles->Enable( m_pin->GetParentSymbol()->IsMultiBodyStyle() );
-    m_checkApplyToAllBodyStyles->SetValue( m_pin->GetBodyStyle() == 0 );
+    m_checkApplyToAllBodyStyles->SetValue( m_pin->GetBodyStyle() == ALL_BODY_STYLES );
     m_checkShow->SetValue( m_pin->IsVisible() );
 
     m_dummyPin->SetVisible( m_pin->IsVisible() );
@@ -589,6 +588,10 @@ void DIALOG_PIN_PROPERTIES::OnUpdateUI( wxUpdateUIEvent& event )
     if( m_delayedFocusRow >= 0 && m_alternatesTurndown )
     {
         m_alternatesTurndown->Collapse( false );
+
+        wxCommandEvent evt( WX_COLLAPSIBLE_PANE_CHANGED, m_alternatesTurndown->GetId() );
+        evt.SetEventObject( m_alternatesTurndown );
+        m_alternatesTurndown->ProcessWindowEvent( evt );
 
         m_alternatesGrid->SetFocus();
         m_alternatesGrid->MakeCellVisible( m_delayedFocusRow, m_delayedFocusColumn );

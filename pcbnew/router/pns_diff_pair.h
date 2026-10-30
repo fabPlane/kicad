@@ -287,7 +287,7 @@ private:
     ITEM*                       m_primP;
     ITEM*                       m_primN;
     VECTOR2I                    m_anchorP, m_anchorN;
-    bool                        m_isMidtrace;
+    bool                        m_isMidtrace = false;
     std::optional<DIRECTION_45> m_fixedDirection;
     wxString                    m_name;
     std::optional<int>          m_gap;
@@ -327,13 +327,13 @@ public:
     {
         SHAPE_LINE_CHAIN p, n;
         DP_GATEWAY       entry, target;
-        float            aspectRatio;
-        float            coupledRatio;
-        bool             isDiagonal;
-        int              score;
-        bool             diagonal;
-        bool             entryAngleOK;
-        bool             targetAngleOK;
+        float            aspectRatio = 0.0f;
+        float            coupledRatio = 0.0f;
+        bool             isDiagonal = false;
+        int              score = 0;
+        bool             diagonal = false;
+        bool             entryAngleOK = false;
+        bool             targetAngleOK = false;
     };
 
     std::vector<FIT_RESULT> FitGateways( DP_GATEWAYS& aEntry, DP_GATEWAYS& aTarget, bool aFitVias );

@@ -28,6 +28,7 @@
 #include <jobs/job_special_execute.h>
 #include <kiway.h>
 #include <kiway_mail.h>
+#include <paths.h>
 #include <project/project_archiver.h>
 #include <reporter.h>
 #include <optional>
@@ -141,19 +142,17 @@ int JOBS_RUNNER::runSpecialExecute( const JOBSET_JOB* aJob, REPORTER* aReporter,
 int JOBS_RUNNER::runSpecialCopyFiles( const JOB_SPECIAL_COPYFILES* aJob, PROJECT* aProject,
                                       std::vector<wxString>& aPathsWritten )
 {
-    wxString source = ExpandEnvVarSubstitutions( aJob->m_source, aProject );
+    wxString source = ResolveProjectPath( aJob->m_source, aProject );
 
     if( source.IsEmpty() )
         return CLI::EXIT_CODES::ERR_ARGS;
 
-    wxString   projectPath = aProject->GetProjectPath();
     wxFileName sourceFn( source );
-    sourceFn.MakeAbsolute( projectPath );
 
     wxFileName destFn( aJob->GetFullOutputPath( aProject ) );
 
     if( !aJob->m_dest.IsEmpty() )
-        destFn.AppendDir( ExpandEnvVarSubstitutions( aJob->m_dest, aProject ) );
+        destFn.AppendDir( ExpandPathVariables( aJob->m_dest, aProject ) );
 
     wxString errors;
     bool     success = CopyFilesOrDirectory( sourceFn.GetFullPath(), destFn.GetFullPath(), aJob->m_overwriteDest,
@@ -177,6 +176,12 @@ int JOBS_RUNNER::runSpecialArchive( const JOBSET_JOB* aJob, REPORTER* aReporter,
         archiveJob->SetConfiguredOutputPath( wxT( "${PROJECTNAME}.zip" ) );
 
     wxString zipFile = archiveJob->GetFullOutputPath( aProject );
+
+    if( !PATHS::EnsurePathExists( zipFile, true ) )
+    {
+        aReporter->Report( _( "Failed to create output directory\n" ), RPT_SEVERITY_ERROR );
+        return CLI::EXIT_CODES::ERR_INVALID_OUTPUT_CONFLICT;
+    }
 
     if( !PROJECT_ARCHIVER::Archive( aProject->GetProjectPath(), zipFile, *aReporter, true,
                                     archiveJob->m_includeExtraFiles ) )

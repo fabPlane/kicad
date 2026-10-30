@@ -86,6 +86,7 @@ using namespace std::placeholders;
 
 #include "router_tool.h"
 #include "router_status_view_item.h"
+#include "pns_block_dragger.h"
 #include "pns_router.h"
 #include "pns_itemset.h"
 #include "pns_line.h"
@@ -364,8 +365,7 @@ protected:
     void update() override
     {
         BOARD_DESIGN_SETTINGS& bds = m_frame.GetBoard()->GetDesignSettings();
-        bool                   useIndex = !bds.m_UseConnectedTrackWidth &&
-                                          !bds.UseCustomTrackViaSize();
+        bool                   useIndex = !bds.m_UseConnectedTrackWidth && !bds.UseCustomTrackViaSize();
         wxString               msg;
 
         Clear();
@@ -432,8 +432,8 @@ protected:
 
     OPT_TOOL_EVENT eventHandler( const wxMenuEvent& aEvent ) override
     {
-        BOARD_DESIGN_SETTINGS &bds = m_frame.GetBoard()->GetDesignSettings();
-        int id = aEvent.GetId();
+        BOARD_DESIGN_SETTINGS& bds = m_frame.GetBoard()->GetDesignSettings();
+        int                    id = aEvent.GetId();
 
         // On Windows, this handler can be called with an event ID not existing in any
         // menuitem, so only set flags when we have an ID match.
@@ -481,8 +481,8 @@ class DIFF_PAIR_MENU : public ACTION_MENU
 {
 public:
     DIFF_PAIR_MENU( PCB_EDIT_FRAME& aFrame ) :
-        ACTION_MENU( true ),
-        m_frame( aFrame )
+            ACTION_MENU( true ),
+            m_frame( aFrame )
     {
         SetIcon( BITMAPS::width_track_via );
         SetTitle( _( "Select Differential Pair Dimensions" ) );
@@ -558,8 +558,8 @@ protected:
 
     OPT_TOOL_EVENT eventHandler( const wxMenuEvent& aEvent ) override
     {
-        BOARD_DESIGN_SETTINGS &bds = m_frame.GetBoard()->GetDesignSettings();
-        int id = aEvent.GetId();
+        BOARD_DESIGN_SETTINGS& bds = m_frame.GetBoard()->GetDesignSettings();
+        int                    id = aEvent.GetId();
 
         // On Windows, this handler can be called with an event ID not existing in any
         // menuitem, so only set flags when we have an ID match.
@@ -1071,8 +1071,7 @@ void ROUTER_TOOL::updateSizesAfterRouterEvent( int aTargetLayer, const VECTOR2I&
 
     if( bds.UseNetClassTrack() || !sizes.TrackWidthIsExplicit() )
     {
-        constraint = drcEngine->EvalRules( TRACK_WIDTH_CONSTRAINT, &dummyTrack, nullptr,
-                                           targetLayer );
+        constraint = drcEngine->EvalRules( TRACK_WIDTH_CONSTRAINT, &dummyTrack, nullptr, targetLayer );
 
         if( !constraint.IsNull() )
         {
@@ -1086,10 +1085,10 @@ void ROUTER_TOOL::updateSizesAfterRouterEvent( int aTargetLayer, const VECTOR2I&
                     || ( width < constraint.m_Value.Min() )
                     || ( width > constraint.m_Value.Max() ) )
             {
-                sizes.SetTrackWidth( std::max( bds.m_TrackMinWidth, constraint.m_Value.Opt() ) );
+                sizes.SetTrackWidth( std::max( bds.m_TrackMinWidth, constraint.m_Value.PinnedOpt() ) );
             }
 
-            if( sizes.TrackWidth() == constraint.m_Value.Opt() )
+            if( sizes.TrackWidth() == constraint.m_Value.PinnedOpt() )
                 sizes.SetWidthSource( constraint.GetName() );
             else if( sizes.TrackWidth() == bds.m_TrackMinWidth )
                 sizes.SetWidthSource( _( "board minimum track width" ) );
@@ -1107,8 +1106,7 @@ void ROUTER_TOOL::updateSizesAfterRouterEvent( int aTargetLayer, const VECTOR2I&
         dummyTrackB.SetStart( aPos );
         dummyTrackB.SetEnd( dummyTrackB.GetStart() );
 
-        constraint = drcEngine->EvalRules( TRACK_WIDTH_CONSTRAINT, &dummyTrack, &dummyTrackB,
-                                           targetLayer );
+        constraint = drcEngine->EvalRules( TRACK_WIDTH_CONSTRAINT, &dummyTrack, &dummyTrackB, targetLayer );
 
         if( !constraint.IsNull() )
         {
@@ -1117,17 +1115,16 @@ void ROUTER_TOOL::updateSizesAfterRouterEvent( int aTargetLayer, const VECTOR2I&
                     || ( sizes.DiffPairWidth() < constraint.m_Value.Min() )
                     || ( sizes.DiffPairWidth() > constraint.m_Value.Max() ) )
             {
-                sizes.SetDiffPairWidth( std::max( bds.m_TrackMinWidth, constraint.m_Value.Opt() ) );
+                sizes.SetDiffPairWidth( std::max( bds.m_TrackMinWidth, constraint.m_Value.PinnedOpt() ) );
             }
 
-            if( sizes.DiffPairWidth() == constraint.m_Value.Opt() )
+            if( sizes.DiffPairWidth() == constraint.m_Value.PinnedOpt() )
                 sizes.SetDiffPairWidthSource( constraint.GetName() );
             else
                 sizes.SetDiffPairWidthSource( _( "board minimum track width" ) );
         }
 
-        constraint = drcEngine->EvalRules( DIFF_PAIR_GAP_CONSTRAINT, &dummyTrack, &dummyTrackB,
-                                           targetLayer );
+        constraint = drcEngine->EvalRules( DIFF_PAIR_GAP_CONSTRAINT, &dummyTrack, &dummyTrackB, targetLayer );
 
         if( !constraint.IsNull() )
         {
@@ -1136,10 +1133,10 @@ void ROUTER_TOOL::updateSizesAfterRouterEvent( int aTargetLayer, const VECTOR2I&
                     || ( sizes.DiffPairGap() < constraint.m_Value.Min() )
                     || ( sizes.DiffPairGap() > constraint.m_Value.Max() ) )
             {
-                sizes.SetDiffPairGap( std::max( bds.m_MinClearance, constraint.m_Value.Opt() ) );
+                sizes.SetDiffPairGap( std::max( bds.m_MinClearance, constraint.m_Value.PinnedOpt() ) );
             }
 
-            if( sizes.DiffPairGap() == constraint.m_Value.Opt() )
+            if( sizes.DiffPairGap() == constraint.m_Value.PinnedOpt() )
                 sizes.SetDiffPairGapSource( constraint.GetName() );
             else
                 sizes.SetDiffPairGapSource( _( "board minimum clearance" ) );
@@ -1187,8 +1184,7 @@ int ROUTER_TOOL::onViaCommand( const TOOL_EVENT& aEvent )
     else
     {
         m_router->ToggleViaPlacement();
-        frame()->SetActiveLayer(
-                m_iface->GetBoardLayerFromPNSLayer( m_router->GetCurrentLayer() ) );
+        frame()->SetActiveLayer( m_iface->GetBoardLayerFromPNSLayer( m_router->GetCurrentLayer() ) );
         updateEndItem( aEvent );
         m_router->Move( m_endSnapPoint, m_endItem );
     }
@@ -1213,9 +1209,9 @@ int ROUTER_TOOL::onViaStackCommand( const TOOL_EVENT& aEvent )
 
     if( presets.empty() )
     {
-        frame()->GetInfoBar()->ShowMessageFor(
-                _( "No microvia stack presets defined. Add one in Board Setup, Microvia Stacks." ), 3000,
-                wxICON_INFORMATION );
+        frame()->GetInfoBar()->ShowMessageFor( _( "No microvia stack presets defined. Add one in Board Setup, "
+                                                  "Microvia Stacks." ),
+                                               3000, wxICON_INFORMATION );
         return 0;
     }
 
@@ -1240,12 +1236,11 @@ int ROUTER_TOOL::onViaStackCommand( const TOOL_EVENT& aEvent )
 
     if( targetLayer == UNDEFINED_LAYER )
     {
-        frame()->GetInfoBar()->ShowMessageFor(
-                wxString::Format( _( "The microvia stack runs between %s and %s. Route on one of those layers "
-                                     "to place it." ),
-                                  board()->GetLayerName( preset.m_StartLayer ),
-                                  board()->GetLayerName( preset.m_EndLayer ) ),
-                3000, wxICON_ERROR );
+        frame()->GetInfoBar()->ShowMessageFor( wxString::Format( _( "The microvia stack runs between %s and %s. "
+                                                                    "Route on one of those layers to place it." ),
+                                                                 board()->GetLayerName( preset.m_StartLayer ),
+                                                                 board()->GetLayerName( preset.m_EndLayer ) ),
+                                               3000, wxICON_ERROR );
         return 0;
     }
 
@@ -1305,6 +1300,18 @@ int ROUTER_TOOL::onViaStackCommand( const TOOL_EVENT& aEvent )
 
         viaSize = ( nc && nc->HasuViaDiameter() ) ? nc->GetuViaDiameter() : bds.GetCurrentViaSize();
         viaDrill = ( nc && nc->HasuViaDrill() ) ? nc->GetuViaDrill() : bds.GetCurrentViaDrill();
+
+        // Route with the size the stack's hops will resolve to from the via rules
+        PCB_VIA dummyVia( board() );
+        dummyVia.SetFlags( ROUTER_TRANSIENT );
+        dummyVia.SetViaType( VIATYPE::MICROVIA );
+        dummyVia.SetLayerPair( currentLayer, targetLayer );
+        dummyVia.SetNetCode( net );
+        dummyVia.SetPosition( m_endSnapPoint );
+        dummyVia.SetSizeFromRules( viaSize, viaDrill );
+
+        viaSize = dummyVia.GetWidth( PADSTACK::ALL_LAYERS );
+        viaDrill = dummyVia.GetDrillValue();
     }
     else
     {
@@ -1670,17 +1677,15 @@ int ROUTER_TOOL::handleLayerSwitch( const TOOL_EVENT& aEvent, bool aForceVia )
 
         DRC_CONSTRAINT constraint;
 
-        constraint = bds.m_DRCEngine->EvalRules( VIA_DIAMETER_CONSTRAINT, &dummyVia, nullptr,
-                                                 currentLayer );
+        constraint = bds.m_DRCEngine->EvalRules( VIA_DIAMETER_CONSTRAINT, &dummyVia, nullptr, currentLayer );
 
         if( !constraint.IsNull() )
-            sizes.SetViaDiameter( constraint.m_Value.Opt() );
+            sizes.SetViaDiameter( constraint.m_Value.PinnedOpt() );
 
-        constraint = bds.m_DRCEngine->EvalRules( HOLE_SIZE_CONSTRAINT, &dummyVia, nullptr,
-                                                 currentLayer );
+        constraint = bds.m_DRCEngine->EvalRules( HOLE_SIZE_CONSTRAINT, &dummyVia, nullptr, currentLayer );
 
         if( !constraint.IsNull() )
-            sizes.SetViaDrill( constraint.m_Value.Opt() );
+            sizes.SetViaDrill( constraint.m_Value.PinnedOpt() );
     }
     else
     {
@@ -2795,6 +2800,50 @@ void ROUTER_TOOL::NeighboringSegmentFilter( const VECTOR2I& aPt, GENERAL_COLLECT
 }
 
 
+// Which drag a multi-item selection gets. CanInlineDrag() and InlineDrag() both use this.
+enum class DRAG_KIND
+{
+    INVALID,            // something in it the router cannot drag
+    FOOTPRINTS_KIND,    // footprints only
+    TRACKS_KIND,        // tracks only
+    BLOCK               // copper, pads and footprints mixed
+};
+
+
+static DRAG_KIND dragKindOf( const PCB_SELECTION& aSelection )
+{
+    bool allFootprints = true;
+    bool allTracks = true;
+
+    for( EDA_ITEM* item : aSelection )
+    {
+        switch( item->Type() )
+        {
+        case PCB_FOOTPRINT_T: allTracks = false; break;
+
+        case PCB_TRACE_T: allFootprints = false; break;
+
+        case PCB_ARC_T:
+        case PCB_VIA_T:
+        case PCB_PAD_T:
+            allFootprints = false;
+            allTracks = false;
+            break;
+
+        default: return DRAG_KIND::INVALID;
+        }
+    }
+
+    if( allFootprints )
+        return DRAG_KIND::FOOTPRINTS_KIND;
+
+    if( allTracks )
+        return DRAG_KIND::TRACKS_KIND;
+
+    return DRAG_KIND::BLOCK;
+}
+
+
 bool ROUTER_TOOL::CanInlineDrag( int aDragMode )
 {
     m_toolMgr->RunAction<CLIENT_SELECTION_FILTER>( ACTIONS::selectionCursor, NeighboringSegmentFilter );
@@ -2802,19 +2851,19 @@ bool ROUTER_TOOL::CanInlineDrag( int aDragMode )
 
     if( selection.Size() == 1 )
     {
-        return selection.Front()->IsType( GENERAL_COLLECTOR::DraggableItems );
-    }
-    else if( selection.CountType( PCB_FOOTPRINT_T ) == (size_t) selection.Size() )
-    {
-        // Footprints cannot be dragged freely.
-        return !( aDragMode & PNS::DM_FREE_ANGLE );
-    }
-    else if( selection.CountType( PCB_TRACE_T ) == (size_t) selection.Size() )
-    {
-        return true;
+        return selection.Front()->IsType( GENERAL_COLLECTOR::DraggableItems ) || selection.Front()->Type() == PCB_PAD_T;
     }
 
-    return false;
+    switch( dragKindOf( selection ) )
+    {
+    case DRAG_KIND::TRACKS_KIND: return true;
+
+    // Neither footprints nor a block drag free angle
+    case DRAG_KIND::FOOTPRINTS_KIND:
+    case DRAG_KIND::BLOCK: return !( aDragMode & PNS::DM_FREE_ANGLE );
+
+    default: return false;
+    }
 }
 
 
@@ -2841,32 +2890,47 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
 
     BOARD_ITEM* item = static_cast<BOARD_ITEM*>( selection.Front() );
 
-    if( item->Type() != PCB_TRACE_T
-         && item->Type() != PCB_VIA_T
-         && item->Type() != PCB_ARC_T
-         && item->Type() != PCB_FOOTPRINT_T )
+    if( item->Type() != PCB_TRACE_T && item->Type() != PCB_VIA_T && item->Type() != PCB_ARC_T
+        && item->Type() != PCB_FOOTPRINT_T && item->Type() != PCB_PAD_T )
     {
         return 0;
     }
 
     std::set<FOOTPRINT*> footprints;
+    std::set<PAD*>       freePads;
+    bool                 blockDrag = false;
 
     if( item->Type() == PCB_FOOTPRINT_T )
         footprints.insert( static_cast<FOOTPRINT*>( item ) );
 
-    // We can drag multiple footprints, but not a grab-bag of items
-    if( selection.Size() > 1 && item->Type() == PCB_FOOTPRINT_T )
+    if( selection.Size() > 1 )
     {
-        for( int idx = 1; idx < selection.Size(); ++idx )
+        for( int idx = 0; idx < selection.Size(); ++idx )
         {
             if( !selection.GetItem( idx )->IsBOARD_ITEM() )
                 return 0;
 
-            if( static_cast<BOARD_ITEM*>( selection.GetItem( idx ) )->Type() != PCB_FOOTPRINT_T )
-                return 0;
+            BOARD_ITEM* selItem = static_cast<BOARD_ITEM*>( selection.GetItem( idx ) );
 
-            footprints.insert( static_cast<FOOTPRINT*>( selection.GetItem( idx ) ) );
+            if( selItem->Type() == PCB_FOOTPRINT_T )
+                footprints.insert( static_cast<FOOTPRINT*>( selItem ) );
         }
+
+        DRAG_KIND kind = dragKindOf( selection );
+
+        if( kind == DRAG_KIND::INVALID )
+        {
+            // Refuse if a footprint led the selection, otherwise drop the footprints
+            if( item->Type() == PCB_FOOTPRINT_T )
+            {
+                frame()->ShowInfoBarMsg( _( "The selection contains items that cannot be dragged." ) );
+                return 0;
+            }
+
+            footprints.clear();
+        }
+
+        blockDrag = kind == DRAG_KIND::BLOCK;
     }
 
     // If we overrode locks, we want to clear the flag from the source item before SyncWorld is
@@ -2874,9 +2938,11 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
     // this case the lock can't be reliably re-applied, because there is no guarantee that the end
     // state of the drag results in the same number of segments so it's not clear which segment to
     // apply the lock state to.
+    //
+    // A block drag leaves locks alone. The dragger exempts selected copper itself.
     bool wasLocked = false;
 
-    if( item->IsLocked() )
+    if( !blockDrag && item->Type() != PCB_PAD_T && item->IsLocked() )
     {
         wasLocked = true;
         item->SetLocked( false );
@@ -2907,12 +2973,25 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
     // a Move operation). Sync it now so that FindItemByParent and joint lookups work correctly.
     m_router->SyncWorld();
 
+    // A footprint with no copper the router can see cannot be dragged, and showing it in the
+    // preview would promise a move the commit will not make
+    for( auto it = footprints.begin(); it != footprints.end(); )
+    {
+        bool hasSolid = false;
+
+        for( PAD* pad : ( *it )->Pads() )
+            hasSolid |= !m_router->GetWorld()->FindItemsByParent( pad ).empty();
+
+        it = hasSolid ? std::next( it ) : footprints.erase( it );
+    }
+
     // Snapping uses ViewGetLOD(), which uses the layerVisibilityCache.  Make sure it's up-to-date.
     m_toolMgr->GetView()->SyncLayerVisibilityCache();
 
     if( !footprints.empty() )
     {
-        if( footprints.size() == 1 )
+        // A block drag has its own algorithm, and the leader logic below assumes a lone footprint
+        if( footprints.size() == 1 && !blockDrag )
             singleFootprintDrag = true;
 
         if( showCourtyardConflicts )
@@ -2922,9 +3001,8 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
         {
             for( PAD* pad : footprint->Pads() )
             {
-                PNS::ITEM* solid = m_router->GetWorld()->FindItemByParent( pad );
-
-                if( solid )
+                // A padstack with per-layer geometry is more than one router solid
+                for( PNS::ITEM* solid : m_router->GetWorld()->FindItemsByParent( pad ) )
                     itemsToDrag.Add( solid );
 
                 if( pad->GetLocalRatsnestVisible() || displayOptions().m_ShowModuleRatsnest )
@@ -2958,15 +3036,16 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
         dynamicData = std::make_unique<CONNECTIVITY_DATA>( board()->GetConnectivity(), dynamicItems, true );
         connectivityData->BlockRatsnestItems( dynamicItems );
     }
-    else
+
+    if( footprints.empty() || blockDrag )
     {
-        for( const EDA_ITEM* selItem : selectedItems )
+        for( EDA_ITEM* selItem : selectedItems )
         {
             if( !selItem->IsBOARD_ITEM() )
                 continue;
 
-            const BOARD_ITEM* boardItem = static_cast<const BOARD_ITEM*>( selItem );
-            PNS::ITEM*        pnsItem = m_router->GetWorld()->FindItemByParent( boardItem );
+            BOARD_ITEM* boardItem = static_cast<BOARD_ITEM*>( selItem );
+            PNS::ITEM*  pnsItem = m_router->GetWorld()->FindItemByParent( boardItem );
 
             if( !pnsItem )
                 continue;
@@ -2976,6 +3055,20 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
                 || pnsItem->OfKind( PNS::ITEM::ARC_T ) )
             {
                 itemsToDrag.Add( pnsItem );
+            }
+            else if( boardItem->Type() == PCB_PAD_T )
+            {
+                PAD* pad = static_cast<PAD*>( boardItem );
+
+                // A pad selected together with its footprint already travels with it
+                if( footprints.count( pad->GetParentFootprint() ) )
+                    continue;
+
+                freePads.insert( pad );
+
+                // A padstack with per-layer geometry is more than one router solid
+                for( PNS::ITEM* solid : m_router->GetWorld()->FindItemsByParent( pad ) )
+                    itemsToDrag.Add( solid );
             }
         }
     }
@@ -3052,10 +3145,23 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
 
     int dragMode = aEvent.Parameter<int> ();
 
+    if( !footprints.empty() || !freePads.empty() || blockDrag )
+        dragMode &= ~PNS::DM_FREE_ANGLE;
+
+    if( blockDrag )
+        dragMode |= PNS::DM_BLOCK;
+
+    m_iface->SetIndependentPads( freePads );
+
     bool dragStarted = m_router->StartDragging( p, itemsToDrag, dragMode );
 
     if( !dragStarted )
     {
+        m_iface->SetIndependentPads( {} );
+
+        if( blockDrag )
+            frame()->ShowInfoBarMsg( _( "Nothing in the selection can be dragged." ) );
+
         if( wasLocked )
             item->SetLocked( true );
 
@@ -3075,6 +3181,19 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
     controls()->ShowCursor( true );
     controls()->SetAutoPan( true );
     frame()->UndoRedoBlock( true );
+
+    if( auto* blockDragger = dynamic_cast<PNS::BLOCK_DRAGGER*>( m_router->GetDragger() ) )
+    {
+        size_t held = blockDragger->AnchoredLines().size();
+
+        if( held > 0 )
+        {
+            frame()->ShowInfoBarWarning(
+                    wxString::Format( wxPLURAL( "%zu selected arc cannot move because both ends are fixed.",
+                                                "%zu selected arcs cannot move because both ends are fixed.", held ),
+                                      held ) );
+        }
+    }
 
     view()->ClearPreview();
     view()->InitPreview();
@@ -3192,6 +3311,9 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
                 connectivityData->ComputeLocalRatsnest( dynamicItems, dynamicData.get(), offset );
             }
 
+            for( PAD* pad : freePads )
+                view()->Hide( pad, true );
+
             if( PNS::DRAG_ALGO* dragger = m_router->GetDragger() )
             {
                 bool dragStatus;
@@ -3284,6 +3406,11 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
         connectivityData->ClearLocalRatsnest();
     }
 
+    for( PAD* pad : freePads )
+        view()->Hide( pad, false );
+
+    m_iface->SetIndependentPads( {} );
+
     // Clear temporary COURTYARD_CONFLICT flag and ensure the conflict shadow is cleared
     courtyardClearanceDRC.ClearConflicts( getView() );
 
@@ -3329,8 +3456,6 @@ int ROUTER_TOOL::InlineBreakTrack( const TOOL_EVENT& aEvent )
     if( item->Type() != PCB_TRACE_T && item->Type() != PCB_ARC_T )
         return 0;
 
-    m_toolMgr->RunAction( ACTIONS::selectionClear );
-
     Activate();
 
     // Snapping uses ViewGetLOD(), which uses the layerVisibilityCache.  Make sure it's up-to-date.
@@ -3370,6 +3495,8 @@ int ROUTER_TOOL::InlineBreakTrack( const TOOL_EVENT& aEvent )
         if( dlg.ShowModal() == wxID_CANCEL )
             return 0;
     }
+
+    m_toolMgr->RunAction( ACTIONS::selectionClear );
 
     frame()->UndoRedoBlock( true );
     breakTrack();

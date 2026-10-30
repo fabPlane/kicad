@@ -42,6 +42,7 @@ class PROJECT_FILE_TEST_FIXTURE
 public:
     PROJECT_FILE_TEST_FIXTURE()
     {
+        m_originalDir = fs::current_path();
         m_tempDir = fs::temp_directory_path() / "kicad_project_file_test";
         fs::remove_all( m_tempDir );
         fs::create_directories( m_tempDir );
@@ -49,14 +50,40 @@ public:
 
     ~PROJECT_FILE_TEST_FIXTURE()
     {
+        fs::current_path( m_originalDir );
         fs::remove_all( m_tempDir );
     }
 
+    fs::path m_originalDir;
     fs::path m_tempDir;
 };
 
 
 BOOST_FIXTURE_TEST_SUITE( ProjectFile, PROJECT_FILE_TEST_FIXTURE )
+
+
+BOOST_AUTO_TEST_CASE( Ipc2581ExplicitEmptySectionsRoundTrips )
+{
+    fs::path projectPath = m_tempDir / "api_kitchen_sink.kicad_pro";
+    fs::copy_file( fs::path( KI_TEST::GetTestDataRootDir() ) / "pcbnew" / "api_kitchen_sink.kicad_pro",
+                   projectPath );
+
+    {
+        SETTINGS_MANAGER mgr;
+        BOOST_REQUIRE( mgr.LoadProject( wxString( projectPath.string() ), true ) );
+        PROJECT_FILE& project = mgr.Prj().GetProjectFile();
+        BOOST_REQUIRE( !project.m_IP2581Bom.sections );
+        project.m_IP2581Bom.sections = wxString();
+        BOOST_REQUIRE( project.SaveToFile( wxString( m_tempDir.string() ), true ) );
+        mgr.UnloadProject( &mgr.Prj(), false );
+    }
+
+    SETTINGS_MANAGER mgr;
+    BOOST_REQUIRE( mgr.LoadProject( wxString( projectPath.string() ), true ) );
+    PROJECT_FILE& loaded = mgr.Prj().GetProjectFile();
+    BOOST_REQUIRE( loaded.m_IP2581Bom.sections );
+    BOOST_CHECK( loaded.m_IP2581Bom.sections->IsEmpty() );
+}
 
 
 /**
@@ -503,6 +530,61 @@ BOOST_AUTO_TEST_CASE( AliasMigrationPreservesNonemptyDefinitions )
     const nlohmann::json saved = nlohmann::json::parse( input );
     BOOST_CHECK_EQUAL( saved["meta"]["version"].get<int>(), 4 );
     BOOST_CHECK( saved["schematic"]["bus_aliases"] == aliases );
+}
+
+
+BOOST_AUTO_TEST_CASE( LegacyFieldNameTemplatesSurviveMigration )
+{
+    const fs::path legacyPath = m_tempDir / "field_names.pro";
+    const fs::path projectPath = m_tempDir / "field_names.kicad_pro";
+
+    {
+        std::ofstream output( legacyPath );
+        output << "[schematic_editor]\n"
+                  "FieldNameTemplates=(templatefields (field (name \"Manufacturer\") visible url))\n";
+    }
+
+    PROJECT_FILE project( wxString( projectPath.string() ) );
+    BOOST_REQUIRE( project.LoadFromFile() );
+
+    const auto& fields = project.m_TemplateFieldNames.GetTemplateFieldNames( TEMPLATES::SCOPE::PROJECT );
+    BOOST_REQUIRE_EQUAL( fields.size(), 1 );
+    BOOST_CHECK_EQUAL( fields[0].m_Name, wxS( "Manufacturer" ) );
+    BOOST_CHECK( fields[0].m_Visible );
+    BOOST_CHECK( fields[0].m_URL );
+
+    const nlohmann::json saved = nlohmann::json::parse( project.FormatAsString() );
+    const auto&          fieldNames = saved["schematic"]["drawing"]["field_names"];
+    BOOST_REQUIRE( fieldNames.is_array() );
+    BOOST_REQUIRE_EQUAL( fieldNames.size(), 1 );
+    BOOST_CHECK_EQUAL( fieldNames[0]["name"].get<std::string>(), "Manufacturer" );
+}
+
+
+BOOST_AUTO_TEST_CASE( EmptyFieldNameArrayClearsTemplatesOnReload )
+{
+    const fs::path projectPath = m_tempDir / "field_names.kicad_pro";
+    nlohmann::json projectJson = { { "meta", { { "version", 4 } } } };
+    projectJson["schematic"]["drawing"]["field_names"] =
+            nlohmann::json::array( { { { "name", "Manufacturer" }, { "visible", true }, { "url", false } } } );
+
+    auto writeProject = [&]()
+    {
+        std::ofstream output( projectPath );
+        output << projectJson.dump( 2 );
+    };
+
+    writeProject();
+
+    PROJECT_FILE project( wxString( projectPath.string() ) );
+    BOOST_REQUIRE( project.LoadFromFile() );
+    BOOST_REQUIRE_EQUAL( project.m_TemplateFieldNames.GetTemplateFieldNames( TEMPLATES::SCOPE::PROJECT ).size(), 1 );
+
+    projectJson["schematic"]["drawing"]["field_names"] = nlohmann::json::array();
+    writeProject();
+
+    BOOST_REQUIRE( project.LoadFromFile() );
+    BOOST_CHECK( project.m_TemplateFieldNames.GetTemplateFieldNames( TEMPLATES::SCOPE::PROJECT ).empty() );
 }
 
 

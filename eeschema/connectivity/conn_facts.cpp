@@ -206,7 +206,7 @@ LIBRARY_SYMBOL_FACT ExtractLibrarySymbolFact( const LIB_SYMBOL& aSymbol )
 
     for( const SCH_ITEM& drawing : aSymbol.GetDrawItems()[SCH_SHAPE_T] )
     {
-        const auto& shape = static_cast<const SCH_SHAPE&>( drawing );
+        const SCH_SHAPE& shape = static_cast<const SCH_SHAPE&>( drawing );
         result.shapes.push_back( { shape.m_Uuid, shape.GetUnit(), shape.GetBodyStyle(), shape.IsPrivate(),
                                   shape.GetPosition(), shape } );
     }
@@ -270,17 +270,19 @@ bool LIBRARY_SYMBOL_FACT::Matches( const LIBRARY_SYMBOL_FACT& aOther, int aCompa
     if( !attributes.Matches( aOther.attributes, aCompareFlags ) )
         return false;
 
-    auto lessShape = []( const LIBRARY_SHAPE_FACT* a, const LIBRARY_SHAPE_FACT* b )
-    {
-        return a->Compare( *b, ~FLAGS::UUID ) < 0;
-    };
+    auto lessShape =
+            []( const LIBRARY_SHAPE_FACT* a, const LIBRARY_SHAPE_FACT* b )
+            {
+                return a->Compare( *b, ~FLAGS::UUID ) < 0;
+            };
+
     std::set<const LIBRARY_SHAPE_FACT*, decltype( lessShape )> lhsShapes( lessShape );
     std::set<const LIBRARY_SHAPE_FACT*, decltype( lessShape )> rhsShapes( lessShape );
 
-    for( const auto& shape : shapes )
+    for( const LIBRARY_SHAPE_FACT& shape : shapes )
         lhsShapes.insert( &shape );
 
-    for( const auto& shape : aOther.shapes )
+    for( const LIBRARY_SHAPE_FACT& shape : aOther.shapes )
         rhsShapes.insert( &shape );
 
     if( lhsShapes.size() != rhsShapes.size() )
@@ -292,53 +294,53 @@ bool LIBRARY_SYMBOL_FACT::Matches( const LIBRARY_SYMBOL_FACT& aOther, int aCompa
             return false;
     }
 
-    auto findPin = []( const LIBRARY_SYMBOL_FACT& aSource, const PIN_COMPARISON_DATA& aPin )
-            -> const PIN_COMPARISON_DATA*
-    {
-        const auto& candidates = aSource.inheritedPins ? *aSource.inheritedPins : aSource.pins;
-
-        for( const auto& candidate : candidates )
-        {
-            if( candidate.number == aPin.number
-                && ( !aPin.unit || !candidate.unit || aPin.unit == candidate.unit )
-                && ( !aPin.bodyStyle || !candidate.bodyStyle || aPin.bodyStyle == candidate.bodyStyle ) )
+    auto findPin =
+            []( const LIBRARY_SYMBOL_FACT& aSource, const PIN_COMPARISON_DATA& aPin )  -> const PIN_COMPARISON_DATA*
             {
-                return &candidate;
-            }
-        }
+                const auto& candidates = aSource.inheritedPins ? *aSource.inheritedPins : aSource.pins;
 
-        return nullptr;
-    };
+                for( const PIN_COMPARISON_DATA& candidate : candidates )
+                {
+                    if( candidate.number == aPin.number
+                        && ( !aPin.unit || !candidate.unit || aPin.unit == candidate.unit )
+                        && ( !aPin.bodyStyle || !candidate.bodyStyle || aPin.bodyStyle == candidate.bodyStyle ) )
+                    {
+                        return &candidate;
+                    }
+                }
 
-    for( const auto& pin : pins )
+                return nullptr;
+            };
+
+    for( const PIN_COMPARISON_DATA& pin : pins )
     {
-        const auto* other = findPin( aOther, pin );
+        const PIN_COMPARISON_DATA* other = findPin( aOther, pin );
 
         if( !other || pin.Compare( *other, aCompareFlags ) != 0 )
             return false;
     }
 
-    for( const auto& pin : aOther.pins )
+    for( const PIN_COMPARISON_DATA& pin : aOther.pins )
     {
         if( !findPin( *this, pin ) )
             return false;
     }
 
-    auto findField = []( const LIBRARY_SYMBOL_FACT& aSource, const LIBRARY_FIELD_FACT& aField )
-            -> const LIBRARY_FIELD_FACT*
-    {
-        for( const auto& candidate : aSource.fields )
-        {
-            if( aField.mandatory ? candidate.id == aField.id : candidate.name == aField.name )
-                return &candidate;
-        }
+    auto findField =
+            []( const LIBRARY_SYMBOL_FACT& aSource, const LIBRARY_FIELD_FACT& aField ) -> const LIBRARY_FIELD_FACT*
+            {
+                for( const LIBRARY_FIELD_FACT& candidate : aSource.fields )
+                {
+                    if( aField.mandatory ? candidate.id == aField.id : candidate.name == aField.name )
+                        return &candidate;
+                }
 
-        return nullptr;
-    };
+                return nullptr;
+            };
 
-    for( const auto& field : fields )
+    for( const LIBRARY_FIELD_FACT& field : fields )
     {
-        const auto* other = findField( aOther, field );
+        const LIBRARY_FIELD_FACT* other = findField( aOther, field );
 
         if( !other )
         {
@@ -353,7 +355,7 @@ bool LIBRARY_SYMBOL_FACT::Matches( const LIBRARY_SYMBOL_FACT& aOther, int aCompa
 
     if( aCompareFlags & FLAGS::MISSING_FIELDS )
     {
-        for( const auto& field : aOther.fields )
+        for( const LIBRARY_FIELD_FACT& field : aOther.fields )
         {
             if( !findField( *this, field ) )
                 return false;
@@ -366,10 +368,11 @@ bool LIBRARY_SYMBOL_FACT::Matches( const LIBRARY_SYMBOL_FACT& aOther, int aCompa
 int LIBRARY_SHAPE_FACT::Compare( const LIBRARY_SHAPE_FACT& aOther, int aCompareFlags ) const
 {
     // Subtraction can overflow at extreme coordinates and flip the order the shape sets rely on
-    const auto sign = []( int aLeft, int aRight )
-    {
-        return ( aLeft > aRight ) - ( aLeft < aRight );
-    };
+    const auto sign =
+            []( int aLeft, int aRight )
+            {
+                return ( aLeft > aRight ) - ( aLeft < aRight );
+            };
 
     if( aCompareFlags & SCH_ITEM::COMPARE_FLAGS::UNIT )
     {
@@ -575,7 +578,7 @@ SCREEN_FACTS ExtractScreenFacts( const SCH_SCREEN& aScreen, std::shared_ptr<cons
             }
 
             result.footprints.push_back( { symbol.m_Uuid, symbol.GetPosition(),
-                    library ? library->GetFPFilters() : wxArrayString() } );
+                                           library ? library->GetFPFilters() : wxArrayString() } );
 
             if( auto maps = ExtractPinMapFacts( symbol ) )
                 result.pinMaps.push_back( std::move( *maps ) );
@@ -920,29 +923,43 @@ std::vector<TEXT_CHECK_FACT> ExtractTextChecks( const SCH_SCREEN& aScreen, const
 
             if( const auto& library = symbol.GetLibSymbolRef() )
             {
-                library->RunOnChildren( [&]( SCH_ITEM* child )
-                {
-                    auto text = [&]( const auto& source, auto&& shown )
-                    {
-                        append( symbol.m_Uuid, symbol.m_Uuid, source.GetPosition(), source.GetText(), true, [&]
+                library->RunOnChildren(
+                        [&]( SCH_ITEM* child )
                         {
-                            wxString shownText = shown();
-                            const BOX2I box = symbol.GetTransform().TransformCoordinate( source.GetBoundingBox() );
-                            return std::make_pair( std::move( shownText ), box.Centre() + symbol.GetPosition() );
-                        } );
-                    };
+                            auto text =
+                                    [&]( const auto& source, auto&& shown )
+                                    {
+                                        append( symbol.m_Uuid, symbol.m_Uuid, source.GetPosition(), source.GetText(),
+                                                true,
+                                                [&]()
+                                                {
+                                                    wxString shownText = shown();
+                                                    const BOX2I bbox = source.GetBoundingBox();
+                                                    const BOX2I box = symbol.GetTransform().TransformCoordinate( bbox );
+                                                    return std::make_pair( std::move( shownText ),
+                                                                           box.Centre() + symbol.GetPosition() );
+                                                } );
+                                    };
 
-                    if( child->Type() == SCH_TEXT_T )
-                    {
-                        const auto& source = *static_cast<SCH_TEXT*>( child );
-                        text( source, [&] { return source.GetShownText( &aPath, FOR_ERC_DRC ); } );
-                    }
-                    else if( child->Type() == SCH_TEXTBOX_T )
-                    {
-                        const auto& source = *static_cast<SCH_TEXTBOX*>( child );
-                        text( source, [&] { return source.GetShownText( nullptr, &aPath, FOR_ERC_DRC ); } );
-                    }
-                }, RECURSE_MODE::NO_RECURSE );
+                            if( child->Type() == SCH_TEXT_T )
+                            {
+                                const auto& source = *static_cast<SCH_TEXT*>( child );
+                                text( source,
+                                      [&]()
+                                      {
+                                          return source.GetShownText( &aPath, FOR_ERC_DRC );
+                                      } );
+                            }
+                            else if( child->Type() == SCH_TEXTBOX_T )
+                            {
+                                const auto& source = *static_cast<SCH_TEXTBOX*>( child );
+                                text( source,
+                                      [&]()
+                                      {
+                                          return source.GetShownText( nullptr, &aPath, FOR_ERC_DRC );
+                                      } );
+                            }
+                        }, RECURSE_MODE::NO_RECURSE );
             }
         }
         else if( const auto* label = dynamic_cast<SCH_LABEL_BASE*>( item ) )
@@ -951,32 +968,36 @@ std::vector<TEXT_CHECK_FACT> ExtractTextChecks( const SCH_SCREEN& aScreen, const
         }
         else if( item->Type() == SCH_SHEET_T )
         {
-            auto& sheet = *static_cast<SCH_SHEET*>( item );
+            SCH_SHEET& sheet = *static_cast<SCH_SHEET*>( item );
             fields( sheet );
             SCH_SHEET_PATH childPath = aPath;
             childPath.push_back( &sheet );
 
             for( const SCH_SHEET_PIN* pin : sheet.GetPins() )
             {
-                append( niluuid, pin->m_Uuid, pin->GetPosition(), wxString(), false, [&]
-                {
-                    return std::make_pair( pin->GetShownText( &childPath, FOR_ERC_DRC ), pin->GetPosition() );
-                } );
+                append( niluuid, pin->m_Uuid, pin->GetPosition(), wxString(), false,
+                        [&]()
+                        {
+                            return std::make_pair( pin->GetShownText( &childPath, FOR_ERC_DRC ), pin->GetPosition() );
+                        } );
             }
         }
         else if( const auto* text = dynamic_cast<SCH_TEXT*>( item ) )
         {
-            append( text->m_Uuid, text->m_Uuid, text->GetPosition(), text->GetText(), false, [&]
-            {
-                return std::make_pair( text->GetShownText( &aPath, FOR_ERC_DRC ), text->GetPosition() );
-            } );
+            append( text->m_Uuid, text->m_Uuid, text->GetPosition(), text->GetText(), false,
+                    [&]()
+                    {
+                        return std::make_pair( text->GetShownText( &aPath, FOR_ERC_DRC ), text->GetPosition() );
+                    } );
         }
         else if( const auto* textbox = dynamic_cast<SCH_TEXTBOX*>( item ) )
         {
-            append( textbox->m_Uuid, textbox->m_Uuid, textbox->GetPosition(), textbox->GetText(), false, [&]
-            {
-                return std::make_pair( textbox->GetShownText( nullptr, &aPath, FOR_ERC_DRC ), textbox->GetPosition() );
-            } );
+            append( textbox->m_Uuid, textbox->m_Uuid, textbox->GetPosition(), textbox->GetText(), false,
+                    [&]()
+                    {
+                        return std::make_pair( textbox->GetShownText( nullptr, &aPath, FOR_ERC_DRC ),
+                                               textbox->GetPosition() );
+                    } );
         }
     }
 
@@ -986,13 +1007,13 @@ std::vector<TEXT_CHECK_FACT> ExtractTextChecks( const SCH_SCREEN& aScreen, const
 
 std::optional<PIN_MAP_FACT> ExtractPinMapFacts( const SCH_SYMBOL& aSymbol )
 {
-    const auto& lib = aSymbol.GetLibSymbolRef();
+    const std::unique_ptr<LIB_SYMBOL>& lib = aSymbol.GetLibSymbolRef();
 
     if( !lib )
         return std::nullopt;
 
-    const auto& maps = lib->GetEffectivePinMaps();
-    const auto& footprints = lib->GetEffectiveAssociatedFootprints();
+    const PIN_MAP_SET&                       maps = lib->GetEffectivePinMaps();
+    const std::vector<ASSOCIATED_FOOTPRINT>& footprints = lib->GetEffectiveAssociatedFootprints();
 
     if( maps.IsEmpty() && footprints.empty() )
         return std::nullopt;
@@ -1004,7 +1025,7 @@ std::optional<PIN_MAP_FACT> ExtractPinMapFacts( const SCH_SYMBOL& aSymbol )
     result.footprints = footprints;
     result.jumperGroups = lib->JumperPinGroups();
 
-    for( const SCH_PIN* pin : lib->GetPins() )
+    for( const SCH_PIN* pin : lib->GetGraphicalPins( ALL_UNITS, ALL_BODY_STYLES ) )
         result.pinNumbers.insert( pin->GetNumber() );
 
     return result;
@@ -1102,9 +1123,10 @@ INSTANCE_FACTS ExtractInstanceFacts( const SCREEN_FACTS& aFacts, const SCH_SCREE
             if( state == SCH_PIN::PAD_RESOLUTION::MAPPED )
                 continue;
 
-            const auto type = pin->GetType();
+            const ELECTRICAL_PINTYPE type = pin->GetType();
             result.pinMapCandidates.push_back( { pin->m_Uuid, pin->GetPosition(), pin->GetNumber(), footprint,
-                    type == ELECTRICAL_PINTYPE::PT_NC || type == ELECTRICAL_PINTYPE::PT_NIC } );
+                                                 type == ELECTRICAL_PINTYPE::PT_NC
+                                                     || type == ELECTRICAL_PINTYPE::PT_NIC } );
         }
     }
 
@@ -1116,7 +1138,8 @@ INSTANCE_FACTS ExtractInstanceFacts( const SCREEN_FACTS& aFacts, const SCH_SCREE
             throw std::runtime_error( "Multiunit symbol disappeared during extraction" );
 
         result.multiUnits.push_back( { fact.id, symbol->GetRef( &aPath ), symbol->GetRef( &aPath, true ),
-                symbol->GetFootprintFieldText( &aPath, RESOLVED ), symbol->GetUnitSelection( &aPath ) } );
+                                       symbol->GetFootprintFieldText( &aPath, RESOLVED ),
+                                       symbol->GetUnitSelection( &aPath ) } );
     }
 
     // Screen order fixes the main and auxiliary witnesses in saved ERC exclusions
@@ -1124,7 +1147,8 @@ INSTANCE_FACTS ExtractInstanceFacts( const SCREEN_FACTS& aFacts, const SCH_SCREE
     {
         const auto* sheet = static_cast<const SCH_SHEET*>( item );
         result.childSheets.push_back( { sheet->m_Uuid, sheet->GetPosition(),
-                sheet->GetField( FIELD_T::SHEET_NAME )->GetShownText( &aPath, RESOLVED, variant ) } );
+                                        sheet->GetField( FIELD_T::SHEET_NAME )->GetShownText( &aPath, RESOLVED,
+                                                                                              variant ) } );
     }
 
     for( const KIID& owner : aFacts.netclassOwners )
@@ -1147,8 +1171,10 @@ INSTANCE_FACTS ExtractInstanceFacts( const SCREEN_FACTS& aFacts, const SCH_SCREE
                         wxString name = field->GetShownText( &aPath, FOR_NETNAME, variant );
 
                         if( !name.empty() )
-                            result.netclassReferences.push_back(
-                                    { aPath.PathRef(), owner, item->GetPosition(), std::move( name ) } );
+                        {
+                            result.netclassReferences.push_back( { aPath.PathRef(), owner, item->GetPosition(),
+                                                                   std::move( name ) } );
+                        }
                     }
 
                     return true;
@@ -1215,8 +1241,8 @@ INSTANCE_FACTS ExtractInstanceFacts( const SCREEN_FACTS& aFacts, const SCH_SCREE
                 if( member.globalPower || member.localPower )
                 {
                     text.name = EscapeString( member.globalPowerParent || member.localPowerParent
-                                                      ? symbol->GetValue( &aPath, FOR_NETNAME, variant )
-                                                      : pin->GetLibPin()->GetName(),
+                                                                  ? symbol->GetValue( &aPath, FOR_NETNAME, variant )
+                                                                  : pin->GetLibPin()->GetName(),
                                               CTX_NETNAME );
                     text.ncName = text.name;
                 }
@@ -1240,7 +1266,7 @@ INSTANCE_FACTS ExtractInstanceFacts( const SCREEN_FACTS& aFacts, const SCH_SCREE
 
                     text.name = RenderPinNetName( name, reference );
                     text.ncName = RenderPinNetName( name, reference, true );
-                    text.canDrive &= symbol->IsInNetlist() && !symbol->GetExcludedFromBoard( &aPath, variant )
+                    text.canDrive &= symbol->DoNetList() && !symbol->GetExcludedFromBoard( &aPath, variant )
                                      && !reference.reference.StartsWith( wxS( "#" ) );
                 }
 
@@ -1250,7 +1276,7 @@ INSTANCE_FACTS ExtractInstanceFacts( const SCREEN_FACTS& aFacts, const SCH_SCREE
             continue;
         }
 
-        const auto* label = dynamic_cast<const SCH_LABEL_BASE*>( aScreen.GetConnectivityItem( fact.id ) );
+        const SCH_LABEL_BASE* label = dynamic_cast<const SCH_LABEL_BASE*>( aScreen.GetConnectivityItem( fact.id ) );
 
         if( !label )
             continue;
@@ -1289,8 +1315,8 @@ INSTANCE_FACTS ExtractInstanceFacts( const SCREEN_FACTS& aFacts, const SCH_SCREE
         {
             if( item->Type() == SCH_SYMBOL_T )
             {
-                const auto& symbol = *static_cast<const SCH_SYMBOL*>( item );
-                const int   unit = symbol.GetUnitSelection( &aPath );
+                const SCH_SYMBOL& symbol = *static_cast<const SCH_SYMBOL*>( item );
+                const int         unit = symbol.GetUnitSelection( &aPath );
                 units.emplace( symbol.m_Uuid, unit );
                 const LIB_SYMBOL* library = symbol.GetEffectiveLibSymbol( &aPath );
 
@@ -1312,8 +1338,8 @@ INSTANCE_FACTS ExtractInstanceFacts( const SCREEN_FACTS& aFacts, const SCH_SCREE
             }
             else if( item->Type() == SCH_SHEET_T )
             {
-                const auto& sheet = *static_cast<const SCH_SHEET*>( item );
-                BOX2I       box = sheet.GetBodyBoundingBox();
+                const SCH_SHEET& sheet = *static_cast<const SCH_SHEET*>( item );
+                BOX2I            box = sheet.GetBodyBoundingBox();
 
                 for( const SCH_FIELD& field : sheet.GetFields() )
                     box.Merge( INSTANCE_FIELD( field, aPath ).GetBoundingBox() );

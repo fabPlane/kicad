@@ -101,7 +101,7 @@ public:
     LIB_SYMBOL* GetSymbol( const wxString& aAlias ) const;
 
     /// Create a new buffer to store a symbol. #LIB_BUFFER takes ownership of \a aCopy.
-    bool CreateBuffer( std::unique_ptr<LIB_SYMBOL> aCopy, std::unique_ptr<SCH_SCREEN> aScreen );
+    bool CreateBuffer( std::unique_ptr<LIB_SYMBOL> aCopy, std::unique_ptr<SCH_SCREEN> aScreen, bool aNew = false );
 
     /// Update the buffered symbol with the contents of \a aCopy.
     bool UpdateBuffer( SYMBOL_BUFFER& aSymbolBuf, const LIB_SYMBOL& aCopy );
@@ -110,6 +110,13 @@ public:
      * Delete the given symbol buffer from the library buffer.
      */
     bool DeleteBuffer( const SYMBOL_BUFFER& aSymbolBuf );
+
+    /**
+     * Move symbol buffers on the library's deleted list back to its main list.
+     */
+    void RevertDeletedBuffers();
+
+    void RevertAddedBuffers();
 
     /// Return the deleted symbol buffers that need to be removed from the library file.
     const std::deque<std::shared_ptr<SYMBOL_BUFFER>>& GetDeletedBuffers() const { return m_deleted; }
@@ -139,7 +146,7 @@ public:
     /**
      * Fetch a list of root symbols names from the library buffer.
      *
-     * @param aRootSymbolNames is a reference to a list to populate with root symbol names.
+     * @param aSymbolNames is a reference to a list to populate with root symbol names.
      * @param aFilter is the symbol derivation type.
      */
     void GetSymbolNames( wxArrayString&     aSymbolNames,
@@ -157,17 +164,18 @@ public:
 
 private:
     /**
-     * Remove all symbols derived from \a aParent from the library buffer.
+     * Remove all symbols derived from \a aSymbolBuf from the library buffer.
      *
-     * @param aParent is the #SYMBOL_BUFFER to check against.
+     * @param aSymbolBuf is the buffer to remove child symbols from.
+     *
      * @return the count of #SYMBOL_BUFFER objects removed from the library.
      */
     int removeChildSymbols( const SYMBOL_BUFFER& aSymbolBuf );
 
 private:
     std::deque<std::shared_ptr<SYMBOL_BUFFER>> m_symbols;
-    std::deque<std::shared_ptr<SYMBOL_BUFFER>> m_deleted;   ///< Buffer for deleted symbols until
-                                                            ///<   library is saved.
+    std::deque<std::shared_ptr<SYMBOL_BUFFER>> m_added;     ///< Buffer for added synbols until lib is saved
+    std::deque<std::shared_ptr<SYMBOL_BUFFER>> m_deleted;   ///< Buffer for deleted symbols until lib is saved
     const wxString                             m_libName;   ///< Buffered library name
     int                                        m_hash;
 };
@@ -336,6 +344,8 @@ public:
      *
      * @param aLibrary is the library name.
      * @param aFileName is the target file name.
+     * @param aFileType is the plugin type used to save the library.
+     *
      * @return True on success, false otherwise.
      */
     bool SaveLibrary( const wxString& aLibrary, const wxString& aFileName,

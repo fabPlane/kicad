@@ -24,6 +24,8 @@
 
 #include <kiplatform/app.h>
 
+#include <unistd.h>
+
 #include <wx/string.h>
 
 
@@ -87,4 +89,17 @@ void KIPLATFORM::APP::ForceTimerMessagesToBeCreatedIfNecessary()
 void KIPLATFORM::APP::AddDynamicLibrarySearchPath( const wxString& aPath )
 {
     // The headless build links every kiface statically; nothing is ever dlopen'd.
+}
+
+
+bool KIPLATFORM::APP::SetCurrentThreadPriority( bool aRaise )
+{
+    // Thread priorities are left to the host process (and do not exist under wasm).
+    return false;
+}
+
+
+void KIPLATFORM::APP::TerminateWithCode( int aExitCode )
+{
+    _exit( aExitCode );
 }

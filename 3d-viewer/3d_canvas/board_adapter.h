@@ -78,7 +78,7 @@ public:
     /**
      * Update the cache manager pointer.
      *
-     * @param aCachePointer: the pointer to the 3D cache manager.
+     * @param aCacheMgr is the pointer to the 3D cache manager.
      */
     void Set3dCacheManager( S3D_CACHE* aCacheMgr ) noexcept { m_3dModelManager = aCacheMgr; }
     S3D_CACHE* Get3dCacheManager() const noexcept { return m_3dModelManager; }
@@ -87,14 +87,22 @@ public:
      * Check if a layer is enabled.
      *
      * @param aLayer layer ID to get status.
+     * @param aVisibilityFlags is the layer visibility to determine if \a aLayer is enabled.
+     * @return true if the layer is enabled otherwise false.
      */
-    bool Is3dLayerEnabled( PCB_LAYER_ID aLayer,
-                           const std::bitset<LAYER_3D_END>& aVisibilityFlags ) const;
+    bool Is3dLayerEnabled( PCB_LAYER_ID aLayer, const std::bitset<LAYER_3D_END>& aVisibilityFlags ) const;
 
     /**
      * Test if footprint should be displayed in relation to attributes and the flags.
      */
     bool IsFootprintShown( const FOOTPRINT* aFootprint ) const;
+
+    /**
+     * Return the directory of @a aFootprint's library.
+     *
+     * 3D model filenames stored relative to that library are resolved against this path.
+     */
+    wxString GetFootprintLibraryPath( const FOOTPRINT* aFootprint ) const;
 
     /**
      * Set current board to be rendered.
@@ -138,6 +146,7 @@ public:
      * Creates the layers for the board, should be called after InitSettings
      *
      * @param aStatusReporter the pointer for the status reporter.
+     * @param aStop
      */
     void CreateLayers( std::shared_ptr<REPORTER> aStatusReporter, std::stop_token aStop = std::stop_token() );
 
@@ -324,12 +333,12 @@ public:
     }
 
     /**
-     *  Get the backdrill and tertiary drill polygons.
+     *  Get the secondary and tertiary drill polygons.
      *
      */
-    const SHAPE_POLY_SET& GetBackdrillPolys() const noexcept
+    const SHAPE_POLY_SET& GetSecondarydrillPolys() const noexcept
     {
-        return m_BackdrillPolys;
+        return m_SecondarydrillPolys;
     }
 
     const SHAPE_POLY_SET& GetTertiarydrillPolys() const noexcept
@@ -463,6 +472,11 @@ public:
     const MAP_POLY& GetHoleIdPolysMap() const noexcept { return m_layerHoleIdPolys; }
     const MAP_POLY& GetHoleOdPolysMap() const noexcept { return m_layerHoleOdPolys; }
 
+    bool ShowMissingModels()
+    {
+        return m_IsPreviewer || m_Cfg->m_Render.show_missing_models;
+    }
+
 private:
     /**
      * Create the board outline polygon.
@@ -523,6 +537,7 @@ public:
     static KIGFX::COLOR4D                 g_DefaultSilkscreen;
     static KIGFX::COLOR4D                 g_DefaultSolderMask;
     static KIGFX::COLOR4D                 g_DefaultSolderPaste;
+    static KIGFX::COLOR4D                 g_DefaultAdhesive;
     static KIGFX::COLOR4D                 g_DefaultSurfaceFinish;
     static KIGFX::COLOR4D                 g_DefaultBoardBody;
     static KIGFX::COLOR4D                 g_DefaultComments;
@@ -540,13 +555,14 @@ public:
 
     SFVEC4F                 m_BgColorBot;           ///< background bottom color
     SFVEC4F                 m_BgColorTop;           ///< background top color
-    SFVEC4F                 m_BoardBodyColor;       ///< in realistic mode: FR4 board color
-    SFVEC4F                 m_SolderMaskColorBot;   ///< in realistic mode: solder mask color ( bot )
-    SFVEC4F                 m_SolderMaskColorTop;   ///< in realistic mode: solder mask color ( top )
-    SFVEC4F                 m_SolderPasteColor;     ///< in realistic mode: solder paste color
-    SFVEC4F                 m_SilkScreenColorBot;   ///< in realistic mode: SilkScreen color ( bot )
-    SFVEC4F                 m_SilkScreenColorTop;   ///< in realistic mode: SilkScreen color ( top )
-    SFVEC4F                 m_CopperColor;          ///< in realistic mode: copper color
+    SFVEC4F                 m_BoardBodyColor;
+    SFVEC4F                 m_SolderMaskColorBot;
+    SFVEC4F                 m_SolderMaskColorTop;
+    SFVEC4F                 m_SolderPasteColor;
+    SFVEC4F                 m_AdhesiveColor;
+    SFVEC4F                 m_SilkScreenColorBot;
+    SFVEC4F                 m_SilkScreenColorTop;
+    SFVEC4F                 m_CopperColor;
     SFVEC4F                 m_UserDrawingsColor;
     SFVEC4F                 m_UserCommentsColor;
     SFVEC4F                 m_ECO1Color;
@@ -580,8 +596,8 @@ private:
     MAP_POLY                m_layerHoleOdPolys;     ///< Hole outer diameters (per layer)
     MAP_POLY                m_layerHoleIdPolys;     ///< Hole inner diameters (per layer)
 
-    SHAPE_POLY_SET          m_BackdrillPolys;        ///< Board backdrill polygons B.Cu->in
-    SHAPE_POLY_SET          m_TertiarydrillPolys;    ///< Board tertiary drill polygons F.Cu->in
+    SHAPE_POLY_SET          m_SecondarydrillPolys;  ///< Board secondary dril polygons F.Cu->in
+    SHAPE_POLY_SET          m_TertiarydrillPolys;   ///< Board tertiary drill polygons B.Cu->in
 
     SHAPE_POLY_SET          m_NPTH_ODPolys;         ///< NPTH outer diameters
     SHAPE_POLY_SET          m_TH_ODPolys;           ///< PTH outer diameters

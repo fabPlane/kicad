@@ -30,7 +30,7 @@
 #include <api/api_utils.h>
 #include <eda_text.h>    // for EDA_TEXT, TEXT_EFFECTS, GR_TEXT_VJUSTIF...
 #include <gal/color4d.h> // for COLOR4D, COLOR4D::BLACK
-#include <font/glyph.h>
+#include <font/glyph_types.h>
 #include <gr_text.h>
 #include <string_utils.h> // for UnescapeString
 #include <text_eval/text_eval_wrapper.h>
@@ -118,6 +118,8 @@ EDA_TEXT::EDA_TEXT( const EDA_TEXT& aText ) :
     m_shown_text_has_text_var_refs = aText.m_shown_text_has_text_var_refs;
     m_text_var_refs = aText.m_text_var_refs;
 
+    m_hyperlink = aText.m_hyperlink;
+
     m_attributes = aText.m_attributes;
     m_pos = aText.m_pos;
     m_visible = aText.m_visible;
@@ -147,6 +149,9 @@ EDA_TEXT& EDA_TEXT::operator=( const EDA_TEXT& aText )
     m_shown_text = aText.m_shown_text;
     m_shown_text_has_text_var_refs = aText.m_shown_text_has_text_var_refs;
     m_text_var_refs = aText.m_text_var_refs;
+
+    m_hyperlink = aText.m_hyperlink;
+    m_activeUrl = wxEmptyString;
 
     m_attributes = aText.m_attributes;
     m_pos = aText.m_pos;
@@ -458,6 +463,14 @@ bool EDA_TEXT::Replace( const EDA_SEARCH_DATA& aSearchData )
 }
 
 
+void EDA_TEXT::SetAttributes( const TEXT_ATTRIBUTES& aTextAttrs )
+{
+    m_attributes = aTextAttrs;
+    ClearRenderCache();
+    ClearBoundingBoxCache();
+}
+
+
 void EDA_TEXT::SetFont( KIFONT::FONT* aFont )
 {
     m_attributes.m_Font = aFont;
@@ -472,6 +485,10 @@ bool EDA_TEXT::ResolveFont( const std::vector<wxString>* aEmbeddedFonts )
     {
         m_attributes.m_Font = KIFONT::FONT::GetFont( m_unresolvedFontName, IsBold(), IsItalic(), aEmbeddedFonts );
 
+        // The resolved font may not be the same as the original font, so we want to continue to
+        // use the existing glyph cache to preserve the existing geometry (important on the board,
+        // even if not so much on the schematic).  We need to update the font so that KiCad will
+        // decide the cache is still valid.  (It will get regenerated if the user edits the text.)
         if( m_render_cache && !m_render_cache->glyphs.empty() )
             m_render_cache->font = m_attributes.m_Font;
 
@@ -1228,6 +1245,11 @@ int EDA_TEXT::Compare( const EDA_TEXT* aOther ) const
     if( val != 0 )
         return val;
 
+    val = m_hyperlink.Cmp( aOther->m_hyperlink );
+
+    if( val != 0 )
+        return val;
+
     return m_text.Cmp( aOther->m_text );
 }
 
@@ -1292,6 +1314,9 @@ double EDA_TEXT::Similarity( const EDA_TEXT& aOther ) const
     double retval = 1.0;
 
     if( !( m_attributes == aOther.m_attributes ) )
+        retval *= 0.9;
+
+    if( !m_hyperlink.IsSameAs( aOther.m_hyperlink, false ) )
         retval *= 0.9;
 
     if( m_pos != aOther.m_pos )

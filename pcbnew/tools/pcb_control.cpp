@@ -20,6 +20,10 @@
  */
 
 #include "pcb_control.h"
+
+#include <wx/hyperlink.h>
+#include <wx/filename.h>
+
 #include "convert_basic_shapes_to_polygon.h"
 
 #include <advanced_config.h>
@@ -27,6 +31,7 @@
 #include <kiplatform/ui.h>
 #include <kiway.h>
 #include <tools/edit_tool.h>
+#include <tools/pad_tool.h>
 #include <tools/board_inspection_tool.h>
 #include <router/router_tool.h>
 #include <pgm_base.h>
@@ -57,6 +62,7 @@
 #include <pcb_layer_presentation.h>
 #include <pcb_reference_image.h>
 #include <pcb_textbox.h>
+#include <board_tables/generated_table_refresh.h>
 #include <pcb_drill_chart.h>
 #include <dialogs/dialog_drill_groups.h>
 #include <pcb_drill_map.h>
@@ -70,7 +76,6 @@
 #include <filename_resolver.h>
 #include <3d_cache/3d_cache.h>
 #include <embedded_files.h>
-#include <wx/filename.h>
 #include <zone.h>
 #include <confirm.h>
 #include <kidialog.h>
@@ -78,6 +83,8 @@
 #include <core/kicad_algo.h>
 #include <dialogs/hotkey_cycle_popup.h>
 #include <dialogs/dialog_map_layers.h>
+#include <drc/drc_engine.h>
+#include <drc/drc_rule.h>
 #include <pcb_io/common/plugin_common_layer_mapping.h>
 #include <kicad_clipboard.h>
 #include <origin_viewitem.h>
@@ -95,7 +102,6 @@
 #include <widgets/wx_progress_reporters.h>
 #include <widgets/wx_infobar.h>
 #include <pcb_io/pcb_io.h>
-#include <wx/hyperlink.h>
 
 
 using namespace std::placeholders;
@@ -821,6 +827,10 @@ int PCB_CONTROL::InteractiveDelete( const TOOL_EVENT& aEvent )
         return 0;
 
     PCB_PICKER_TOOL* picker = m_toolMgr->GetTool<PCB_PICKER_TOOL>();
+    EDIT_TOOL*       editTool = m_toolMgr->GetTool<EDIT_TOOL>();
+
+    if( !picker || !editTool )
+        return 0;
 
     m_pickerItem = nullptr;
     m_toolMgr->RunAction( ACTIONS::selectionClear );
@@ -833,7 +843,7 @@ int PCB_CONTROL::InteractiveDelete( const TOOL_EVENT& aEvent )
     picker->ClearHandlers();
 
     picker->SetClickHandler(
-            [this]( const VECTOR2D& aPosition ) -> bool
+            [this, editTool]( const VECTOR2D& aPosition ) -> bool
             {
                 if( m_pickerItem )
                 {
@@ -852,7 +862,6 @@ int PCB_CONTROL::InteractiveDelete( const TOOL_EVENT& aEvent )
                     PCB_SELECTION items;
                     items.Add( m_pickerItem );
 
-                    EDIT_TOOL* editTool = m_toolMgr->GetTool<EDIT_TOOL>();
                     editTool->DeleteItems( items, false );
 
                     m_pickerItem = nullptr;
@@ -1053,6 +1062,25 @@ void PCB_CONTROL::pruneItemLayers( std::vector<BOARD_ITEM*>& aItems )
     }
 
     aItems = returnItems;
+}
+
+
+/**
+ * Handle items that have been pasted. For example, notify the pad tool
+ * about pasted pads.
+ */
+static void recordPastedItems( TOOL_MANAGER* aToolMgr, const std::vector<BOARD_ITEM*>& aItems )
+{
+    PAD_TOOL* padTool = aToolMgr->GetTool<PAD_TOOL>();
+
+    if( !padTool )
+        return;
+
+    for( BOARD_ITEM* item : aItems )
+    {
+        if( PAD* pad = dynamic_cast<PAD*>( item ) )
+            padTool->RecordMasterPad( *pad );
+    }
 }
 
 
@@ -1317,6 +1345,9 @@ int PCB_CONTROL::Paste( const TOOL_EVENT& aEvent )
 
             cancelled = !placeBoardItems( &commit, pastedItems, true, true, mode == PASTE_MODE::UNIQUE_ANNOTATIONS,
                                           false );
+
+            if( !cancelled )
+                recordPastedItems( m_toolMgr, pastedItems );
         }
         else    // isBoardEditor
         {
@@ -1363,6 +1394,10 @@ int PCB_CONTROL::Paste( const TOOL_EVENT& aEvent )
         pruneItemLayers( pastedItems );
 
         cancelled = !placeBoardItems( &commit, pastedItems, true, true, mode == PASTE_MODE::UNIQUE_ANNOTATIONS, false );
+
+        if( !cancelled )
+            recordPastedItems( m_toolMgr, pastedItems );
+
         break;
     }
 
@@ -1699,25 +1734,21 @@ int PCB_CONTROL::ApplyDesignBlockLayout( const TOOL_EVENT& aEvent )
                                           .m_copyPlacement = true,
                                           .m_copyOtherItems = true,
                                           .m_groupItems = false,
-                                          .m_includeLockedItems = true,
-                                          .m_anchorFp = nullptr };
+                                          .m_includeLockedItems = true };
 
         // Give the appended block's auto-generated nets a private namespace so they cannot fuse by
         // name with a different part's net on the board, which would corrupt the topology match
-        // (issue 24767). Reverted with the temporary block, so the private nets are removed below.
+        // (issue 24767). Record the private nets with the temporary block so rollback removes them.
         std::vector<NETINFO_ITEM*> isolatedNets =
                 MULTICHANNEL_TOOL::IsolateDesignBlockAutoNets( brd, dbRA.m_components, dbRA.m_designBlockItems );
+
+        for( NETINFO_ITEM* net : isolatedNets )
+            tempCommit.Added( net );
 
         wxString repeatErr;
         int      result = mct->RepeatLayout( aEvent, dbRA, destRA, options, &sharedCommit, &repeatErr );
 
         tempCommit.Revert();
-
-        for( NETINFO_ITEM* net : isolatedNets )
-        {
-            brd->Remove( net );
-            delete net;
-        }
 
         clearFlags();
         delete dbRA.m_zone;
@@ -2091,7 +2122,8 @@ bool PCB_CONTROL::placeBoardItems( BOARD_COMMIT* aCommit, std::vector<BOARD_ITEM
             return m_toolMgr->RunSynchronousAction( PCB_ACTIONS::move, aCommit );
     }
 
-    return true;
+    // An empty selection cannot start interactive placement.
+    return aSkipMove;
 }
 
 
@@ -2121,6 +2153,11 @@ int PCB_CONTROL::AppendBoard( PCB_IO& pi, const wxString& fileName, DESIGN_BLOCK
     // Mark existing items, in order to know what are the new items so we can select only
     // the new items after loading
     BOARD_ITEM_SET existingItems = brd->GetItemSet();
+
+    std::set<NETINFO_ITEM*> existingNets;
+
+    for( NETINFO_ITEM* net : brd->GetNetInfo() )
+        existingNets.insert( net );
 
     for( BOARD_ITEM* item : existingItems )
         item->SetFlags( SKIP_STRUCT );
@@ -2203,6 +2240,14 @@ int PCB_CONTROL::AppendBoard( PCB_IO& pi, const wxString& fileName, DESIGN_BLOCK
     brd->BuildListOfNets();
     brd->SynchronizeNetsAndNetClasses( true );
     brd->BuildConnectivity();
+
+    // GetItemSet omits net definitions. Record new nets before geometry so undo removes the
+    // geometry first and redo restores its nets first.
+    for( NETINFO_ITEM* net : brd->GetNetInfo() )
+    {
+        if( !existingNets.contains( net ) )
+            commit->Added( net );
+    }
 
     // New appended items need to inherit the current global ratsnest state.
     // Existing items are marked SKIP_STRUCT and are handled elsewhere.
@@ -2822,6 +2867,11 @@ int PCB_CONTROL::UpdateMessagePanel( const TOOL_EVENT& aEvent )
                             return;
                         }
 
+                        // An image has no physical area to contribute and no polygon
+                        // representation, so leave it out without invalidating the total.
+                        if( aItem->Type() == PCB_REFERENCE_IMAGE_T )
+                            return;
+
                         if( PCB_GROUP* group = dynamic_cast<PCB_GROUP*>( aItem ) )
                         {
                             group->RunOnChildren( accumulateArea, RECURSE_MODE::RECURSE );
@@ -2945,10 +2995,11 @@ int PCB_CONTROL::PlaceCharacteristics( const TOOL_EVENT& aEvent )
     std::vector<BOARD_ITEM*> items;
     items.push_back( table );
 
+    // Revert rather than delete, since an entered group may already hold the table
     if( placeBoardItems( &commit, items, true, true, false, false ) )
         commit.Push( _( "Place Board Characteristics" ) );
     else
-        delete table;
+        commit.Revert();
 
     return 0;
 }
@@ -2965,10 +3016,11 @@ int PCB_CONTROL::PlaceStackup( const TOOL_EVENT& aEvent )
     std::vector<BOARD_ITEM*> items;
     items.push_back( table );
 
+    // Revert rather than delete, since an entered group may already hold the table
     if( placeBoardItems( &commit, items, true, true, false, false ) )
         commit.Push( _( "Place Board Stackup Table" ) );
     else
-        delete table;
+        commit.Revert();
 
     return 0;
 }
@@ -2976,28 +3028,27 @@ int PCB_CONTROL::PlaceStackup( const TOOL_EVENT& aEvent )
 
 int PCB_CONTROL::PlaceDrillChart( const TOOL_EVENT& aEvent )
 {
-    BOARD* board = m_frame->GetBoard();
+    return placeGeneratedTable( std::make_unique<PCB_DRILL_CHART>( m_frame->GetBoard() ),
+                                _( "No documentation layer is enabled to hold a drill chart." ),
+                                _( "Place Drill Chart" ) );
+}
 
-    // Copper, silk, mask, paste, adhesive, Edge.Cuts, Margin and courtyard are manufacturing
-    // inputs a chart would corrupt. Unlike a map, a chart may share a layer with another
-    const auto available =
-            [board]( PCB_LAYER_ID aLayer )
-            {
-                return DrillDocumentationLayers().Contains( aLayer ) && board->IsLayerEnabled( aLayer );
-            };
 
+PCB_LAYER_ID PCB_CONTROL::pickDocumentationLayer( const std::function<bool( PCB_LAYER_ID )>& aAvailable,
+                                                  const wxString&                            aNoLayerMessage )
+{
+    BOARD*       board = m_frame->GetBoard();
     PCB_LAYER_ID layer = m_frame->GetActiveLayer();
 
-    if( !available( layer ) )
+    if( !aAvailable( layer ) )
     {
-        const LSEQ candidates = DrillDocumentationLayers().Seq();
-        const auto next = std::find_if( candidates.begin(), candidates.end(), available );
+        const LSEQ candidates = DocumentationLayers().Seq();
+        const auto next = std::find_if( candidates.begin(), candidates.end(), aAvailable );
 
         if( next == candidates.end() )
         {
-            m_frame->ShowInfoBarError( _( "No documentation layer is enabled to hold a drill "
-                                          "chart." ) );
-            return 0;
+            m_frame->ShowInfoBarError( aNoLayerMessage );
+            return UNDEFINED_LAYER;
         }
 
         layer = *next;
@@ -3013,48 +3064,67 @@ int PCB_CONTROL::PlaceDrillChart( const TOOL_EVENT& aEvent )
                 board->GetLayerName( layer ) ) );
     }
 
-    BOARD_COMMIT commit( this );
+    return layer;
+}
 
-    PCB_DRILL_CHART* chart = new PCB_DRILL_CHART( board );
 
-    // Seeded from the board, not default-constructed. RebuildCells builds on whatever it is
-    // handed, so a default here would drop the board's grouping and its existing marks
-    DRILL_SYMBOL_PROFILE assigned = board->GetDesignSettings().GetDrillSymbolProfile();
+int PCB_CONTROL::placeGeneratedTable( std::unique_ptr<PCB_GENERATED_TABLE> aTable, const wxString& aNoLayerMessage,
+                                      const wxString& aUndoMessage )
+{
+    BOARD* board = m_frame->GetBoard();
 
-    chart->SetLayer( layer );
-    chart->RebuildCells( *board, &assigned );
+    // Copper, silk, mask, paste, adhesive, Edge.Cuts, Margin and courtyard are manufacturing
+    // inputs a table would corrupt. Unlike a map, a table may share a layer with another
+    const auto available =
+            [board]( PCB_LAYER_ID aLayer )
+            {
+                return DocumentationLayers().Contains( aLayer ) && board->IsLayerEnabled( aLayer );
+            };
 
-    // Cascade off any chart already on this layer rather than landing on top of it
+    const PCB_LAYER_ID layer = pickDocumentationLayer( available, aNoLayerMessage );
+
+    if( layer == UNDEFINED_LAYER )
+        return 0;
+
+    BOARD_COMMIT            commit( this );
+    GENERATED_TABLE_REFRESH refresh( *board );
+
+    aTable->SetLayer( layer );
+    aTable->RebuildCells( *board, &refresh );
+
+    // Cascade off any table of the same kind on this layer rather than landing on top of it
     int existing = 0;
 
     for( BOARD_ITEM* item : board->Drawings() )
     {
-        if( item->Type() == PCB_DRILL_CHART_T && item->GetLayer() == layer )
+        if( item->Type() == aTable->Type() && item->GetLayer() == layer )
             existing++;
     }
 
     if( existing )
     {
-        const BOX2I bbox = chart->GetBoundingBox();
-        chart->Move( VECTOR2I( 0, existing * ( bbox.GetHeight() + pcbIUScale.mmToIU( 5 ) ) ) );
+        const BOX2I bbox = aTable->GetBoundingBox();
+        aTable->Move( VECTOR2I( 0, existing * ( bbox.GetHeight() + pcbIUScale.mmToIU( 5 ) ) ) );
     }
 
-    std::vector<BOARD_ITEM*> items;
-    items.push_back( chart );
+    std::vector<BOARD_ITEM*> items{ aTable.get() };
 
-    if( placeBoardItems( &commit, items, true, true, false, false ) )
+    // The commit owns the table from here, even on cancel, since an entered group may already
+    // hold it and only Revert undoes that before deleting it
+    aTable.release();
+
+    if( !placeBoardItems( &commit, items, true, true, false, false ) )
     {
-        // Only now do the assignments become the board's. The profile is design settings,
-        // which KiCad does not undo, so the board is marked dirty instead
-        board->GetDesignSettings().GetDrillSymbolProfile() = assigned;
-        m_frame->OnModify();
+        commit.Revert();
+        return 0;
+    }
 
-        commit.Push( _( "Place Drill Chart" ) );
-    }
-    else
-    {
-        delete chart;
-    }
+    // Only now does the refresh's pending state become the board's. The drill profile is
+    // design settings, which KiCad does not undo, so the board is marked dirty instead
+    refresh.Commit();
+    m_frame->OnModify();
+
+    commit.Push( aUndoMessage );
 
     return 0;
 }
@@ -3069,7 +3139,7 @@ int PCB_CONTROL::PlaceDrillMap( const TOOL_EVENT& aEvent )
     const auto available =
             [&]( PCB_LAYER_ID aLayer )
             {
-                if( !DrillDocumentationLayers().Contains( aLayer ) || !board->IsLayerEnabled( aLayer ) )
+                if( !DocumentationLayers().Contains( aLayer ) || !board->IsLayerEnabled( aLayer ) )
                     return false;
 
                 for( const BOARD_ITEM* item : board->Drawings() )
@@ -3081,31 +3151,11 @@ int PCB_CONTROL::PlaceDrillMap( const TOOL_EVENT& aEvent )
                 return true;
             };
 
-    PCB_LAYER_ID layer = m_frame->GetActiveLayer();
+    const PCB_LAYER_ID layer =
+            pickDocumentationLayer( available, _( "Every documentation layer already has a drill map." ) );
 
-    if( !available( layer ) )
-    {
-        const LSEQ candidates = DrillDocumentationLayers().Seq();
-        const auto next = std::find_if( candidates.begin(), candidates.end(), available );
-
-        if( next == candidates.end() )
-        {
-            m_frame->ShowInfoBarError( _( "Every documentation layer already has a drill map." ) );
-            return 0;
-        }
-
-        layer = *next;
-        m_frame->SetActiveLayer( layer );
-    }
-
-    // Placing onto a hidden layer draws nothing at all, which is indistinguishable from the
-    // feature being broken
-    if( !board->IsLayerVisible( layer ) )
-    {
-        m_frame->ShowInfoBarWarning( wxString::Format(
-                _( "Layer '%s' is hidden; nothing will be shown until you make it visible." ),
-                board->GetLayerName( layer ) ) );
-    }
+    if( layer == UNDEFINED_LAYER )
+        return 0;
 
     BOARD_COMMIT commit( this );
 

@@ -25,6 +25,7 @@ endif()
 
 list( APPEND GAL_SRCS
     gal_display_options.cpp
+    bitmap_texture.cpp
     graphics_abstraction_layer.cpp
     )
 
@@ -67,10 +68,13 @@ if( NOT KICAD_HEADLESS_API )
         opengl/opengl_compositor.cpp
         opengl/utils.cpp
 
-        # Cairo GAL
+        # Cairo GAL (screen rendering plus print/plot/export)
         cairo/cairo_gal.cpp
         cairo/cairo_compositor.cpp
         cairo/cairo_print.cpp
+
+        # Modern RHI GAL
+        gal_modern.cpp
         )
 endif()
 
@@ -96,6 +100,7 @@ target_link_libraries( gal
     kicommon
     kimath
     kiplatform
+    rhi
     nlohmann_json
     ${CAIRO_LIBRARIES}
     ${PIXMAN_LIBRARIES}

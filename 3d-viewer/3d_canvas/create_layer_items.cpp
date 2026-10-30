@@ -41,6 +41,7 @@
 #include <pcb_shape.h>
 #include <pcb_track.h>
 #include <zone.h>
+#include <pcb_painter.h>        // for PCB_RENDER_SETTINGS
 
 #ifdef PRINT_STATISTICS_3D_VIEWER
 #include <core/profile.h>
@@ -71,6 +72,44 @@ void buildPadOutlineAsPolygon( const PAD* aPad, PCB_LAYER_ID aLayer, SHAPE_POLY_
         }
     }
 }
+
+// Draw a PCB_SHAPE outline according to the line style
+void drawPcbShapeWithStyle( const PCB_SHAPE* aDrwShape, SHAPE_POLY_SET* aLayerPoly, int aInflate = 0 )
+{
+    LINE_STYLE lineStyle = aDrwShape->GetStroke().GetLineStyle();
+    int maxError = aDrwShape->GetMaxError();
+
+    if( lineStyle <= LINE_STYLE::FIRST_TYPE )
+    {
+        aDrwShape->TransformShapeToPolygon( *aLayerPoly, PCB_LAYER_ID::UNDEFINED_LAYER,
+                                             aInflate, maxError, ERROR_OUTSIDE, false ) ;
+        return;
+    }
+
+    std::vector<SHAPE*> shapes = aDrwShape->MakeEffectiveShapesForStroking( aDrwShape->GetWidth() );
+
+    const PCB_PLOT_PARAMS&     plotParams = aDrwShape->GetBoard()->GetPlotOptions();
+    KIGFX::PCB_RENDER_SETTINGS renderSettings;
+
+    renderSettings.SetDashLengthRatio( plotParams.GetDashedLineDashRatio() );
+    renderSettings.SetGapLengthRatio( plotParams.GetDashedLineGapRatio() );
+
+    int minSegCount = 8;
+
+    for( SHAPE* shape : shapes )
+    {
+        int lineWidth = aDrwShape->GetWidth() + (2*aInflate);
+        STROKE_PARAMS::Stroke( shape, lineStyle, lineWidth, &renderSettings,
+                [&]( const VECTOR2I& a, const VECTOR2I& b )
+                {
+                    TransformOvalToPolygon( *aLayerPoly, a, b, aDrwShape->GetWidth(), maxError,
+                                             ERROR_OUTSIDE, minSegCount );
+               } );
+    }
+
+    for( SHAPE* shape : shapes )
+        delete shape;
+};
 
 
 void transformFPShapesToPolySet( const FOOTPRINT* aFootprint, PCB_LAYER_ID aLayer,
@@ -145,9 +184,13 @@ void transformFPTextToPolySet( const FOOTPRINT* aFootprint, PCB_LAYER_ID aLayer,
             {
                 // border
                 if( textbox->IsBorderEnabled() )
-                    textbox->PCB_SHAPE::TransformShapeToPolygon( aBuffer, aLayer, 0, aMaxError, aErrorLoc );
+                {
+                    // we use the box polygonal shape to honor the box rotation and line style
+                    PCB_SHAPE tb_box = textbox->GetPolygonalBoxShape();
+                    drawPcbShapeWithStyle( &tb_box, &aBuffer );
+                }
 
-                // text
+                // Text itself
                 textbox->TransformTextToPolySet( aBuffer, 0, aMaxError, aErrorLoc );
             }
         }
@@ -687,7 +730,7 @@ void BOARD_ADAPTER::createLayers( std::shared_ptr<REPORTER> aStatusReporter, std
                             TransformCircleToPolygon( *m_layerHoleIdPolys[layer], via->GetStart(),
                                                       backdrillRadiusBIU, via->GetMaxError(), ERROR_INSIDE );
 
-                            TransformCircleToPolygon( m_BackdrillPolys, via->GetStart(),
+                            TransformCircleToPolygon( m_SecondarydrillPolys, via->GetStart(),
                                                       backdrillOuterRadiusBIU, via->GetMaxError(), ERROR_INSIDE );
                         }
                     }
@@ -974,27 +1017,28 @@ void BOARD_ADAPTER::createLayers( std::shared_ptr<REPORTER> aStatusReporter, std
             }
 
             // Add backdrill polygons for pads - affects specific layers only
-            const VECTOR2I& secDrillSize = pad->GetSecondaryDrillSize();
+            const VECTOR2I& secondaryDrillSize = pad->GetSecondaryDrillSize();
 
-            if( secDrillSize.x > 0 || secDrillSize.y > 0 )
+            if( secondaryDrillSize.x > 0 || secondaryDrillSize.y > 0 )
             {
-                const int backdrillRadiusBIU = ( secDrillSize.x + secDrillSize.y ) / 4;
+                const int secondaryRadiusBIU = ( secondaryDrillSize.x + secondaryDrillSize.y ) / 4;
                 const int holeOuterRadiusBIU = holeRadius + inflate;
 
                 // Only add if backdrill is larger than original hole outer diameter
-                if( backdrillRadiusBIU > holeOuterRadiusBIU )
+                if( secondaryRadiusBIU > holeOuterRadiusBIU )
                 {
-                    PCB_LAYER_ID secStart = pad->GetSecondaryDrillStartLayer();
-                    PCB_LAYER_ID secEnd = pad->GetSecondaryDrillEndLayer();
-                    bool validLyPair = secStart >= 0 && secEnd >= 0;
+                    PCB_LAYER_ID secondaryStart = pad->GetSecondaryDrillStartLayer();
+                    PCB_LAYER_ID secondaryEnd = pad->GetSecondaryDrillEndLayer();
+                    bool         validLayerPair = secondaryStart >= 0 && secondaryEnd >= 0;
 
-                    if( validLyPair )
+                    if( validLayerPair )
                     {
-                        TransformCircleToPolygon( m_BackdrillPolys, pad->GetPosition(), backdrillRadiusBIU,
+                        TransformCircleToPolygon( m_SecondarydrillPolys, pad->GetPosition(), secondaryRadiusBIU,
                                                   pad->GetMaxError(), ERROR_INSIDE );
 
                         // Iterate through layers affected by backdrill
-                        for( PCB_LAYER_ID backdrillLayer : LAYER_RANGE( secStart, secEnd, m_copperLayersCount ) )
+                        for( PCB_LAYER_ID backdrillLayer : LAYER_RANGE( secondaryStart, secondaryEnd,
+                                                                        m_copperLayersCount ) )
                         {
                             // Add polygon to per-layer hole polys
                             SHAPE_POLY_SET* layerHolePoly = nullptr;
@@ -1009,7 +1053,50 @@ void BOARD_ADAPTER::createLayers( std::shared_ptr<REPORTER> aStatusReporter, std
                                 layerHolePoly = m_layerHoleOdPolys[backdrillLayer];
                             }
 
-                            TransformCircleToPolygon( *layerHolePoly, pad->GetPosition(), backdrillRadiusBIU,
+                            TransformCircleToPolygon( *layerHolePoly, pad->GetPosition(), secondaryRadiusBIU,
+                                                      pad->GetMaxError(), ERROR_INSIDE );
+                        }
+                    }
+                }
+            }
+
+            const VECTOR2I& tertiaryDrillSize = pad->GetTertiaryDrillSize();
+
+            if( tertiaryDrillSize.x > 0 || tertiaryDrillSize.y > 0 )
+            {
+                const int tertiaryRadiusBIU = ( tertiaryDrillSize.x + tertiaryDrillSize.y ) / 4;
+                const int holeOuterRadiusBIU = holeRadius + inflate;
+
+                // Only add if backdrill is larger than original hole outer diameter
+                if( tertiaryRadiusBIU > holeOuterRadiusBIU )
+                {
+                    PCB_LAYER_ID tertiaryStart = pad->GetTertiaryDrillStartLayer();
+                    PCB_LAYER_ID tertiaryEnd = pad->GetTertiaryDrillEndLayer();
+                    bool         validLayerPair = tertiaryStart >= 0 && tertiaryEnd >= 0;
+
+                    if( validLayerPair )
+                    {
+                        TransformCircleToPolygon( m_TertiarydrillPolys, pad->GetPosition(), tertiaryRadiusBIU,
+                                                  pad->GetMaxError(), ERROR_INSIDE );
+
+                        // Iterate through layers affected by backdrill
+                        for( PCB_LAYER_ID backdrillLayer : LAYER_RANGE( tertiaryStart, tertiaryEnd,
+                                                                        m_copperLayersCount ) )
+                        {
+                            // Add polygon to per-layer hole polys
+                            SHAPE_POLY_SET* layerHolePoly = nullptr;
+
+                            if( !m_layerHoleOdPolys.contains( backdrillLayer ) )
+                            {
+                                layerHolePoly = new SHAPE_POLY_SET;
+                                m_layerHoleOdPolys[backdrillLayer] = layerHolePoly;
+                            }
+                            else
+                            {
+                                layerHolePoly = m_layerHoleOdPolys[backdrillLayer];
+                            }
+
+                            TransformCircleToPolygon( *layerHolePoly, pad->GetPosition(), tertiaryRadiusBIU,
                                                       pad->GetMaxError(), ERROR_INSIDE );
                         }
                     }
@@ -1338,8 +1425,8 @@ void BOARD_ADAPTER::createLayers( std::shared_ptr<REPORTER> aStatusReporter, std
         if( m_backCountersinkPolys.OutlineCount() > 0 )
             m_viaAnnuliPolys.BooleanSubtract( m_backCountersinkPolys );
 
-        if( m_BackdrillPolys.OutlineCount() > 0 )
-            m_viaAnnuliPolys.BooleanSubtract( m_BackdrillPolys );
+        if( m_SecondarydrillPolys.OutlineCount() > 0 )
+            m_viaAnnuliPolys.BooleanSubtract( m_SecondarydrillPolys );
 
         if( m_TertiarydrillPolys.OutlineCount() > 0 )
             m_viaAnnuliPolys.BooleanSubtract( m_TertiarydrillPolys );
@@ -1571,7 +1658,7 @@ void BOARD_ADAPTER::createLayers( std::shared_ptr<REPORTER> aStatusReporter, std
                     if( IsSolderMaskLayer( layer ) && shape->HasSolderMask() )
                         margin = shape->GetSolderMaskExpansion();
 
-                    item->TransformShapeToPolySet( *layerPoly, layer, margin, item->GetMaxError(), ERROR_INSIDE );
+                    drawPcbShapeWithStyle( shape, layerPoly, margin );
                     break;
                 }
 
@@ -1589,8 +1676,9 @@ void BOARD_ADAPTER::createLayers( std::shared_ptr<REPORTER> aStatusReporter, std
 
                     if( textbox->IsBorderEnabled() )
                     {
-                        textbox->PCB_SHAPE::TransformShapeToPolygon( *layerPoly, layer, 0, textbox->GetMaxError(),
-                                                                     ERROR_INSIDE );
+                        // we use the box polygonal shape to honor the box rotation and line style
+                        PCB_SHAPE tb_box = textbox->GetPolygonalBoxShape();
+                        drawPcbShapeWithStyle( &tb_box, layerPoly );
                     }
 
                     textbox->TransformTextToPolySet( *layerPoly, 0, textbox->GetMaxError(), ERROR_INSIDE );

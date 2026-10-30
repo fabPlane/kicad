@@ -26,6 +26,7 @@
 #include <vector>
 
 #include <layer_ids.h>
+#include <tool/arc_draw_mode.h>
 #include <tool/tool_action.h>
 #include <tool/actions.h>
 
@@ -207,9 +208,18 @@ public:
     static TOOL_ACTION drawEllipse;
     static TOOL_ACTION drawEllipseArc;
     static TOOL_ACTION drawArc;
+    static TOOL_ACTION drawArcCenter;
+    static TOOL_ACTION drawArcStartEndMid;
+    static TOOL_ACTION drawArcStartEndCenter;
+    static TOOL_ACTION drawArcTangent;
+    static TOOL_ACTION drawArcStartDirEnd;
+
+    /// Tool action that starts the arc tool in the given mode.
+    static const TOOL_ACTION& DrawArcForMode( ARC_DRAW_MODE aMode );
     static TOOL_ACTION drawBezier;
     static TOOL_ACTION placePoint;
     static TOOL_ACTION placeReferenceImage;
+    static TOOL_ACTION convertImageToOutlines;
     static TOOL_ACTION placeText;
     static TOOL_ACTION drawTextBox;
     static TOOL_ACTION drawTable;
@@ -440,9 +450,6 @@ public:
     static TOOL_ACTION zonePriorityLower;
     static TOOL_ACTION zonePriorityMoveToBottom;
 
-    /// Scripting Actions
-    static TOOL_ACTION pluginsShowFolder;
-
     // Board editor control
     static TOOL_ACTION appendBoard;
     static TOOL_ACTION rescueAutosave;
@@ -539,10 +546,10 @@ public:
     static TOOL_ACTION compareFpLibraryWithFile;
     static TOOL_ACTION showLibFootprintFieldsTable;
     static TOOL_ACTION footprintProperties;
-    static TOOL_ACTION defaultPadProperties;
     static TOOL_ACTION padTable;
 
     static TOOL_ACTION checkFootprint;
+    static TOOL_ACTION showFootprintUsers;
 
     static TOOL_ACTION loadFpFromBoard;
     static TOOL_ACTION saveFpToBoard;
@@ -552,6 +559,10 @@ public:
 
     /// Activation of the drawing tool (placing a PAD)
     static TOOL_ACTION placePad;
+    static TOOL_ACTION placeThtPad;
+    static TOOL_ACTION placeSmdPad;
+    static TOOL_ACTION placeNpthPad;
+    static TOOL_ACTION placePasteAperturePad;
 
     static TOOL_ACTION explodePad;
     static TOOL_ACTION recombinePad;
@@ -694,8 +705,13 @@ public:
     static TOOL_ACTION ddAppendBoard;
     static TOOL_ACTION ddImportFootprint;
     static TOOL_ACTION ddImportGraphics;
+    static TOOL_ACTION ddPlaceReferenceImage;
 
     static TOOL_ACTION repeatLayout;
+    static TOOL_ACTION updateLinkedLayouts;
+    static TOOL_ACTION unlinkLayout;
+    static TOOL_ACTION expandToMatchingTopology;
+    static TOOL_ACTION expandToLargestTopology;
     static TOOL_ACTION generatePlacementRuleAreas;
 
     /// Footprint wizard frame actions:

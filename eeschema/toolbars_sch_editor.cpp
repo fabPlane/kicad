@@ -138,7 +138,11 @@ std::optional<TOOLBAR_CONFIGURATION> SCH_EDIT_TOOLBAR_SETTINGS::DefaultToolbarCo
                             .AddAction( SCH_ACTIONS::drawCircle )
                             .AddAction( SCH_ACTIONS::drawEllipse ) )
               .AppendGroup( TOOLBAR_GROUP_CONFIG( _( "Arc" ) )
-                            .AddAction( SCH_ACTIONS::drawArc )
+                            .AddAction( SCH_ACTIONS::drawArcCenter )
+                            .AddAction( SCH_ACTIONS::drawArcStartEndMid )
+                            .AddAction( SCH_ACTIONS::drawArcStartEndCenter )
+                            .AddAction( SCH_ACTIONS::drawArcTangent )
+                            .AddAction( SCH_ACTIONS::drawArcStartDirEnd )
                             .AddAction( SCH_ACTIONS::drawEllipseArc ) )
               .AppendAction( SCH_ACTIONS::drawBezier )
               .AppendAction( SCH_ACTIONS::drawPolygon )
@@ -288,12 +292,7 @@ void SCH_EDIT_FRAME::UpdateVariantSelectionCtrl( const wxArrayString& aVariantNa
     if( !m_currentVariantCtrl )
         return;
 
-    // Fall back to the default if nothing is currently selected.
-    wxString currentSelection = GetDefaultVariantName();
-    int selectionIndex = m_currentVariantCtrl->GetSelection();
-
-    if( selectionIndex != wxNOT_FOUND )
-        currentSelection = m_currentVariantCtrl->GetString( selectionIndex );
+    wxString currentSelection = m_currentVariantCtrl->GetStringSelection();
 
     // Add all variant names, a separator, and "Add New Variant..." at the end
     wxArrayString contents = aVariantNames;
@@ -302,12 +301,8 @@ void SCH_EDIT_FRAME::UpdateVariantSelectionCtrl( const wxArrayString& aVariantNa
 
     m_currentVariantCtrl->Set( contents );
 
-    selectionIndex = m_currentVariantCtrl->FindString( currentSelection );
-
-    if( ( selectionIndex == wxNOT_FOUND ) && ( m_currentVariantCtrl->GetCount() != 0 ) )
-        selectionIndex = 0;
-
-    m_currentVariantCtrl->SetSelection( selectionIndex );
+    if( !m_currentVariantCtrl->SetStringSelection( currentSelection ) )
+        m_currentVariantCtrl->SetSelection( 0 );        // default variant
 }
 
 
@@ -429,16 +424,16 @@ bool SCH_EDIT_FRAME::ShowAddVariantDialog( wxWindow* aParent )
     // Add variant to the schematic
 
     VARIANT_PROXY_UNDO_ITEM* undoItem = new VARIANT_PROXY_UNDO_ITEM( &Schematic() );
-    PICKED_ITEMS_LIST*       undoCmd = new PICKED_ITEMS_LIST();
 
     Schematic().AddVariant( variantName );
 
     if( !variantDesc.IsEmpty() )
         Schematic().SetVariantDescription( variantName, variantDesc );
 
-    undoCmd->PushItem( ITEM_PICKER( GetScreen(), undoItem, UNDO_REDO::VARIANTS ) );
-    undoCmd->SetDescription( _( "Add Variant" ) );
-    PushCommandToUndoList( undoCmd );
+    PICKED_ITEMS_LIST undoCmd;
+    undoCmd.PushItem( ITEM_PICKER( GetScreen(), undoItem, UNDO_REDO::VARIANTS ) );
+    undoCmd.SetDescription( _( "Add Variant" ) );
+    SaveCopyInUndoList( undoCmd, UNDO_REDO::VARIANTS, false /* append */ );
 
     // Update the variant selector and select the new variant
     UpdateVariantSelectionCtrl( Schematic().GetVariantNamesForUI() );
@@ -450,29 +445,14 @@ bool SCH_EDIT_FRAME::ShowAddVariantDialog( wxWindow* aParent )
 
 void SCH_EDIT_FRAME::SetCurrentVariant( const wxString& aVariantName )
 {
-    if( !m_currentVariantCtrl )
-        return;
+    Schematic().SetCurrentVariant( aVariantName );
 
-    wxString name = aVariantName.IsEmpty() ? GetDefaultVariantName() : aVariantName;
-
-    int newSelection = m_currentVariantCtrl->FindString( name );
-
-    if( newSelection == wxNOT_FOUND )
-        return;
-
-    int currentSelection = m_currentVariantCtrl->GetSelection();
-
-    wxString selectedString;
-
-    if( currentSelection != wxNOT_FOUND )
-        selectedString = m_currentVariantCtrl->GetString( currentSelection );
-
-    if( selectedString != name )
+    if( m_currentVariantCtrl )
     {
-        m_currentVariantCtrl->SetSelection( newSelection );
-        Schematic().SetCurrentVariant( aVariantName );
-
-        UpdateProperties();
-        HardRedraw();
+        if( !m_currentVariantCtrl->SetStringSelection( aVariantName ) )
+            m_currentVariantCtrl->SetSelection( 0 );    // default variant
     }
+
+    UpdateProperties();
+    HardRedraw();
 }

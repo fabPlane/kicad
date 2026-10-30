@@ -31,12 +31,16 @@
 #include <memory>
 #include <functional>
 
+
 class EDA_BASE_FRAME;
 class EDA_ITEM;
 class PROPERTY_BASE;
 class BITMAP_BUTTON;
 class wxPropertyGridEvent;
 class wxStaticText;
+
+enum class BITMAPS : unsigned int;
+
 
 enum PROPERTIES_PANEL_CONTEXT_MENU_IDS
 {
@@ -122,10 +126,12 @@ protected:
     /**
      * Processes a selection and determines whether the given property should be available or not
      * and what the common value should be for the items in the selection.
+     *
      * @param aSelection is a set of EDA_ITEMs to process
-     * @param aProperty is the property to look up
+     * @param aPropName is the property to look up
      * @param aValue will be filled with the value common to the selection, or null if different
      * @param aWritable will be set to whether or not the property can be written for the selection
+     * @param aChoices
      * @return true if the property is available for all the items in the selection
      */
     bool extractValueAndWritability( const SELECTION& aSelection, const wxString& aPropName,
@@ -160,13 +166,14 @@ protected:
 
     void positionCategoryButtons();
 
-    ///< Find the caption row for the given untranslated group name, if present.
+    /// Find the caption row for the given untranslated group name, if present.
     wxPGProperty* categoryForGroup( const wxString& aGroupKey ) const;
 
     wxStaticText*               m_caption;
 
 public:
     int                         m_SuppressGridChangeEvents;
+    bool                        m_ValueChangeVetoed;
 
 protected:
     std::vector<PROPERTY_BASE*> m_displayed;    // no ownership of pointers
@@ -192,8 +199,8 @@ protected:
         std::function<void()>    action;
         std::function<bool()>    enableFunc;    ///< optional extra enable predicate
 
-        ///< Emit the category caption row even when it has no properties; the row is
-        ///< only forced on rebuilds where enableFunc() (if set) returns true.
+        /// Emit the category caption row even when it has no properties; the row is
+        /// only forced on rebuilds where enableFunc() (if set) returns true.
         bool                     forceCategory = false;
     };
 

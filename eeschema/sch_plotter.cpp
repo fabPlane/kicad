@@ -87,11 +87,40 @@ wxFileName SCH_PLOTTER::getOutputFilenameSingle( const SCH_PLOT_OPTS& aPlotOpts,
 }
 
 
-void SCH_PLOTTER::createPDFFile( const SCH_PLOT_OPTS& aPlotOpts,
-                                 SCH_RENDER_SETTINGS* aRenderSettings, REPORTER* aReporter )
+class PLOT_CONTEXT
 {
-    SCH_SHEET_PATH oldsheetpath = m_schematic->CurrentSheet(); // sheetpath is saved here
+public:
+    PLOT_CONTEXT( PLOTTER* aPlotter, SCHEMATIC* aSchematic ) :
+            m_plotter( aPlotter ),
+            m_schematic( aSchematic )
+    {
+        m_previousSheetPath = m_schematic->CurrentSheet();
+    }
 
+    ~PLOT_CONTEXT()
+    {
+        if( m_plotter )
+        {
+            m_plotter->EndPlot();
+            delete m_plotter;
+        }
+
+        // Restore the initial sheet
+        m_schematic->SetCurrentSheet( m_previousSheetPath );
+        m_schematic->CurrentSheet().UpdateAllScreenReferences();
+        m_schematic->SetSheetNumberAndCount();
+    }
+
+private:
+    PLOTTER*       m_plotter;
+    SCHEMATIC*     m_schematic;
+    SCH_SHEET_PATH m_previousSheetPath;
+};
+
+
+void SCH_PLOTTER::createPDFFile( const SCH_PLOT_OPTS& aPlotOpts, SCH_RENDER_SETTINGS* aRenderSettings,
+                                 REPORTER* aReporter )
+{
     /* When printing all pages, the printed page is not the current page.  In complex hierarchies,
      * we must update symbol references and other parameters in the given printed SCH_SCREEN,
      * according to the sheet path because in complex hierarchies a SCH_SCREEN (a drawing ) is
@@ -126,6 +155,8 @@ void SCH_PLOTTER::createPDFFile( const SCH_PLOT_OPTS& aPlotOpts,
 
     // Allocate the plotter and set the job level parameter
     PDF_PLOTTER* plotter = new PDF_PLOTTER( &m_schematic->Project() );
+    PLOT_CONTEXT raii( plotter, m_schematic );
+
     plotter->SetRenderSettings( aRenderSettings );
     plotter->SetColorMode( !aPlotOpts.m_blackAndWhite );
     plotter->SetCreator( wxT( "Eeschema-PDF" ) );
@@ -174,11 +205,10 @@ void SCH_PLOTTER::createPDFFile( const SCH_PLOT_OPTS& aPlotOpts,
                 {
                     if( aReporter )
                     {
-                        msg.Printf( _( "Failed to create file '%s'." ),
-                                    plotFileName.GetFullPath() );
+                        msg.Printf( _( "Failed to create file '%s'." ), plotFileName.GetFullPath() );
                         aReporter->Report( msg, RPT_SEVERITY_ERROR );
                     }
-                    delete plotter;
+
                     return;
                 }
 
@@ -196,7 +226,6 @@ void SCH_PLOTTER::createPDFFile( const SCH_PLOT_OPTS& aPlotOpts,
                     aReporter->Report( msg, RPT_SEVERITY_ERROR );
                 }
 
-                restoreEnvironment( plotter, oldsheetpath );
                 return;
             }
         }
@@ -230,8 +259,6 @@ void SCH_PLOTTER::createPDFFile( const SCH_PLOT_OPTS& aPlotOpts,
         aReporter->Report( msg, RPT_SEVERITY_ACTION );
         aReporter->ReportTail( _( "Done." ), RPT_SEVERITY_INFO );
     }
-
-    restoreEnvironment( plotter, oldsheetpath );
 }
 
 
@@ -317,6 +344,7 @@ void SCH_PLOTTER::createPSFiles( const SCH_PLOT_OPTS& aPlotOpts,
     SCH_SHEET_PATH oldsheetpath = m_schematic->CurrentSheet(); // sheetpath is saved here
     PAGE_INFO      plotPage;                                   // page size selected to plot
     wxString       msg;
+    PLOT_CONTEXT   raii( nullptr, m_schematic );
 
     /* When printing all pages, the printed page is not the current page.
      * In complex hierarchies, we must update symbol references and other parameters in the
@@ -326,20 +354,26 @@ void SCH_PLOTTER::createPSFiles( const SCH_PLOT_OPTS& aPlotOpts,
      */
     SCH_SHEET_LIST sheetList;
 
-    if( aPlotOpts.m_plotAll )
+    if( aPlotOpts.m_plotAll || aPlotOpts.m_plotPages.size() > 0 )
     {
         sheetList.BuildSheetList( &m_schematic->Root(), true );
-        sheetList.SortByPageNumbers();
+        sheetList.SortByHierarchicalPageNumbers();
 
         // remove the non-selected pages if we are in plot pages mode
         if( aPlotOpts.m_plotPages.size() > 0 )
-        {
             sheetList.TrimToPageNumbers( aPlotOpts.m_plotPages );
-        }
     }
     else
     {
         sheetList.push_back( aPlotOpts.m_sheetPath.value_or( m_schematic->CurrentSheet() ) );
+    }
+
+    if( sheetList.empty() )
+    {
+        if( aReporter )
+            aReporter->Report( _( "No sheets to plot." ), RPT_SEVERITY_ERROR );
+
+        return;
     }
 
     for( unsigned i = 0; i < sheetList.size(); i++ )
@@ -395,8 +429,7 @@ void SCH_PLOTTER::createPSFiles( const SCH_PLOT_OPTS& aPlotOpts,
                 fname.Replace( "/", "_" );
                 fname.Replace( "\\", "_" );
 
-                plotFileName = createPlotFileName( aPlotOpts, fname,
-                                                   PS_PLOTTER::GetDefaultFileExtension(),
+                plotFileName = createPlotFileName( aPlotOpts, fname, PS_PLOTTER::GetDefaultFileExtension(),
                                                    aReporter );
             }
 
@@ -446,8 +479,6 @@ void SCH_PLOTTER::createPSFiles( const SCH_PLOT_OPTS& aPlotOpts,
 
     if( aReporter )
         aReporter->ReportTail( _( "Done." ), RPT_SEVERITY_INFO );
-
-    restoreEnvironment( nullptr, oldsheetpath );
 }
 
 
@@ -518,22 +549,29 @@ void SCH_PLOTTER::createSVGFiles( const SCH_PLOT_OPTS& aPlotOpts,
     wxString       msg;
     SCH_SHEET_PATH oldsheetpath = m_schematic->CurrentSheet();
     SCH_SHEET_LIST sheetList;
+    PLOT_CONTEXT   raii( nullptr, m_schematic );
 
-    if( aPlotOpts.m_plotAll )
+    if( aPlotOpts.m_plotAll || aPlotOpts.m_plotPages.size() > 0 )
     {
         sheetList.BuildSheetList( &m_schematic->Root(), true );
-        sheetList.SortByPageNumbers();
+        sheetList.SortByHierarchicalPageNumbers();
 
         // remove the non-selected pages if we are in plot pages mode
         if( aPlotOpts.m_plotPages.size() > 0 )
-        {
             sheetList.TrimToPageNumbers( aPlotOpts.m_plotPages );
-        }
     }
     else
     {
         // in Eeschema, this prints the current page
         sheetList.push_back( aPlotOpts.m_sheetPath.value_or( m_schematic->CurrentSheet() ) );
+    }
+
+    if( sheetList.empty() )
+    {
+        if( aReporter )
+            aReporter->Report( _( "No sheets to plot." ), RPT_SEVERITY_ERROR );
+
+        return;
     }
 
     for( unsigned i = 0; i < sheetList.size(); i++ )
@@ -567,8 +605,7 @@ void SCH_PLOTTER::createSVGFiles( const SCH_PLOT_OPTS& aPlotOpts,
                 fname.Replace( "/", "_" );
                 fname.Replace( "\\", "_" );
 
-                plotFileName = createPlotFileName( aPlotOpts, fname,
-                                                   SVG_PLOTTER::GetDefaultFileExtension(),
+                plotFileName = createPlotFileName( aPlotOpts, fname, SVG_PLOTTER::GetDefaultFileExtension(),
                                                    aReporter );
             }
 
@@ -578,8 +615,7 @@ void SCH_PLOTTER::createSVGFiles( const SCH_PLOT_OPTS& aPlotOpts,
             if( !plotFileName.IsOk() )
                 return;
 
-            bool success = plotOneSheetSVG( plotFileName.GetFullPath(), screen, aRenderSettings,
-                                            aPlotOpts );
+            bool success = plotOneSheetSVG( plotFileName.GetFullPath(), screen, aRenderSettings, aPlotOpts );
 
             if( !success )
             {
@@ -609,16 +645,13 @@ void SCH_PLOTTER::createSVGFiles( const SCH_PLOT_OPTS& aPlotOpts,
                 msg.Printf( wxT( "SVG Plotter exception: %s" ), e.What() );
                 aReporter->Report( msg, RPT_SEVERITY_ERROR );
             }
+
             break;
         }
     }
 
     if( aReporter )
-    {
         aReporter->ReportTail( _( "Done." ), RPT_SEVERITY_INFO );
-    }
-
-    restoreEnvironment( nullptr, oldsheetpath );
 }
 
 
@@ -715,11 +748,12 @@ void SCH_PLOTTER::createPNGFiles( const SCH_PLOT_OPTS& aPlotOpts,
     wxString       msg;
     SCH_SHEET_PATH oldsheetpath = m_schematic->CurrentSheet();
     SCH_SHEET_LIST sheetList;
+    PLOT_CONTEXT   raii( nullptr, m_schematic );
 
-    if( aPlotOpts.m_plotAll )
+    if( aPlotOpts.m_plotAll || aPlotOpts.m_plotPages.size() > 0 )
     {
         sheetList.BuildSheetList( &m_schematic->Root(), true );
-        sheetList.SortByPageNumbers();
+        sheetList.SortByHierarchicalPageNumbers();
 
         if( aPlotOpts.m_plotPages.size() > 0 )
             sheetList.TrimToPageNumbers( aPlotOpts.m_plotPages );
@@ -727,6 +761,14 @@ void SCH_PLOTTER::createPNGFiles( const SCH_PLOT_OPTS& aPlotOpts,
     else
     {
         sheetList.push_back( aPlotOpts.m_sheetPath.value_or( m_schematic->CurrentSheet() ) );
+    }
+
+    if( sheetList.empty() )
+    {
+        if( aReporter )
+            aReporter->Report( _( "No sheets to plot." ), RPT_SEVERITY_ERROR );
+
+        return;
     }
 
     for( unsigned i = 0; i < sheetList.size(); i++ )
@@ -757,8 +799,7 @@ void SCH_PLOTTER::createPNGFiles( const SCH_PLOT_OPTS& aPlotOpts,
                 fname.Replace( "/", "_" );
                 fname.Replace( "\\", "_" );
 
-                plotFileName = createPlotFileName( aPlotOpts, fname,
-                                                   PNG_PLOTTER::GetDefaultFileExtension(),
+                plotFileName = createPlotFileName( aPlotOpts, fname, PNG_PLOTTER::GetDefaultFileExtension(),
                                                    aReporter );
             }
 
@@ -802,8 +843,6 @@ void SCH_PLOTTER::createPNGFiles( const SCH_PLOT_OPTS& aPlotOpts,
 
     if( aReporter )
         aReporter->ReportTail( _( "Done." ), RPT_SEVERITY_INFO );
-
-    restoreEnvironment( nullptr, oldsheetpath );
 }
 
 
@@ -902,10 +941,10 @@ bool SCH_PLOTTER::plotOneSheetPNG( const wxString& aFileName, SCH_SCREEN* aScree
 }
 
 
-void SCH_PLOTTER::createDXFFiles( const SCH_PLOT_OPTS& aPlotOpts,
-                                  SCH_RENDER_SETTINGS* aRenderSettings, REPORTER* aReporter )
+void SCH_PLOTTER::createDXFFiles( const SCH_PLOT_OPTS& aPlotOpts, SCH_RENDER_SETTINGS* aRenderSettings,
+                                  REPORTER* aReporter )
 {
-    SCH_SHEET_PATH  oldsheetpath = m_schematic->CurrentSheet();
+    PLOT_CONTEXT raii( nullptr, m_schematic );
 
     /* When printing all pages, the printed page is not the current page.  In complex hierarchies,
      * we must update symbol references and other parameters in the given printed SCH_SCREEN,
@@ -914,10 +953,10 @@ void SCH_PLOTTER::createDXFFiles( const SCH_PLOT_OPTS& aPlotOpts,
      */
     SCH_SHEET_LIST sheetList;
 
-    if( aPlotOpts.m_plotAll )
+    if( aPlotOpts.m_plotAll || aPlotOpts.m_plotPages.size() > 0 )
     {
         sheetList.BuildSheetList( &m_schematic->Root(), true );
-        sheetList.SortByPageNumbers();
+        sheetList.SortByHierarchicalPageNumbers();
 
         // remove the non-selected pages if we are in plot pages mode
         if( aPlotOpts.m_plotPages.size() > 0 )
@@ -927,6 +966,14 @@ void SCH_PLOTTER::createDXFFiles( const SCH_PLOT_OPTS& aPlotOpts,
     {
         // in Eeschema, this prints the current page
         sheetList.push_back( aPlotOpts.m_sheetPath.value_or( m_schematic->CurrentSheet() ) );
+    }
+
+    if( sheetList.empty() )
+    {
+        if( aReporter )
+            aReporter->Report( _( "No sheets to plot." ), RPT_SEVERITY_ERROR );
+
+        return;
     }
 
     for( unsigned i = 0; i < sheetList.size(); i++ )
@@ -960,8 +1007,7 @@ void SCH_PLOTTER::createDXFFiles( const SCH_PLOT_OPTS& aPlotOpts,
                 fname.Replace( "/", "_" );
                 fname.Replace( "\\", "_" );
 
-                plotFileName = createPlotFileName( aPlotOpts, fname,
-                                                   DXF_PLOTTER::GetDefaultFileExtension(),
+                plotFileName = createPlotFileName( aPlotOpts, fname, DXF_PLOTTER::GetDefaultFileExtension(),
                                                    aReporter );
             }
 
@@ -1000,17 +1046,12 @@ void SCH_PLOTTER::createDXFFiles( const SCH_PLOT_OPTS& aPlotOpts,
                 aReporter->Report( msg, RPT_SEVERITY_ERROR );
             }
 
-            m_schematic->SetCurrentSheet( oldsheetpath );
-            m_schematic->CurrentSheet().UpdateAllScreenReferences();
-            m_schematic->SetSheetNumberAndCount();
             return;
         }
     }
 
     if( aReporter )
         aReporter->ReportTail( _( "Done." ), RPT_SEVERITY_INFO );
-
-    restoreEnvironment( nullptr, oldsheetpath );
 }
 
 
@@ -1066,21 +1107,6 @@ bool SCH_PLOTTER::plotOneSheetDXF( const wxString& aFileName, SCH_SCREEN* aScree
     delete plotter;
 
     return true;
-}
-
-
-void SCH_PLOTTER::restoreEnvironment( PDF_PLOTTER* aPlotter, SCH_SHEET_PATH& aOldsheetpath )
-{
-    if( aPlotter )
-    {
-        aPlotter->EndPlot();
-        delete aPlotter;
-    }
-
-    // Restore the initial sheet
-    m_schematic->SetCurrentSheet( aOldsheetpath );
-    m_schematic->CurrentSheet().UpdateAllScreenReferences();
-    m_schematic->SetSheetNumberAndCount();
 }
 
 

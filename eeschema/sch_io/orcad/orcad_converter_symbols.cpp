@@ -80,14 +80,20 @@ static std::string normalizedPath( std::string aPath )
 }
 
 
-static bool propertyNamesEqual( const std::string& aLeft, const std::string& aRight )
+static LIB_ID libIdFor( const std::string& aLibName )
 {
-    return aLeft.size() == aRight.size()
-           && std::equal( aLeft.begin(), aLeft.end(), aRight.begin(),
-                          []( unsigned char a, unsigned char b )
-                          {
-                              return std::tolower( a ) == std::tolower( b );
-                          } );
+    return LIB_ID( wxString::FromUTF8( ORCAD_CONVERTER::LIB_NICK ),
+                   LIB_ID::FixIllegalChars( FromOrcadString( aLibName ), false ).wx_str() );
+}
+
+
+static bool hasDualRowDescription( const std::map<std::string, std::string>& aProps )
+{
+    return std::any_of( aProps.begin(), aProps.end(),
+                        []( const auto& aProperty )
+                        {
+                            return OrcadLower( aProperty.second ).find( "dual row" ) != std::string::npos;
+                        } );
 }
 
 
@@ -116,9 +122,8 @@ bool OrcadDisplayPropVisible( const ORCAD_DISPLAY_PROP& aProp )
 {
     // Capture renders simulation results through mutually exclusive UI layers.
     // Their display mode describes text within that layer, not persistent visibility.
-    if( propertyNamesEqual( aProp.name, "BiasValue Power" )
-        || propertyNamesEqual( aProp.name, "BiasValue Current" )
-        || propertyNamesEqual( aProp.name, "BiasValue Voltage" ) )
+    if( OrcadIEquals( aProp.name, "BiasValue Power" ) || OrcadIEquals( aProp.name, "BiasValue Current" )
+        || OrcadIEquals( aProp.name, "BiasValue Voltage" ) )
     {
         return false;
     }
@@ -414,16 +419,44 @@ bool isBookkeepingProp( const std::string& aName )
 {
     static const char* const skipped[] = {
         "Part Reference",      "Reference",           "Name",           "Graphic",        "Implementation",
-        "Implementation Type", "Source Library",      "Source Package", "Source Part",
+        "Implementation Type", "Source Library",      "Source Package", "Source Part",    "Power Pins Visible",
     };
 
     for( const char* name : skipped )
     {
-        if( propertyNamesEqual( aName, name ) )
+        if( OrcadIEquals( aName, name ) )
             return true;
     }
 
     return false;
+}
+
+
+/// Field a placed-part property becomes, as placeSymbolFields() names it; empty when it is no field
+wxString propertyFieldName( const std::string& aProperty )
+{
+    if( OrcadIEquals( aProperty, "Part Reference" ) || OrcadIEquals( aProperty, "Reference" )
+        || isBookkeepingProp( aProperty ) )
+    {
+        return wxEmptyString;
+    }
+
+    if( OrcadIEquals( aProperty, "Value" ) )
+        return GetDefaultFieldName( FIELD_T::VALUE, UNTRANSLATED );
+
+    if( OrcadIEquals( aProperty, "Description" ) )
+        return GetDefaultFieldName( FIELD_T::DESCRIPTION, UNTRANSLATED );
+
+    if( OrcadIEquals( aProperty, "Datasheet" ) )
+        return GetDefaultFieldName( FIELD_T::DATASHEET, UNTRANSLATED );
+
+    if( OrcadIEquals( aProperty, "PCB Footprint" ) )
+        return wxS( "OrCAD Footprint" );
+
+    if( OrcadIEquals( aProperty, "Footprint" ) )
+        return wxS( "OrCAD Footprint Property" );
+
+    return FromOrcadString( aProperty );
 }
 
 
@@ -444,50 +477,38 @@ size_t symbolPinIndex( const ORCAD_SYMBOL_DEF& aSymbol, const ORCAD_PIN_INST& aP
 }
 
 
-bool symbolPinsMatch( const ORCAD_SYMBOL_DEF& aSymbol, const ORCAD_PLACED_INSTANCE& aInstance )
+// Sequential matching pairs pins by order; otherwise by their recorded symbol pin index
+std::optional<int64_t> pinDisplacement( const ORCAD_SYMBOL_DEF& aSymbol, const ORCAD_PLACED_INSTANCE& aInstance,
+                                        bool aSequential )
 {
-    if( aInstance.pins.size() > aSymbol.pins.size() )
-        return false;
+    if( aSequential ? aInstance.pins.size() != aSymbol.pins.size() : aInstance.pins.size() > aSymbol.pins.size() )
+        return std::nullopt;
 
     ORCAD_BBOX box = aSymbol.bbox.value_or( ORCAD_BBOX() );
     int        orient = OrcadOrientOf( aInstance.rotation, aInstance.mirror );
+    int64_t    displacement = 0;
 
     for( size_t i = 0; i < aInstance.pins.size(); ++i )
     {
-        size_t symbolPin = symbolPinIndex( aSymbol, aInstance.pins[i], i );
+        size_t symbolPin = aSequential ? i : symbolPinIndex( aSymbol, aInstance.pins[i], i );
 
         if( symbolPin >= aSymbol.pins.size() )
-            return false;
+            return std::nullopt;
 
         VECTOR2I point = OrcadTransformPoint( orient, box.x2 - box.x1, box.y2 - box.y1, aInstance.x, aInstance.y,
                                               aSymbol.pins[symbolPin].hotptX, aSymbol.pins[symbolPin].hotptY );
-
-        if( point.x != aInstance.pins[i].x || point.y != aInstance.pins[i].y )
-            return false;
+        displacement += std::abs( static_cast<int64_t>( point.x ) - aInstance.pins[i].x );
+        displacement += std::abs( static_cast<int64_t>( point.y ) - aInstance.pins[i].y );
     }
 
-    return true;
+    return displacement;
 }
 
 
-bool sequentialSymbolPinsMatch( const ORCAD_SYMBOL_DEF& aSymbol, const ORCAD_PLACED_INSTANCE& aInstance )
+bool symbolPinsMatch( const ORCAD_SYMBOL_DEF& aSymbol, const ORCAD_PLACED_INSTANCE& aInstance,
+                      bool aSequential = false )
 {
-    if( aInstance.pins.size() != aSymbol.pins.size() )
-        return false;
-
-    ORCAD_BBOX box = aSymbol.bbox.value_or( ORCAD_BBOX() );
-    int        orient = OrcadOrientOf( aInstance.rotation, aInstance.mirror );
-
-    for( size_t i = 0; i < aInstance.pins.size(); ++i )
-    {
-        VECTOR2I point = OrcadTransformPoint( orient, box.x2 - box.x1, box.y2 - box.y1, aInstance.x, aInstance.y,
-                                              aSymbol.pins[i].hotptX, aSymbol.pins[i].hotptY );
-
-        if( point.x != aInstance.pins[i].x || point.y != aInstance.pins[i].y )
-            return false;
-    }
-
-    return true;
+    return pinDisplacement( aSymbol, aInstance, aSequential ) == 0;
 }
 
 
@@ -519,32 +540,6 @@ bool symbolGeometryMatches( const ORCAD_SYMBOL_DEF& aLeft, const ORCAD_SYMBOL_DE
 }
 
 
-std::optional<int64_t> symbolPinDisplacement( const ORCAD_SYMBOL_DEF& aSymbol, const ORCAD_PLACED_INSTANCE& aInstance )
-{
-    if( aInstance.pins.size() > aSymbol.pins.size() )
-        return std::nullopt;
-
-    ORCAD_BBOX box = aSymbol.bbox.value_or( ORCAD_BBOX() );
-    int        orient = OrcadOrientOf( aInstance.rotation, aInstance.mirror );
-    int64_t    displacement = 0;
-
-    for( size_t i = 0; i < aInstance.pins.size(); ++i )
-    {
-        size_t symbolPin = symbolPinIndex( aSymbol, aInstance.pins[i], i );
-
-        if( symbolPin >= aSymbol.pins.size() )
-            return std::nullopt;
-
-        VECTOR2I point = OrcadTransformPoint( orient, box.x2 - box.x1, box.y2 - box.y1, aInstance.x, aInstance.y,
-                                              aSymbol.pins[symbolPin].hotptX, aSymbol.pins[symbolPin].hotptY );
-        displacement += std::abs( static_cast<int64_t>( point.x ) - aInstance.pins[i].x );
-        displacement += std::abs( static_cast<int64_t>( point.y ) - aInstance.pins[i].y );
-    }
-
-    return displacement;
-}
-
-
 ORCAD_SYMBOL_DEF symbolVariantForPlacedPins( const ORCAD_SYMBOL_DEF& aSymbol, const ORCAD_PLACED_INSTANCE& aInstance )
 {
     ORCAD_SYMBOL_DEF fitted = aSymbol;
@@ -556,11 +551,16 @@ ORCAD_SYMBOL_DEF symbolVariantForPlacedPins( const ORCAD_SYMBOL_DEF& aSymbol, co
 
     ORCAD_BBOX                            box = fitted.bbox.value_or( ORCAD_BBOX() );
     int                                   orient = OrcadOrientOf( aInstance.rotation, aInstance.mirror );
-    const ORCAD_ORIENT_ENTRY&             transform = ORCAD_ORIENT_TABLE[orient];
     VECTOR2I                              offset = OrcadOrientOffset( orient, box.x2 - box.x1, box.y2 - box.y1 );
-    int                                   determinant = transform.a * transform.d - transform.b * transform.c;
     std::map<std::pair<int, int>, size_t> targetCounts;
     std::map<std::pair<int, int>, std::set<size_t>> targetPins;
+
+    auto targetOf = [&]( const ORCAD_PIN_INST& aPin )
+    {
+        ORCAD_POINT local =
+                OrcadInverseOrient( orient, aPin.x - aInstance.x - offset.x, aPin.y - aInstance.y - offset.y );
+        return std::pair{ local.x, local.y };
+    };
 
     for( size_t i = 0; i < aInstance.pins.size(); ++i )
     {
@@ -569,12 +569,9 @@ ORCAD_SYMBOL_DEF symbolVariantForPlacedPins( const ORCAD_SYMBOL_DEF& aSymbol, co
         if( symbolPin >= fitted.pins.size() )
             continue;
 
-        int x = aInstance.pins[i].x - aInstance.x - offset.x;
-        int y = aInstance.pins[i].y - aInstance.y - offset.y;
-        int hotptX = ( transform.d * x - transform.b * y ) / determinant;
-        int hotptY = ( -transform.c * x + transform.a * y ) / determinant;
-        ++targetCounts[{ hotptX, hotptY }];
-        targetPins[{ hotptX, hotptY }].insert( symbolPin );
+        auto target = targetOf( aInstance.pins[i] );
+        ++targetCounts[target];
+        targetPins[target].insert( symbolPin );
     }
 
     std::set<std::pair<int, int>> handledStackedTargets;
@@ -586,11 +583,9 @@ ORCAD_SYMBOL_DEF symbolVariantForPlacedPins( const ORCAD_SYMBOL_DEF& aSymbol, co
         if( symbolPin >= fitted.pins.size() )
             continue;
 
-        int                     x = aInstance.pins[i].x - aInstance.x - offset.x;
-        int                     y = aInstance.pins[i].y - aInstance.y - offset.y;
-        int                     hotptX = ( transform.d * x - transform.b * y ) / determinant;
-        int                     hotptY = ( -transform.c * x + transform.a * y ) / determinant;
-        auto                    target = std::pair{ hotptX, hotptY };
+        auto                    target = targetOf( aInstance.pins[i] );
+        int                     hotptX = target.first;
+        int                     hotptY = target.second;
         const std::set<size_t>& stackedPins = targetPins.at( target );
         bool                    stackedTarget = targetCounts.at( target ) > 1;
 
@@ -637,6 +632,48 @@ ORCAD_SYMBOL_DEF symbolVariantForPlacedPins( const ORCAD_SYMBOL_DEF& aSymbol, co
     return fitted;
 }
 
+
+/// Split "<base><unit>.<view>", e.g. "74LS00A.Normal" over base "74LS00", into unit and view
+std::pair<std::string, std::string> splitCacheName( const std::string& aName, const std::string& aBase )
+{
+    std::string tail = aName.compare( 0, aBase.size(), aBase ) == 0 ? aName.substr( aBase.size() ) : aName;
+    size_t      dot = tail.find( '.' );
+
+    return { tail.substr( 0, dot ), dot == std::string::npos ? std::string() : tail.substr( dot + 1 ) };
+}
+
+
+/// A "#" index keeps unnamed units of a multi-device package distinct and sortable
+std::string packageUnitLetter( const ORCAD_PACKAGE& aPackage, size_t aIndex )
+{
+    if( aIndex < aPackage.devices.size() && !aPackage.devices[aIndex].unitRef.empty() )
+        return aPackage.devices[aIndex].unitRef;
+
+    if( aPackage.devices.size() < 2 )
+        return {};
+
+    std::string index = std::to_string( aIndex );
+    return "#" + std::string( 10 - std::min<size_t>( 10, index.size() ), '0' ) + index;
+}
+
+
+std::vector<bool> nonblankPinNumbers( const std::vector<std::string>& aNumbers )
+{
+    std::vector<bool> visible;
+    visible.reserve( aNumbers.size() );
+
+    for( const std::string& number : aNumbers )
+        visible.push_back( !number.empty() );
+
+    return visible;
+}
+
+
+bool unitLetterLess( const std::string& aLeft, const std::string& aRight )
+{
+    return StrNumCmp( wxString::FromUTF8( aLeft ), wxString::FromUTF8( aRight ) ) < 0;
+}
+
 } // namespace
 
 
@@ -651,20 +688,12 @@ void ORCAD_CONVERTER::prepareSymbols()
     // not root page list.
     std::vector<const ORCAD_RAW_PAGE*> allPages;
 
-    for( const ORCAD_RAW_PAGE& page : m_design.pages )
-        allPages.push_back( &page );
-
-    for( const auto& [folder, pages] : m_design.childFolderPages )
-    {
-        for( const ORCAD_RAW_PAGE& page : pages )
-            allPages.push_back( &page );
-    }
-
-    for( const auto& [folder, pages] : m_design.unreferencedFolderPages )
-    {
-        for( const ORCAD_RAW_PAGE& page : pages )
-            allPages.push_back( &page );
-    }
+    forEachDesignPage(
+            [&]( const ORCAD_RAW_PAGE& aPage )
+            {
+                allPages.push_back( &aPage );
+            },
+            true );
 
     for( const ORCAD_RAW_PAGE* page : allPages )
     {
@@ -731,7 +760,7 @@ void ORCAD_CONVERTER::prepareSymbols()
             {
                 for( const ORCAD_SYMBOL_DEF* candidate : candidates )
                 {
-                    if( !sequentialSymbolPinsMatch( *candidate, inst ) )
+                    if( !symbolPinsMatch( *candidate, inst, true ) )
                         continue;
 
                     ORCAD_SYMBOL_DEF fitted = *candidate;
@@ -760,8 +789,9 @@ void ORCAD_CONVERTER::prepareSymbols()
                 std::string sourceLibrary = sourceProperty != inst.props.end() ? sourceProperty->second
                                                                               : inst.sourceLibrary;
 
-                bool sourceMatchedGraphics = !sourceLibrary.empty() && !matching->sourceLib.empty()
-                                             && normalizedPath( sourceLibrary ) == normalizedPath( matching->sourceLib );
+                bool sourceMatchedGraphics =
+                        !sourceLibrary.empty() && !matching->sourceLib.empty()
+                        && normalizedPath( sourceLibrary ) == normalizedPath( matching->sourceLib );
 
                 if( matching != &symbol->second && !sourceMatchedGraphics
                     && std::none_of( symbol->second.variants.begin(), symbol->second.variants.end(),
@@ -790,7 +820,7 @@ void ORCAD_CONVERTER::prepareSymbols()
 
             for( const ORCAD_SYMBOL_DEF* candidate : candidates )
             {
-                std::optional<int64_t> displacement = symbolPinDisplacement( *candidate, inst );
+                std::optional<int64_t> displacement = pinDisplacement( *candidate, inst, false );
 
                 if( displacement && *displacement < bestDisplacement )
                 {
@@ -824,46 +854,110 @@ void ORCAD_CONVERTER::prepareSymbols()
 }
 
 
-std::vector<LIB_SYMBOL*> ORCAD_CONVERTER::BuildSymbolLibrary()
+ORCAD_CONVERTER::LIB_ENTRY ORCAD_CONVERTER::buildPackageEntry( const ORCAD_PACKAGE& aPackage ) const
 {
-    // .OLB has same Library/Cache/Packages streams but no pages, so lib entries built
-    // directly from cache defs (grouped by base name, Normal view) w/ package data.
-    auto stripView = []( const std::string& aName ) -> std::string
+    LIB_ENTRY entry;
+    entry.name = SymbolId( aPackage.name );
+    entry.refPrefix = aPackage.refDes.empty() ? "U" : aPackage.refDes;
+    entry.footprint = aPackage.pcbFootprint;
+
+    // Heterogeneous units are cached as "<package><unit>.<view>", homogeneous ones share "<package>.<view>"
+    auto view = [&]( const std::string& aUnit, const char* aView ) -> const ORCAD_SYMBOL_DEF*
     {
-        size_t dot = aName.rfind( '.' );
-
-        if( dot != std::string::npos )
+        for( const std::string& name : { aPackage.name + aUnit + "." + aView, aPackage.name + "." + aView } )
         {
-            std::string view = aName.substr( dot + 1 );
+            auto it = m_design.symbols.find( name );
 
-            if( view == "Normal" || view == "Convert" )
-                return aName.substr( 0, dot );
+            if( it != m_design.symbols.end() && it->second.typeId == ORCAD_ST_LIBRARY_PART )
+                return &it->second;
         }
 
-        return aName;
+        return nullptr;
     };
 
-    for( auto& [cacheName, def] : m_design.symbols )
+    for( size_t i = 0; i < aPackage.devices.size(); ++i )
     {
-        // Only drawable library parts and power symbols become library items
-        if( def.typeId != ORCAD_ST_LIBRARY_PART && def.typeId != ORCAD_ST_GLOBAL_SYMBOL )
+        const ORCAD_DEVICE&     device = aPackage.devices[i];
+        const ORCAD_SYMBOL_DEF* normal = view( device.unitRef, "Normal" );
+        const ORCAD_SYMBOL_DEF* convert = view( device.unitRef, "Convert" );
+        std::string             letter = packageUnitLetter( aPackage, i );
+
+        if( !normal )
+            std::swap( normal, convert );
+
+        if( !normal || std::any_of( entry.units.begin(), entry.units.end(),
+                                    [&]( const UNIT_INFO& aUnit )
+                                    {
+                                        return aUnit.letter == letter;
+                                    } ) )
+        {
+            continue;
+        }
+
+        UNIT_INFO unit;
+        unit.letter = letter;
+        unit.symbol = normal;
+        unit.convert = convert;
+        unit.pinNumbers = device.pinNumbers;
+        unit.pinNumberVisible = nonblankPinNumbers( device.pinNumbers );
+        unit.pinIgnore = device.pinIgnore;
+        entry.units.push_back( std::move( unit ) );
+    }
+
+    std::stable_sort( entry.units.begin(), entry.units.end(),
+                      []( const UNIT_INFO& a, const UNIT_INFO& b )
+                      {
+                          return unitLetterLess( a.letter, b.letter );
+                      } );
+
+    return entry;
+}
+
+
+std::vector<LIB_SYMBOL*> ORCAD_CONVERTER::BuildSymbolLibrary()
+{
+    std::set<const ORCAD_SYMBOL_DEF*> packaged;
+
+    for( const auto& [name, package] : m_design.packages )
+    {
+        LIB_ENTRY entry = buildPackageEntry( package );
+
+        if( entry.units.empty() || m_libSymbols.count( entry.name ) )
             continue;
 
-        bool        convertView = cacheName.size() > 8 && cacheName.compare( cacheName.size() - 8, 8, ".Convert" ) == 0;
-        std::string base = stripView( cacheName );
+        for( const UNIT_INFO& unit : entry.units )
+            packaged.insert( { unit.symbol, unit.convert } );
+
+        m_libSymbols.emplace( entry.name, std::move( entry ) );
+    }
+
+    // Power symbols and parts without a package become single-unit items
+    for( const auto& [cacheName, def] : m_design.symbols )
+    {
+        if( packaged.count( &def )
+            || ( def.typeId != ORCAD_ST_LIBRARY_PART && def.typeId != ORCAD_ST_GLOBAL_SYMBOL ) )
+        {
+            continue;
+        }
+
+        size_t      dot = cacheName.rfind( '.' );
+        std::string view = dot == std::string::npos ? std::string() : cacheName.substr( dot + 1 );
+        std::string base = view == "Normal" || view == "Convert" ? cacheName.substr( 0, dot ) : cacheName;
+        auto        normal = m_design.symbols.find( base + ".Normal" );
+        auto        convert = m_design.symbols.find( base + ".Convert" );
+
+        if( view == "Convert" && normal != m_design.symbols.end() && !packaged.count( &normal->second ) )
+            continue;
+
         std::string libname = SymbolId( base );
 
-        LIB_ENTRY& ls = m_libSymbols[libname];
-
-        // First (Normal) view wins; .Convert is DeMorgan alternate sharing pin map,
-        // not separate item.
-        if( !ls.name.empty() )
+        if( m_libSymbols.count( libname ) )
+        {
+            warn( wxString::Format( _( "The symbol '%s' duplicates the name of another library item and was "
+                                       "left out of the library." ),
+                                    FromOrcadString( cacheName ) ) );
             continue;
-
-        if( convertView && m_design.symbols.count( base + ".Normal" ) )
-            continue;
-
-        ls.name = libname;
+        }
 
         std::string          bare = base.substr( 0, base.find( '.' ) );
         const ORCAD_PACKAGE* pkg = nullptr;
@@ -879,6 +973,8 @@ std::vector<LIB_SYMBOL*> ORCAD_CONVERTER::BuildSymbolLibrary()
             }
         }
 
+        LIB_ENTRY& ls = m_libSymbols[libname];
+        ls.name = libname;
         ls.isPower = def.typeId == ORCAD_ST_GLOBAL_SYMBOL;
         ls.refPrefix = ( pkg && !pkg->refDes.empty() ) ? pkg->refDes : ( ls.isPower ? "#PWR" : "U" );
         ls.footprint = pkg ? pkg->pcbFootprint : "";
@@ -886,22 +982,21 @@ std::vector<LIB_SYMBOL*> ORCAD_CONVERTER::BuildSymbolLibrary()
         if( ls.isPower )
             ls.powerNet = base; // power value = net name (symbol base)
 
-        std::vector<std::string> pinNumbers;
-        std::vector<bool>        pinNumberVisible;
-        std::vector<bool>        pinIgnore;
+        UNIT_INFO unit;
+        unit.letter = "A";
+        unit.symbol = &def;
+
+        if( view == "Normal" && convert != m_design.symbols.end() && convert->second.typeId == def.typeId )
+            unit.convert = &convert->second;
 
         if( pkg && !pkg->devices.empty() )
         {
-            pinNumbers = pkg->devices.front().pinNumbers;
-            pinNumberVisible.reserve( pinNumbers.size() );
-
-            for( const std::string& number : pinNumbers )
-                pinNumberVisible.push_back( !number.empty() );
-
-            pinIgnore = pkg->devices.front().pinIgnore;
+            unit.pinNumbers = pkg->devices.front().pinNumbers;
+            unit.pinNumberVisible = nonblankPinNumbers( unit.pinNumbers );
+            unit.pinIgnore = pkg->devices.front().pinIgnore;
         }
 
-        ls.units.push_back( { "A", &def, pinNumbers, pinNumberVisible, pinIgnore, {}, {} } );
+        ls.units.push_back( std::move( unit ) );
     }
 
     computeFontBaseline();
@@ -946,13 +1041,11 @@ ORCAD_CONVERTER::synthesizeSymbol( const std::string&                           
         }
     }
 
-    int                       ori = OrcadOrientOf( ref->rotation, ref->mirror );
-    const ORCAD_ORIENT_ENTRY& e = ORCAD_ORIENT_TABLE[ori];
-    int                       det = e.a * e.d - e.b * e.c; // always +/-1
+    int ori = OrcadOrientOf( ref->rotation, ref->mirror );
 
-    auto inv = [&]( int aX, int aY ) -> ORCAD_POINT
+    auto inv = [&]( int aX, int aY )
     {
-        return { ( e.d * aX - e.b * aY ) / det, ( -e.c * aX + e.a * aY ) / det };
+        return OrcadInverseOrient( ori, aX, aY );
     };
 
     // Instance-local pin positions from T0x10 records.
@@ -1140,20 +1233,6 @@ ORCAD_CONVERTER::synthesizeSymbol( const std::string&                           
     rect.y2 = by2 - s.y;
     sym.primitives.push_back( rect );
 
-    auto hasDualRowDescription = []( const std::map<std::string, std::string>& aProps )
-    {
-        return std::any_of( aProps.begin(), aProps.end(),
-                            []( const auto& aProperty )
-                            {
-                                std::string value = aProperty.second;
-                                std::transform( value.begin(), value.end(), value.begin(),
-                                                []( unsigned char c )
-                                                {
-                                                    return static_cast<char>( std::toupper( c ) );
-                                                } );
-                                return value.find( "DUAL ROW" ) != std::string::npos;
-                            } );
-    };
     bool dualRowConnector = hasDualRowDescription( ref->props );
     auto package = m_design.packages.find( ref->sourcePackage );
 
@@ -1208,21 +1287,11 @@ std::string ORCAD_CONVERTER::unitLetter( const ORCAD_PLACED_INSTANCE& aInst ) co
                        : !aInst.sourcePackage.empty()                                         ? aInst.sourcePackage
                                                       : v.substr( 0, v.find( '.' ) );
 
-    std::string tail = ( v.compare( 0, base.size(), base ) == 0 ) ? v.substr( base.size() ) : v;
-
-    size_t      dot = tail.find( '.' );
-    std::string unit = tail.substr( 0, dot );
-    std::string view = dot == std::string::npos ? std::string() : tail.substr( dot + 1 );
+    auto [unit, view] = splitCacheName( v, base );
 
     if( !view.empty() )
     {
-        std::string lower = view;
-
-        std::transform( lower.begin(), lower.end(), lower.begin(),
-                        []( unsigned char c )
-                        {
-                            return (char) std::tolower( c );
-                        } );
+        std::string lower = OrcadLower( view );
 
         // Non-Normal views are DeMorgan alternates with own body graphics, so view
         // name stays part of unit discriminator.
@@ -1452,7 +1521,9 @@ std::map<std::string, std::string> ORCAD_CONVERTER::effectiveProps( const ORCAD_
         {
             auto existing = std::find_if( props.begin(), props.end(),
                                           [&]( const auto& aProperty )
-                                          { return propertyNamesEqual( aProperty.first, name ); } );
+                                          {
+                                              return OrcadIEquals( aProperty.first, name );
+                                          } );
 
             if( existing != props.end() )
             {
@@ -1469,11 +1540,11 @@ std::map<std::string, std::string> ORCAD_CONVERTER::effectiveProps( const ORCAD_
 
     overlay( aInst.props, true );
 
-    if( m_currentOccProps )
+    if( m_scope.occ )
     {
-        auto occurrence = m_currentOccProps->find( aInst.dbId );
+        auto occurrence = m_scope.occ->partProps.find( aInst.dbId );
 
-        if( occurrence != m_currentOccProps->end() )
+        if( occurrence != m_scope.occ->partProps.end() )
             overlay( occurrence->second, true );
     }
 
@@ -1553,22 +1624,16 @@ std::pair<std::string, int> ORCAD_CONVERTER::libForInstance( const ORCAD_PLACED_
 
     size_t unitIndex = aInst.unitIndex;
 
-    if( m_currentOccUnitRefs )
+    if( m_scope.occ )
     {
-        auto unitRefIt = m_currentOccUnitRefs->find( aInst.dbId );
+        auto unitRefIt = m_scope.occ->partUnitRefs.find( aInst.dbId );
 
-        if( unitRefIt != m_currentOccUnitRefs->end() )
+        if( unitRefIt != m_scope.occ->partUnitRefs.end() )
             letter = unitRefIt->second;
     }
 
-    if( letter.empty() && pkg && unitIndex < pkg->devices.size() )
-        letter = pkg->devices[unitIndex].unitRef;
-
-    if( letter.empty() && pkg && pkg->devices.size() > 1 )
-    {
-        std::string index = std::to_string( unitIndex );
-        letter = "#" + std::string( 10 - std::min<size_t>( 10, index.size() ), '0' ) + index;
-    }
+    if( letter.empty() && pkg )
+        letter = packageUnitLetter( *pkg, unitIndex );
 
     // The placed instance selects the package device.  Occurrence hierarchy can
     // reassign its displayed unit letter without changing the physical pin map.
@@ -1612,17 +1677,16 @@ std::pair<std::string, int> ORCAD_CONVERTER::libForInstance( const ORCAD_PLACED_
     std::string normalizedSourceLibrary = normalizedPath( sourceLibrary );
     std::string normalizedPackageLibrary = pkg ? normalizedPath( pkg->sourceLib ) : std::string();
 
-    bool logicalNumbers = sym
-                          && std::all_of( sym->pins.begin(), sym->pins.end(),
-                                          []( const ORCAD_SYMBOL_PIN& aPin )
-                                          {
-                                              return !aPin.name.empty()
-                                                     && std::all_of( aPin.name.begin(), aPin.name.end(),
-                                                                     []( unsigned char c )
-                                                                     {
-                                                                         return std::isdigit( c );
-                                                                     } );
-                                          } );
+    bool logicalNumbers = std::all_of( sym->pins.begin(), sym->pins.end(),
+                                       []( const ORCAD_SYMBOL_PIN& aPin )
+                                       {
+                                           return !aPin.name.empty()
+                                                  && std::all_of( aPin.name.begin(), aPin.name.end(),
+                                                                  []( unsigned char c )
+                                                                  {
+                                                                      return std::isdigit( c );
+                                                                  } );
+                                       } );
     bool packagePinCountMatches = pkg
                                   && std::any_of( pkg->devices.begin(), pkg->devices.end(),
                                                   [&]( const ORCAD_DEVICE& aDevice )
@@ -1657,7 +1721,7 @@ std::pair<std::string, int> ORCAD_CONVERTER::libForInstance( const ORCAD_PLACED_
         }
     }
 
-    bool packageUsesLogicalPinNames = vi > 0 && sym && sym->pins.size() == 2 && pinNumbers.size() == 2;
+    bool packageUsesLogicalPinNames = vi > 0 && sym->pins.size() == 2 && pinNumbers.size() == 2;
 
     if( packageUsesLogicalPinNames )
     {
@@ -1666,8 +1730,7 @@ std::pair<std::string, int> ORCAD_CONVERTER::libForInstance( const ORCAD_PLACED_
             int position = sym->pins[pi].position >= 0 ? sym->pins[pi].position : static_cast<int>( pi );
 
             if( position < 0 || static_cast<size_t>( position ) >= pinNumbers.size()
-                || wxString::FromUTF8( pinNumbers[position] ).CmpNoCase( wxString::FromUTF8( sym->pins[pi].name ) )
-                           != 0 )
+                || !OrcadIEquals( pinNumbers[position], sym->pins[pi].name ) )
             {
                 packageUsesLogicalPinNames = false;
                 break;
@@ -1684,12 +1747,7 @@ std::pair<std::string, int> ORCAD_CONVERTER::libForInstance( const ORCAD_PLACED_
 
         for( const ORCAD_SYMBOL_PIN& pin : sym->pins )
         {
-            std::string name = pin.name;
-            std::transform( name.begin(), name.end(), name.begin(),
-                            []( unsigned char c )
-                            {
-                                return static_cast<char>( std::tolower( c ) );
-                            } );
+            std::string name = OrcadLower( pin.name );
             diodePins = diodePins && diodeNumbers.count( name );
         }
 
@@ -1698,31 +1756,11 @@ std::pair<std::string, int> ORCAD_CONVERTER::libForInstance( const ORCAD_PLACED_
             for( size_t pi = 0; pi < sym->pins.size(); ++pi )
             {
                 int         position = sym->pins[pi].position >= 0 ? sym->pins[pi].position : static_cast<int>( pi );
-                std::string name = sym->pins[pi].name;
-                std::transform( name.begin(), name.end(), name.begin(),
-                                []( unsigned char c )
-                                {
-                                    return static_cast<char>( std::tolower( c ) );
-                                } );
+                std::string name = OrcadLower( sym->pins[pi].name );
                 pinNumbers[position] = diodeNumbers.at( name );
             }
         }
     }
-
-    auto hasDualRowDescription = []( const std::map<std::string, std::string>& aProps )
-    {
-        return std::any_of( aProps.begin(), aProps.end(),
-                            []( const auto& aProperty )
-                            {
-                                std::string value = aProperty.second;
-                                std::transform( value.begin(), value.end(), value.begin(),
-                                                []( unsigned char c )
-                                                {
-                                                    return static_cast<char>( std::toupper( c ) );
-                                                } );
-                                return value.find( "DUAL ROW" ) != std::string::npos;
-                            } );
-    };
 
     bool blankPackageMap = !pinNumbers.empty()
                            && std::all_of( pinNumbers.begin(), pinNumbers.end(),
@@ -1730,14 +1768,10 @@ std::pair<std::string, int> ORCAD_CONVERTER::libForInstance( const ORCAD_PLACED_
                                            {
                                                return aNumber.empty();
                                            } );
-    std::vector<bool> pinNumberVisible;
-    pinNumberVisible.reserve( pinNumbers.size() );
-
-    for( const std::string& number : pinNumbers )
-        pinNumberVisible.push_back( !number.empty() );
+    std::vector<bool> pinNumberVisible = nonblankPinNumbers( pinNumbers );
 
     bool dualRowConnector =
-            sym && sym->synthesized && pinNumbers.size() == sym->pins.size() && pinNumbers.size() % 2 == 0
+            sym->synthesized && pinNumbers.size() == sym->pins.size() && pinNumbers.size() % 2 == 0
             && ( hasDualRowDescription( aInst.props ) || ( pkg && hasDualRowDescription( pkg->props ) ) );
 
     if( blankPackageMap && dualRowConnector )
@@ -1764,7 +1798,7 @@ std::pair<std::string, int> ORCAD_CONVERTER::libForInstance( const ORCAD_PLACED_
         }
     }
 
-    if( sym && !pinNumbers.empty() )
+    if( !pinNumbers.empty() )
     {
         for( size_t pi = 0; pi < sym->pins.size(); ++pi )
         {
@@ -1778,7 +1812,7 @@ std::pair<std::string, int> ORCAD_CONVERTER::libForInstance( const ORCAD_PLACED_
         }
     }
 
-    if( !normalizedSourceLibrary.ends_with( ".dsn" ) && sym && sym->pins.size() == 2 && logicalNumbers && pkg
+    if( !normalizedSourceLibrary.ends_with( ".dsn" ) && sym->pins.size() == 2 && logicalNumbers && pkg
         && pkg->devices.size() == 1 )
     {
         for( size_t pi = 0; pi < sym->pins.size(); ++pi )
@@ -1871,31 +1905,21 @@ std::pair<std::string, int> ORCAD_CONVERTER::libForInstance( const ORCAD_PLACED_
     if( vi )
         libnameBase += "_v" + std::to_string( vi + 1 );
 
-    std::string libname = libnameBase;
+    std::string libname =
+            uniqueLibName( libnameBase,
+                           [&]( const LIB_ENTRY& aLib )
+                           {
+                               auto unit = std::find_if( aLib.units.begin(), aLib.units.end(),
+                                                         [&]( const UNIT_INFO& aUnit )
+                                                         {
+                                                             return aUnit.letter == letter;
+                                                         } );
 
-    for( size_t discriminator = 2;; ++discriminator )
-    {
-        auto lib = m_libSymbols.find( libname );
-
-        if( lib == m_libSymbols.end() )
-            break;
-
-        auto unit = std::find_if( lib->second.units.begin(), lib->second.units.end(),
-                                  [&]( const UNIT_INFO& aUnit )
-                                  {
-                                      return aUnit.letter == letter;
-                                  } );
-
-            if( unit == lib->second.units.end()
-                 || ( unit->pinNumbers == pinNumbers && unit->pinNumberVisible == pinNumberVisible
-                      && unit->pinIgnore == pinIgnore && unit->pinOffsets == pinOffsets
-                      && unit->explicitPinNets == explicitPinNets ) )
-        {
-            break;
-        }
-
-        libname = libnameBase + "_pins" + std::to_string( discriminator );
-    }
+                               return unit == aLib.units.end()
+                                      || ( unit->pinNumbers == pinNumbers && unit->pinNumberVisible == pinNumberVisible
+                                           && unit->pinIgnore == pinIgnore && unit->pinOffsets == pinOffsets
+                                           && unit->explicitPinNets == explicitPinNets );
+                           } );
 
     LIB_ENTRY& ls = m_libSymbols[libname];
 
@@ -1933,7 +1957,7 @@ std::pair<std::string, int> ORCAD_CONVERTER::libForInstance( const ORCAD_PLACED_
         std::stable_sort( ls.units.begin(), ls.units.end(),
                           []( const UNIT_INFO& a, const UNIT_INFO& b )
                           {
-                              return StrNumCmp( wxString::FromUTF8( a.letter ), wxString::FromUTF8( b.letter ) ) < 0;
+                              return unitLetterLess( a.letter, b.letter );
                           } );
 
         for( size_t i = 0; i < ls.units.size(); ++i )
@@ -2028,7 +2052,7 @@ LIB_SYMBOL* ORCAD_CONVERTER::kicadSymbolFor( const std::string& aLibName )
     wxString name = LIB_ID::FixIllegalChars( FromOrcadString( entry.name ), false ).wx_str();
 
     std::unique_ptr<LIB_SYMBOL> symbol = std::make_unique<LIB_SYMBOL>( name );
-    symbol->SetLibId( LIB_ID( wxString::FromUTF8( LIB_NICK ), name ) );
+    symbol->SetLibId( libIdFor( entry.name ) );
     symbol->SetPinNameOffset( schMm( 0.254 ) );
 
     // Per-pin text requires the symbol-wide visibility switch. Pin text sizes retain individual visibility.
@@ -2064,14 +2088,13 @@ LIB_SYMBOL* ORCAD_CONVERTER::kicadSymbolFor( const std::string& aLibName )
                 if( !OrcadDisplayPropVisible( display ) )
                     continue;
 
-                showPinNames |= propertyNamesEqual( display.name, "Name" )
-                                || propertyNamesEqual( display.name, "Pin Name" );
+                showPinNames |= OrcadIEquals( display.name, "Name" ) || OrcadIEquals( display.name, "Pin Name" );
 
                 if( position >= static_cast<int>( unit.pinNumberVisible.size() )
                     || unit.pinNumberVisible[position] )
                 {
-                    showPinNumbers |= propertyNamesEqual( display.name, "Number" )
-                                      || propertyNamesEqual( display.name, "Pin Number" );
+                    showPinNumbers |=
+                            OrcadIEquals( display.name, "Number" ) || OrcadIEquals( display.name, "Pin Number" );
                 }
             }
         }
@@ -2082,6 +2105,15 @@ LIB_SYMBOL* ORCAD_CONVERTER::kicadSymbolFor( const std::string& aLibName )
 
     if( entry.isPower )
         symbol->SetGlobalPower();
+
+    if( std::any_of( entry.units.begin(), entry.units.end(),
+                     []( const UNIT_INFO& aUnit )
+                     {
+                         return aUnit.convert != nullptr;
+                     } ) )
+    {
+        symbol->SetHasDeMorganBodyStyles( true );
+    }
 
     if( (int) entry.units.size() > 1 )
     {
@@ -2126,6 +2158,17 @@ LIB_SYMBOL* ORCAD_CONVERTER::kicadSymbolFor( const std::string& aLibName )
     symbol->GetFootprintField().SetVisible( false );
     symbol->GetDatasheetField().SetVisible( false );
 
+    // Items stay common to both body styles unless their unit has a Convert view
+    auto stampBodyStyle =
+            [&]( int aUnit, int aBodyStyle )
+            {
+                for( SCH_ITEM& item : symbol->GetDrawItems() )
+                {
+                    if( item.Type() != SCH_FIELD_T && item.GetUnit() == aUnit && item.GetBodyStyle() == ALL_BODY_STYLES )
+                        item.SetBodyStyle( aBodyStyle );
+                }
+            };
+
     for( size_t ui = 0; ui < entry.units.size(); ++ui )
     {
         const UNIT_INFO& unit = entry.units[ui];
@@ -2134,49 +2177,67 @@ LIB_SYMBOL* ORCAD_CONVERTER::kicadSymbolFor( const std::string& aLibName )
         if( !unit.symbol )
             continue;
 
-        for( size_t primitiveIndex = 0; primitiveIndex < unit.symbol->primitives.size(); ++primitiveIndex )
+        const int bodyStyles = unit.convert ? 2 : 1;
+
+        for( int bodyStyle = 1; bodyStyle <= bodyStyles; ++bodyStyle )
         {
-            const ORCAD_PRIMITIVE& primitive = unit.symbol->primitives[primitiveIndex];
+            const ORCAD_SYMBOL_DEF& view = bodyStyle == 1 ? *unit.symbol : *unit.convert;
+            const int               stamp = unit.convert ? bodyStyle : 0;
 
-            if( laterRectangleOccludesTextUnderscores( unit.symbol->primitives, primitiveIndex ) )
+            for( size_t primitiveIndex = 0; primitiveIndex < view.primitives.size(); ++primitiveIndex )
             {
-                ORCAD_PRIMITIVE visible = primitive;
-                std::replace( visible.text.begin(), visible.text.end(), '_', ' ' );
-                addSymbolPrimitive( symbol.get(), visible, unitNo, unit.symbol->color );
+                const ORCAD_PRIMITIVE& primitive = view.primitives[primitiveIndex];
+
+                if( laterRectangleOccludesTextUnderscores( view.primitives, primitiveIndex ) )
+                {
+                    ORCAD_PRIMITIVE visible = primitive;
+                    std::replace( visible.text.begin(), visible.text.end(), '_', ' ' );
+                    addSymbolPrimitive( symbol.get(), visible, unitNo, view.color );
+                }
+                else
+                {
+                    addSymbolPrimitive( symbol.get(), primitive, unitNo, view.color );
+                }
             }
-            else
+
+            if( stamp )
+                stampBodyStyle( unitNo, stamp );
+
+            BOX2I bodyBox = symbol->GetBodyBoundingBox( unitNo, stamp, false, false );
+
+            for( size_t pi = 0; pi < view.pins.size(); ++pi )
             {
-                addSymbolPrimitive( symbol.get(), primitive, unitNo, unit.symbol->color );
+                ORCAD_SYMBOL_PIN sourcePin = view.pins[pi];
+                int              position = view.pins[pi].position >= 0 ? view.pins[pi].position
+                                                                        : static_cast<int>( pi );
+
+                if( position < static_cast<int>( unit.pinIgnore.size() ) && unit.pinIgnore[position] )
+                    continue;
+
+                wxString number = position < static_cast<int>( unit.pinNumbers.size() )
+                                          ? FromOrcadString( unit.pinNumbers[position] )
+                                          : wxString::Format( wxS( "%d" ), (int) pi + 1 );
+
+                int pinOffset = pi < unit.pinOffsets.size() ? unit.pinOffsets[pi] : 0;
+                sourcePin.hotptX += pinOffset;
+                sourcePin.startX += pinOffset;
+
+                PIN_EMIT emit;
+                emit.number = number;
+                emit.unit = unitNo;
+                emit.power = entry.isPower;
+                emit.nameOverride = entry.isPower ? entry.powerNet : std::string();
+                emit.nameVisible = defaultShowPinNames;
+                emit.showPinNumbers = defaultShowPinNumbers;
+                emit.numberVisible = position >= static_cast<int>( unit.pinNumberVisible.size() )
+                                     || unit.pinNumberVisible[position];
+                emit.hidden = pinOffset != 0;
+                emit.explicitNet = pi < unit.explicitPinNets.size() && unit.explicitPinNets[pi];
+                addSymbolPin( symbol.get(), sourcePin, bodyBox, std::move( emit ) );
             }
-        }
 
-        BOX2I bodyBox = symbol->GetBodyBoundingBox( unitNo, 0, false, false );
-
-        for( size_t pi = 0; pi < unit.symbol->pins.size(); ++pi )
-        {
-            ORCAD_SYMBOL_PIN sourcePin = unit.symbol->pins[pi];
-            int                     position =
-                    unit.symbol->pins[pi].position >= 0 ? unit.symbol->pins[pi].position : static_cast<int>( pi );
-
-            if( position < static_cast<int>( unit.pinIgnore.size() ) && unit.pinIgnore[position] )
-                continue;
-
-            wxString number = position < static_cast<int>( unit.pinNumbers.size() )
-                                      ? FromOrcadString( unit.pinNumbers[position] )
-                                      : wxString::Format( wxS( "%d" ), (int) pi + 1 );
-
-            int pinOffset = pi < unit.pinOffsets.size() ? unit.pinOffsets[pi] : 0;
-            sourcePin.hotptX += pinOffset;
-            sourcePin.startX += pinOffset;
-
-            addSymbolPin( symbol.get(), sourcePin, number, unitNo, entry.isPower,
-                          entry.isPower ? entry.powerNet : std::string(), defaultShowPinNames,
-                          defaultShowPinNumbers,
-                          position >= static_cast<int>( unit.pinNumberVisible.size() )
-                                  || unit.pinNumberVisible[position],
-                          &bodyBox,
-                          pinOffset != 0,
-                          pi < unit.explicitPinNets.size() && unit.explicitPinNets[pi] );
+            if( stamp )
+                stampBodyStyle( unitNo, stamp );
         }
     }
 
@@ -2477,22 +2538,47 @@ void ORCAD_CONVERTER::addSymbolArc( LIB_SYMBOL* aSymbol, const ORCAD_PRIMITIVE& 
 }
 
 
-void ORCAD_CONVERTER::addSymbolPin( LIB_SYMBOL* aSymbol, const ORCAD_SYMBOL_PIN& aPin, const wxString& aNumber,
-                                    int aUnit, bool aPower, const std::string& aNameOverride, bool aNameVisible,
-                                    bool aShowPinNumbers, bool aNumberVisible, const BOX2I* aBodyBox, bool aHidden,
-                                    bool aExplicitNet )
+std::string ORCAD_CONVERTER::uniqueLibName( const std::string&                             aBase,
+                                            const std::function<bool( const LIB_ENTRY& )>& aReusable ) const
+{
+    std::string libname = aBase;
+
+    for( size_t discriminator = 2;; ++discriminator )
+    {
+        auto lib = m_libSymbols.find( libname );
+
+        if( lib == m_libSymbols.end() || aReusable( lib->second ) )
+            return libname;
+
+        libname = aBase + "_pins" + std::to_string( discriminator );
+    }
+}
+
+
+SCH_SYMBOL* ORCAD_CONVERTER::instantiateSymbol( const LIB_SYMBOL& aLibSymbol, const std::string& aLibName, int aUnit,
+                                                int aOrient, const VECTOR2I& aPos,
+                                                const SCH_SHEET_PATH& aSheetPath ) const
+{
+    SCH_SYMBOL* symbol = new SCH_SYMBOL( aLibSymbol, libIdFor( aLibName ), &aSheetPath, aUnit, 0, aPos );
+    symbol->SetOrientation( toKicadOrientation( aOrient ) );
+    return symbol;
+}
+
+
+void ORCAD_CONVERTER::addSymbolPin( LIB_SYMBOL* aSymbol, const ORCAD_SYMBOL_PIN& aPin, const BOX2I& aBodyBox,
+                                    PIN_EMIT aEmit )
 {
     int dx = aPin.startX - aPin.hotptX;
     int dy = aPin.startY - aPin.hotptY;
     int pinLength = KiROUND( std::hypot( (double) dx, (double) dy ) ) * ORCAD_IU_PER_DBU;
     bool hiddenPowerStyle = pinLength == 0 && ( aPin.shapeBits & 0x80 ) != 0;
 
-    if( dx == 0 && dy == 0 && aBodyBox )
+    if( dx == 0 && dy == 0 )
     {
         VECTOR2I hotPoint( aPin.hotptX * ORCAD_IU_PER_DBU, aPin.hotptY * ORCAD_IU_PER_DBU );
         std::array<int, 4> distances = {
-            std::abs( hotPoint.x - aBodyBox->GetLeft() ), std::abs( hotPoint.x - aBodyBox->GetRight() ),
-            std::abs( hotPoint.y - aBodyBox->GetTop() ), std::abs( hotPoint.y - aBodyBox->GetBottom() )
+            std::abs( hotPoint.x - aBodyBox.GetLeft() ), std::abs( hotPoint.x - aBodyBox.GetRight() ),
+            std::abs( hotPoint.y - aBodyBox.GetTop() ), std::abs( hotPoint.y - aBodyBox.GetBottom() )
         };
 
         switch( std::min_element( distances.begin(), distances.end() ) - distances.begin() )
@@ -2536,7 +2622,7 @@ void ORCAD_CONVERTER::addSymbolPin( LIB_SYMBOL* aSymbol, const ORCAD_SYMBOL_PIN&
     else
         pin->SetShape( GRAPHIC_PINSHAPE::LINE );
 
-    if( aPower )
+    if( aEmit.power )
     {
         pin->SetType( ELECTRICAL_PINTYPE::PT_POWER_IN );
         pin->SetVisible( false );
@@ -2549,24 +2635,24 @@ void ORCAD_CONVERTER::addSymbolPin( LIB_SYMBOL* aSymbol, const ORCAD_SYMBOL_PIN&
     if( hiddenPowerStyle )
         pin->SetVisible( false );
 
-    if( aHidden )
+    if( aEmit.hidden )
     {
         pin->SetVisible( false );
         pin->SetLength( 0 );
     }
 
-    if( aExplicitNet && !pin->IsVisible() && pin->GetType() == ELECTRICAL_PINTYPE::PT_POWER_IN )
+    if( aEmit.explicitNet && !pin->IsVisible() && pin->GetType() == ELECTRICAL_PINTYPE::PT_POWER_IN )
         pin->SetType( ELECTRICAL_PINTYPE::PT_PASSIVE );
 
     // "$PIN"-prefixed names are OrCAD auto-generated placeholders.
     wxString name;
 
-    if( !aNameOverride.empty() )
-        name = FromOrcadString( aNameOverride );
+    if( !aEmit.nameOverride.empty() )
+        name = FromOrcadString( aEmit.nameOverride );
     else if( !aPin.name.empty() && aPin.name.compare( 0, 4, "$PIN" ) != 0 )
         name = FromOrcadString( aPin.name );
-    else if( aNameVisible && !aShowPinNumbers )
-        name = aNumber;
+    else if( aEmit.nameVisible && !aEmit.showPinNumbers )
+        name = aEmit.number;
 
     auto pinTextSize = [&]( int aFontIdx )
     {
@@ -2583,8 +2669,7 @@ void ORCAD_CONVERTER::addSymbolPin( LIB_SYMBOL* aSymbol, const ORCAD_SYMBOL_PIN&
         auto it = std::find_if( aPin.displayProps.begin(), aPin.displayProps.end(),
                                 [&]( const ORCAD_DISPLAY_PROP& aProp )
                                 {
-                                    return propertyNamesEqual( aProp.name, aName )
-                                           || propertyNamesEqual( aProp.name, aAlternate );
+                                    return OrcadIEquals( aProp.name, aName ) || OrcadIEquals( aProp.name, aAlternate );
                                 } );
         return it != aPin.displayProps.end() ? &*it : nullptr;
     };
@@ -2593,22 +2678,22 @@ void ORCAD_CONVERTER::addSymbolPin( LIB_SYMBOL* aSymbol, const ORCAD_SYMBOL_PIN&
     const ORCAD_DISPLAY_PROP* numberDisplay = findDisplay( "Number", "Pin Number" );
 
     if( nameDisplay )
-        aNameVisible = OrcadDisplayPropVisible( *nameDisplay );
+        aEmit.nameVisible = OrcadDisplayPropVisible( *nameDisplay );
 
-    aNumberVisible = aNumberVisible
-                     && ( numberDisplay ? OrcadDisplayPropVisible( *numberDisplay ) : aShowPinNumbers );
+    aEmit.numberVisible =
+            aEmit.numberVisible && ( numberDisplay ? OrcadDisplayPropVisible( *numberDisplay ) : aEmit.showPinNumbers );
 
     int nameFont = nameDisplay && nameDisplay->fontIdx > 0 ? nameDisplay->fontIdx : m_design.library.pinNameFont;
     int numberFont = numberDisplay && numberDisplay->fontIdx > 0 ? numberDisplay->fontIdx
                                                                  : m_design.library.pinNumberFont;
 
     pin->SetName( OrcadPinNameMarkup( name ) );
-    pin->SetNumber( aNumber );
-    pin->SetNameTextSize( aNameVisible && !name.IsEmpty() ? pinTextSize( nameFont ) : 0 );
-    pin->SetNumberTextSize( aNumberVisible && !aNumber.IsEmpty() ? pinTextSize( numberFont ) : 0 );
-    pin->SetUnit( aUnit );
+    pin->SetNumber( aEmit.number );
+    pin->SetNameTextSize( aEmit.nameVisible && !name.IsEmpty() ? pinTextSize( nameFont ) : 0 );
+    pin->SetNumberTextSize( aEmit.numberVisible && !aEmit.number.IsEmpty() ? pinTextSize( numberFont ) : 0 );
+    pin->SetUnit( aEmit.unit );
 
-    if( aHidden )
+    if( aEmit.hidden )
     {
         pin->SetNameTextSize( 0 );
         pin->SetNumberTextSize( 0 );
@@ -2616,7 +2701,7 @@ void ORCAD_CONVERTER::addSymbolPin( LIB_SYMBOL* aSymbol, const ORCAD_SYMBOL_PIN&
 
     aSymbol->AddDrawItem( pin, false );
 
-    if( !aPower && !aHidden && pinLength > 0 && aPin.portType == ORCAD_PORT_TYPE::INPUT_TYPE )
+    if( !aEmit.power && !aEmit.hidden && pinLength > 0 && aPin.portType == ORCAD_PORT_TYPE::INPUT_TYPE )
     {
         VECTOR2I direction( ( dx > 0 ) - ( dx < 0 ), ( dy > 0 ) - ( dy < 0 ) );
         VECTOR2I normal( -direction.y, direction.x );
@@ -2630,12 +2715,9 @@ void ORCAD_CONVERTER::addSymbolPin( LIB_SYMBOL* aSymbol, const ORCAD_SYMBOL_PIN&
         wedge->AddPoint( apex );
         wedge->SetStroke( STROKE_PARAMS( 0, LINE_STYLE::SOLID ) );
         wedge->SetFillMode( FILL_T::FILLED_SHAPE );
-        wedge->SetUnit( aUnit );
+        wedge->SetUnit( aEmit.unit );
         aSymbol->AddDrawItem( wedge, false );
     }
-
-    if( aPower || aHidden || hiddenPowerStyle )
-        return;
 }
 
 
@@ -2712,17 +2794,11 @@ void ORCAD_CONVERTER::finalizeNativePowerPackages()
             continue;
         }
 
-        std::string libname = templateName;
-
-        for( size_t discriminator = 2;; ++discriminator )
-        {
-            auto candidate = m_libSymbols.find( libname );
-
-            if( candidate == m_libSymbols.end() || candidate->second.units == units )
-                break;
-
-            libname = templateName + "_pins" + std::to_string( discriminator );
-        }
+        std::string libname = uniqueLibName( templateName,
+                                             [&]( const LIB_ENTRY& aLib )
+                                             {
+                                                 return aLib.units == units;
+                                             } );
 
         auto [entry, inserted] = m_libSymbols.try_emplace( libname );
 
@@ -2771,8 +2847,7 @@ void ORCAD_CONVERTER::finalizeNativePowerPackages()
         }
 
         complete.GetDrawItems().sort();
-        LIB_ID id( wxString::FromUTF8( LIB_NICK ),
-                   LIB_ID::FixIllegalChars( FromOrcadString( libname ), false ).wx_str() );
+        LIB_ID id = libIdFor( libname );
 
         // All units of one physical part must carry the same complete library definition on save.
         for( size_t i = 0; i < part.size(); ++i )
@@ -2834,38 +2909,35 @@ void ORCAD_CONVERTER::placeInstance( ORCAD_RAW_PAGE& aPage, const ORCAD_PLACED_I
     if( !libSymbol )
         return;
 
-    LIB_ID      libId( wxString::FromUTF8( LIB_NICK ),
-                       LIB_ID::FixIllegalChars( FromOrcadString( libname ), false ).wx_str() );
-    SCH_SYMBOL* symbol = new SCH_SYMBOL( *libSymbol, libId, &aSheetPath, unit, 0, pos );
-
-    symbol->SetOrientation( toKicadOrientation( ori ) );
+    SCH_SYMBOL* symbol = instantiateSymbol( *libSymbol, libname, unit, ori, pos, aSheetPath );
 
     TRANSFORM                                     inverseTransform = symbol->GetTransform().InverseTransform();
     std::vector<std::pair<SCH_TEXT*, SCH_SHAPE*>> degreeMarks;
 
-    auto circleTouchesStroke = [&]( const SCH_SHAPE& aCircle )
-    {
-        int64_t radiusSquared = static_cast<int64_t>( aCircle.GetRadius() ) * aCircle.GetRadius();
-
-        for( const SCH_ITEM& item : symbol->GetLibSymbolRef()->GetDrawItems() )
-        {
-            if( item.Type() != SCH_SHAPE_T )
-                continue;
-
-            const SCH_SHAPE& shape = static_cast<const SCH_SHAPE&>( item );
-
-            if( &shape == &aCircle || shape.GetShape() != SHAPE_T::POLY )
-                continue;
-
-            for( const VECTOR2I& point : shape.GetPolyShape().Outline( 0 ).CPoints() )
+    auto circleTouchesStroke =
+            [&]( const SCH_SHAPE& aCircle )
             {
-                if( ( point - aCircle.GetPosition() ).SquaredEuclideanNorm() <= radiusSquared )
-                    return true;
-            }
-        }
+                int64_t radiusSquared = static_cast<int64_t>( aCircle.GetRadius() ) * aCircle.GetRadius();
 
-        return false;
-    };
+                for( const SCH_ITEM& item : symbol->GetLibSymbolRef()->GetDrawItems() )
+                {
+                    if( item.Type() != SCH_SHAPE_T )
+                        continue;
+
+                    const SCH_SHAPE& shape = static_cast<const SCH_SHAPE&>( item );
+
+                    if( &shape == &aCircle || shape.GetShape() != SHAPE_T::POLY || shape.GetPolyShape().IsEmpty() )
+                        continue;
+
+                    for( const VECTOR2I& point : shape.GetPolyShape().Outline( 0 ).CPoints() )
+                    {
+                        if( ( point - aCircle.GetPosition() ).SquaredEuclideanNorm() <= radiusSquared )
+                            return true;
+                    }
+                }
+
+                return false;
+            };
 
     for( SCH_ITEM& item : symbol->GetLibSymbolRef()->GetDrawItems() )
     {
@@ -2968,18 +3040,18 @@ void ORCAD_CONVERTER::placeInstance( ORCAD_RAW_PAGE& aPage, const ORCAD_PLACED_I
 
     auto occurrenceProperty = [&]( const char* aName ) -> const std::string*
     {
-        if( !m_currentOccProps )
+        if( !m_scope.occ )
             return nullptr;
 
-        auto occurrence = m_currentOccProps->find( aInst.dbId );
+        auto occurrence = m_scope.occ->partProps.find( aInst.dbId );
 
-        if( occurrence == m_currentOccProps->end() )
+        if( occurrence == m_scope.occ->partProps.end() )
             return nullptr;
 
         auto property = std::find_if( occurrence->second.begin(), occurrence->second.end(),
                                       [&]( const auto& aProperty )
                                       {
-                                          return propertyNamesEqual( aProperty.first, aName );
+                                          return OrcadIEquals( aProperty.first, aName );
                                       } );
         return property != occurrence->second.end() ? &property->second : nullptr;
     };
@@ -3003,8 +3075,7 @@ void ORCAD_CONVERTER::placeInstance( ORCAD_RAW_PAGE& aPage, const ORCAD_PLACED_I
                                    {
                                        return isInstalledPropertyName( aProperty.first );
                                    } );
-    bool notInstalled =
-            installed != props.end() && wxString::FromUTF8( installed->second ).CmpNoCase( wxS( "NI" ) ) == 0;
+    bool notInstalled = installed != props.end() && OrcadIEquals( installed->second, "NI" );
 
     const std::string* occurrenceFootprint = occurrenceProperty( "PCB Footprint" );
     std::string        footprint = occurrenceFootprint ? *occurrenceFootprint : std::string();
@@ -3053,7 +3124,7 @@ void ORCAD_CONVERTER::placeInstance( ORCAD_RAW_PAGE& aPage, const ORCAD_PLACED_I
                                         {
                                             return m_currentImplicitPowerPins.count( &aPin );
                                         } );
-        const void* scope = m_currentOccRefs ? static_cast<const void*>( m_currentOccRefs ) : aScreen;
+        const void* scope = m_scope.occ ? static_cast<const void*>( &m_scope.occ->partRefs ) : aScreen;
         m_placedPackageUnits.push_back( { symbol, scope, reference, sourceUnit, uinfo } );
 
         if( nativePower )
@@ -3063,6 +3134,8 @@ void ORCAD_CONVERTER::placeInstance( ORCAD_RAW_PAGE& aPage, const ORCAD_PLACED_I
     // Parts without pins remain in the BOM but must not request footprints during board updates.
     if( def.pins.empty() && aInst.pins.empty() )
         symbol->SetExcludedFromBoard( true );
+
+    applyCisVariants( symbol, aInst, aSheetPath, value );
 
     m_sourceInstances[symbol] = &aInst;
     auto& sourcePins = m_sourcePinIdentities[symbol];
@@ -3106,17 +3179,79 @@ void ORCAD_CONVERTER::placeInstance( ORCAD_RAW_PAGE& aPage, const ORCAD_PLACED_I
 }
 
 
+void ORCAD_CONVERTER::applyCisVariants( SCH_SYMBOL* aSymbol, const ORCAD_PLACED_INSTANCE& aInst,
+                                        const SCH_SHEET_PATH& aSheetPath, const std::string& aValue )
+{
+    if( m_design.cisVariants.empty() )
+        return;
+
+    const ORCAD_OCC_SCOPE* scope = m_scope.occ;
+
+    if( !scope )
+        return;
+
+    auto occurrence = scope->partOccurrenceIds.find( aInst.dbId );
+
+    if( occurrence == scope->partOccurrenceIds.end() )
+        return;
+
+    for( const ORCAD_CIS_VARIANT& cis : m_design.cisVariants )
+    {
+        SCH_SYMBOL_VARIANT variant( FromOrcadString( cis.name ) );
+        variant.InitializeAttributes( *aSymbol );
+
+        if( auto installed = cis.installed.find( occurrence->second ); installed != cis.installed.end() )
+            variant.m_DNP = !installed->second;
+
+        // A variant that installs a part the core design leaves out shows its value, not the "NI" marker
+        if( aSymbol->GetDNP() && !variant.m_DNP && aSymbol->GetField( FIELD_T::VALUE )->GetText() == wxS( "NI" ) )
+            variant.m_Fields[aSymbol->GetField( FIELD_T::VALUE )->GetName()] = FromOrcadString( aValue );
+
+        if( auto props = cis.props.find( occurrence->second ); props != cis.props.end() )
+        {
+            for( const auto& [property, value] : props->second )
+            {
+                wxString fieldName = propertyFieldName( property );
+
+                // CIS database rows fill unused columns with this placeholder
+                if( fieldName.IsEmpty() || value == "UNDEFINED" )
+                    continue;
+
+                wxString   text = value == "<" + property + ">" ? wxString() : FromOrcadString( value );
+                SCH_FIELD* field = aSymbol->FindFieldCaseInsensitive( fieldName );
+
+                // KiCad variants override existing fields, so a property only the variant sets gets an empty base
+                if( !field )
+                {
+                    SCH_FIELD added( aSymbol, FIELD_T::USER, fieldName );
+                    added.SetPosition( aSymbol->GetPosition() );
+                    added.SetTextSize( VECTOR2I( schMm( 1.27 ), schMm( 1.27 ) ) );
+                    added.SetVisible( false );
+                    field = aSymbol->AddField( added );
+                }
+
+                if( field->GetText() != text )
+                    variant.m_Fields[field->GetName()] = text;
+            }
+        }
+
+        if( variant.HasDifferentials( *aSymbol ) )
+            aSymbol->AddVariant( aSheetPath, variant );
+    }
+}
+
+
 wxString ORCAD_CONVERTER::resolveReference( const ORCAD_PLACED_INSTANCE& aInst ) const
 {
     wxString reference = FromOrcadString( aInst.reference );
 
     // Hierarchy stream carries the authoritative per-occurrence designator; the
     // placed record remains the reusable page template's reference.
-    if( m_currentOccRefs )
+    if( m_scope.occ )
     {
-        auto it = m_currentOccRefs->find( aInst.dbId );
+        auto it = m_scope.occ->partRefs.find( aInst.dbId );
 
-        if( it != m_currentOccRefs->end() )
+        if( it != m_scope.occ->partRefs.end() )
         {
             wxString occurrence = FromOrcadString( it->second );
 
@@ -3138,7 +3273,7 @@ void ORCAD_CONVERTER::placePowerSymbol( ORCAD_RAW_PAGE& aPage, const ORCAD_GRAPH
     std::string net = canonicalGlobalNetName( aNet );
 
     // Capture power names ignore case; occurrence-specific names must still remain distinct.
-    if( FromOrcadString( net ).CmpNoCase( FromOrcadString( aNet ) ) != 0 )
+    if( !OrcadIEquals( net, aNet ) )
         net = aNet;
 
     std::string libname = powerLibFor( aInst.name, net );
@@ -3166,13 +3301,9 @@ void ORCAD_CONVERTER::placePowerSymbol( ORCAD_RAW_PAGE& aPage, const ORCAD_GRAPH
     if( !libSymbol )
         return;
 
-    LIB_ID      libId( wxString::FromUTF8( LIB_NICK ),
-                       LIB_ID::FixIllegalChars( FromOrcadString( libname ), false ).wx_str() );
-    SCH_SYMBOL* symbol = new SCH_SYMBOL( *libSymbol, libId, &aSheetPath, 1, 0, pos );
+    SCH_SYMBOL* symbol = instantiateSymbol( *libSymbol, libname, 1, ori, pos, aSheetPath );
 
-    symbol->SetOrientation( toKicadOrientation( ori ) );
-
-    std::vector<SCH_PIN*> pins = symbol->GetPins();
+    std::vector<SCH_PIN*> pins = symbol->GetGraphicalPins( ALL_UNITS, ALL_BODY_STYLES );
     VECTOR2I              sourcePinDbu = powerPinPos( aPage, aInst );
 
     if( !pins.empty() )
@@ -3196,12 +3327,12 @@ void ORCAD_CONVERTER::placePowerSymbol( ORCAD_RAW_PAGE& aPage, const ORCAD_GRAPH
     valField->SetPosition( pos );
     valField->SetVisible( false );
 
-    auto       displayedName = std::find_if( aInst.displayProps.begin(), aInst.displayProps.end(),
-                                             []( const ORCAD_DISPLAY_PROP& aProp )
-                                             {
-                                           return propertyNamesEqual( aProp.name, "Name" )
-                                                  || propertyNamesEqual( aProp.name, "NODENAME" );
-                                       } );
+    auto displayedName =
+            std::find_if( aInst.displayProps.begin(), aInst.displayProps.end(),
+                          []( const ORCAD_DISPLAY_PROP& aProp )
+                          {
+                              return OrcadIEquals( aProp.name, "Name" ) || OrcadIEquals( aProp.name, "NODENAME" );
+                          } );
 
     if( displayedName != aInst.displayProps.end() )
     {
@@ -3209,23 +3340,8 @@ void ORCAD_CONVERTER::placePowerSymbol( ORCAD_RAW_PAGE& aPage, const ORCAD_GRAPH
         displayField.SetText( FromOrcadString( !displayName.empty()   ? displayName
                                                : !logicalName.empty() ? logicalName
                                                                       : aNet ) );
-        int  fontId = displayFontId( *displayedName );
-        bool templateFont = displayUsesTemplateFont( *displayedName );
-        int  size = textSizeIU( fontId, templateFont );
-        int  baseline = textBaselineOffset( size, fontId, templateFont );
-        bool textVertical = ( displayedName->rotation & 1 ) != 0;
-        bool symbolFlips = symbol->GetTransform().y1 != 0;
-
-        displayField.SetPosition( OrcadDbuToIu( bx + displayedName->x, by + displayedName->y )
-                                  + ( textVertical ? VECTOR2I( baseline, 0 ) : VECTOR2I( 0, baseline ) ) );
-        displayField.SetTextAngle( textVertical != symbolFlips ? ANGLE_VERTICAL : ANGLE_HORIZONTAL );
-        displayField.SetTextSize( textSize( fontId, templateFont ) );
-        applyFont( &displayField, fontId, templateFont );
-        displayField.SetTextColor( OrcadColor( displayedName->color ) );
-        displayField.SetEffectiveHorizJustify( GR_TEXT_H_ALIGN_LEFT );
-        displayField.SetEffectiveVertJustify( GR_TEXT_V_ALIGN_TOP );
-        displayField.SetVisible( OrcadDisplayPropVisible( *displayedName ) );
-        displayField.SetNameShown( OrcadDisplayPropShowsName( *displayedName ) );
+        applyDisplayProp( displayField, *displayedName, OrcadDbuToIu( bx + displayedName->x, by + displayedName->y ),
+                          symbol->GetTransform().y1 != 0 );
         symbol->AddField( displayField );
     }
 
@@ -3282,7 +3398,7 @@ void ORCAD_CONVERTER::placeSymbolFields( SCH_SYMBOL* aSymbol, const ORCAD_PLACED
         auto it = std::find_if( aInst.displayProps.begin(), aInst.displayProps.end(),
                                 [&]( const ORCAD_DISPLAY_PROP& aDisplay )
                                 {
-                                    return propertyNamesEqual( aDisplay.name, aName )
+                                    return OrcadIEquals( aDisplay.name, aName )
                                            && ( !aVisibleOnly || OrcadDisplayPropVisible( aDisplay ) );
                                 } );
 
@@ -3310,7 +3426,7 @@ void ORCAD_CONVERTER::placeSymbolFields( SCH_SYMBOL* aSymbol, const ORCAD_PLACED
     {
         bool visible = OrcadDisplayPropVisible( dp );
 
-        if( propertyNamesEqual( dp.name, "Value" ) )
+        if( OrcadIEquals( dp.name, "Value" ) )
         {
             showVal = visible;
             showValName = OrcadDisplayPropShowsName( dp );
@@ -3369,7 +3485,7 @@ void ORCAD_CONVERTER::placeSymbolFields( SCH_SYMBOL* aSymbol, const ORCAD_PLACED
 
         if( &dp == referenceDisplay )
             shown["Part Reference"] = value;
-        else if( propertyNamesEqual( dp.name, "Part Reference" ) || propertyNamesEqual( dp.name, "Reference" ) )
+        else if( OrcadIEquals( dp.name, "Part Reference" ) || OrcadIEquals( dp.name, "Reference" ) )
             continue;
         else
             shown[dp.name] = value;
@@ -3383,24 +3499,15 @@ void ORCAD_CONVERTER::placeSymbolFields( SCH_SYMBOL* aSymbol, const ORCAD_PLACED
             return exact;
 
         return std::find_if( shown.begin(), shown.end(),
-                             [&]( const auto& aItem ) { return propertyNamesEqual( aItem.first, aName ); } );
+                             [&]( const auto& aItem )
+                             {
+                                 return OrcadIEquals( aItem.first, aName );
+                             } );
     };
 
     // KiCad re-rotates field text when parent transform flips X/Y (GetDrawRotation),
     // so store angle that renders property's own text angle after flip.
     bool symbolFlips = aSymbol->GetTransform().y1 != 0;
-
-    auto storedFieldAngle = [&]( const ORCAD_DISPLAY_PROP* aDp ) -> EDA_ANGLE
-    {
-        bool textVertical = ( aDp->rotation & 1 ) != 0;
-        return ( textVertical != symbolFlips ) ? ANGLE_VERTICAL : ANGLE_HORIZONTAL;
-    };
-
-    auto displayBaselineShift = [&]( const ORCAD_DISPLAY_PROP* aDp, int aSize ) -> VECTOR2I
-    {
-        int baseline = textBaselineOffset( aSize, displayFontId( *aDp ), displayUsesTemplateFont( *aDp ) );
-        return ( aDp->rotation & 1 ) ? VECTOR2I( baseline, 0 ) : VECTOR2I( 0, baseline );
-    };
 
     auto drawDisplayedField = [&]( SCH_FIELD* aField, const ORCAD_DISPLAY_PROP& aDisplay )
     {
@@ -3440,21 +3547,10 @@ void ORCAD_CONVERTER::placeSymbolFields( SCH_SYMBOL* aSymbol, const ORCAD_PLACED
 
         if( shownFootprint != shown.end() )
         {
-            const ORCAD_DISPLAY_PROP* dp = shownFootprint->second.second;
-            int                       fontId = displayFontId( *dp );
-            bool                      templateFont = displayUsesTemplateFont( *dp );
-            int                       size = textSizeIU( fontId, templateFont );
+            const ORCAD_DISPLAY_PROP& dp = *shownFootprint->second.second;
 
-            fpMeta.SetPosition( shownFootprint->second.first + displayBaselineShift( dp, size ) );
-            fpMeta.SetTextAngle( storedFieldAngle( dp ) );
-            fpMeta.SetTextSize( textSize( fontId, templateFont ) );
-            applyFont( &fpMeta, fontId, templateFont );
-            fpMeta.SetTextColor( OrcadColor( dp->color ) );
-            fpMeta.SetEffectiveHorizJustify( GR_TEXT_H_ALIGN_LEFT );
-            fpMeta.SetEffectiveVertJustify( GR_TEXT_V_ALIGN_TOP );
-            fpMeta.SetVisible( OrcadDisplayPropVisible( *dp ) );
-            fpMeta.SetNameShown( OrcadDisplayPropShowsName( *dp ) );
-            drawDisplayedField( &fpMeta, *dp );
+            applyDisplayProp( fpMeta, dp, shownFootprint->second.first, symbolFlips );
+            drawDisplayedField( &fpMeta, dp );
         }
         else
         {
@@ -3482,19 +3578,7 @@ void ORCAD_CONVERTER::placeSymbolFields( SCH_SYMBOL* aSymbol, const ORCAD_PLACED
         if( it == shown.end() )
             return;
 
-        const ORCAD_DISPLAY_PROP* dp = it->second.second;
-        int                       fontId = displayFontId( *dp );
-        bool                      templateFont = displayUsesTemplateFont( *dp );
-        int                       size = textSizeIU( fontId, templateFont );
-
-        // Capture's display-property origin uses the field type's font baseline.
-        aField->SetPosition( it->second.first + displayBaselineShift( dp, size ) );
-        aField->SetTextSize( textSize( fontId, templateFont ) );
-        applyFont( aField, fontId, templateFont );
-        aField->SetTextColor( OrcadColor( dp->color ) );
-        aField->SetTextAngle( storedFieldAngle( dp ) );
-        aField->SetEffectiveHorizJustify( GR_TEXT_H_ALIGN_LEFT );
-        aField->SetEffectiveVertJustify( GR_TEXT_V_ALIGN_TOP );
+        applyDisplayProp( *aField, *it->second.second, it->second.first, symbolFlips, false );
     };
 
     applyDisplayPos( refField, "Part Reference" );
@@ -3507,7 +3591,9 @@ void ORCAD_CONVERTER::placeSymbolFields( SCH_SYMBOL* aSymbol, const ORCAD_PLACED
 
     auto partReference = std::find_if( properties.begin(), properties.end(),
                                        []( const auto& aProperty )
-                                       { return propertyNamesEqual( aProperty.first, "Part Reference" ); } );
+                                       {
+                                           return OrcadIEquals( aProperty.first, "Part Reference" );
+                                       } );
 
     const wxString resolvedReference = resolveReference( aInst );
     const bool occurrenceOverridesReference = resolvedReference != FromOrcadString( aInst.reference );
@@ -3521,11 +3607,11 @@ void ORCAD_CONVERTER::placeSymbolFields( SCH_SYMBOL* aSymbol, const ORCAD_PLACED
     {
         std::string unitDesignator;
 
-        if( m_currentOccUnitRefs )
+        if( m_scope.occ )
         {
-            auto unitRef = m_currentOccUnitRefs->find( aInst.dbId );
+            auto unitRef = m_scope.occ->partUnitRefs.find( aInst.dbId );
 
-            if( unitRef != m_currentOccUnitRefs->end() )
+            if( unitRef != m_scope.occ->partUnitRefs.end() )
                 unitDesignator = unitRef->second;
         }
 
@@ -3565,7 +3651,9 @@ void ORCAD_CONVERTER::placeSymbolFields( SCH_SYMBOL* aSymbol, const ORCAD_PLACED
     {
         auto implementation = std::find_if( properties.begin(), properties.end(),
                                             []( const auto& aProperty )
-                                            { return propertyNamesEqual( aProperty.first, "Implementation" ); } );
+                                            {
+                                                return OrcadIEquals( aProperty.first, "Implementation" );
+                                            } );
 
         if( implementation == properties.end() )
             properties["Implementation"] = aInst.value;
@@ -3573,23 +3661,29 @@ void ORCAD_CONVERTER::placeSymbolFields( SCH_SYMBOL* aSymbol, const ORCAD_PLACED
             implementation->second = aInst.value;
     }
 
+    static const std::pair<const char*, FIELD_T> standardFields[] = { { "Description", FIELD_T::DESCRIPTION },
+                                                                      { "Datasheet", FIELD_T::DATASHEET } };
+
     for( const auto& [propName, propValue] : properties )
     {
-        if( propertyNamesEqual( propName, "Value" ) || propertyNamesEqual( propName, "PCB Footprint" )
-            || propertyNamesEqual( propName, "Part Reference" ) || propertyNamesEqual( propName, "Reference" ) )
+        if( OrcadIEquals( propName, "Value" ) || OrcadIEquals( propName, "PCB Footprint" )
+            || OrcadIEquals( propName, "Part Reference" ) || OrcadIEquals( propName, "Reference" ) )
             continue;
 
         if( isBookkeepingProp( propName ) && findShown( propName ) == shown.end() )
             continue;
 
         bool unset = propValue.empty() || propValue == "<" + propName + ">";
+        auto standardField = std::find_if( std::begin( standardFields ), std::end( standardFields ),
+                                           [&]( const auto& aStandard )
+                                           {
+                                               return OrcadIEquals( propName, aStandard.first );
+                                           } );
 
         if( unset )
         {
-            if( propertyNamesEqual( propName, "Description" ) )
-                aSymbol->GetField( FIELD_T::DESCRIPTION )->SetText( wxString() );
-            else if( propertyNamesEqual( propName, "Datasheet" ) )
-                aSymbol->GetField( FIELD_T::DATASHEET )->SetText( wxString() );
+            if( standardField != std::end( standardFields ) )
+                aSymbol->GetField( standardField->second )->SetText( wxString() );
             else
             {
                 std::vector<SCH_FIELD*> fields;
@@ -3597,8 +3691,7 @@ void ORCAD_CONVERTER::placeSymbolFields( SCH_SYMBOL* aSymbol, const ORCAD_PLACED
 
                 for( SCH_FIELD* field : fields )
                 {
-                    if( field->GetId() >= FIELD_T::USER
-                        && propertyNamesEqual( field->GetName().ToStdString(), propName ) )
+                    if( field->GetId() >= FIELD_T::USER && OrcadIEquals( field->GetName().ToStdString(), propName ) )
                     {
                         aSymbol->RemoveField( field );
                         break;
@@ -3609,42 +3702,23 @@ void ORCAD_CONVERTER::placeSymbolFields( SCH_SYMBOL* aSymbol, const ORCAD_PLACED
             continue;
         }
 
-        if( propertyNamesEqual( propName, "Description" ) )
+        if( standardField != std::end( standardFields ) )
         {
-            SCH_FIELD* descriptionField = aSymbol->GetField( FIELD_T::DESCRIPTION );
-            descriptionField->SetText( FromOrcadString( propValue ) );
-            applyDisplayPos( descriptionField, "Description" );
+            SCH_FIELD* standard = aSymbol->GetField( standardField->second );
+            standard->SetText( FromOrcadString( propValue ) );
 
-            if( auto shownDescription = findShown( "Description" ); shownDescription != shown.end() )
+            if( auto shownStandard = findShown( standardField->first ); shownStandard != shown.end() )
             {
-                const ORCAD_DISPLAY_PROP& dp = *shownDescription->second.second;
-                descriptionField->SetVisible( OrcadDisplayPropVisible( dp ) );
-                descriptionField->SetNameShown( OrcadDisplayPropShowsName( dp ) );
-                drawDisplayedField( descriptionField, dp );
+                const ORCAD_DISPLAY_PROP& dp = *shownStandard->second.second;
+                applyDisplayProp( *standard, dp, shownStandard->second.first, symbolFlips );
+                drawDisplayedField( standard, dp );
             }
 
             continue;
         }
 
-        if( propertyNamesEqual( propName, "Datasheet" ) )
-        {
-            SCH_FIELD* datasheetField = aSymbol->GetField( FIELD_T::DATASHEET );
-            datasheetField->SetText( FromOrcadString( propValue ) );
-            applyDisplayPos( datasheetField, "Datasheet" );
-
-            if( auto shownDatasheet = findShown( "Datasheet" ); shownDatasheet != shown.end() )
-            {
-                const ORCAD_DISPLAY_PROP& dp = *shownDatasheet->second.second;
-                datasheetField->SetVisible( OrcadDisplayPropVisible( dp ) );
-                datasheetField->SetNameShown( OrcadDisplayPropShowsName( dp ) );
-                drawDisplayedField( datasheetField, dp );
-            }
-
-            continue;
-        }
-
-        wxString  fieldName = propertyNamesEqual( propName, "Footprint" ) ? wxString( "OrCAD Footprint Property" )
-                                                                          : FromOrcadString( propName );
+        wxString  fieldName = OrcadIEquals( propName, "Footprint" ) ? wxString( "OrCAD Footprint Property" )
+                                                                    : FromOrcadString( propName );
         SCH_FIELD field( aSymbol, FIELD_T::USER, fieldName );
         field.SetText( FromOrcadString( propValue ) );
 
@@ -3652,21 +3726,10 @@ void ORCAD_CONVERTER::placeSymbolFields( SCH_SYMBOL* aSymbol, const ORCAD_PLACED
 
         if( sIt != shown.end() )
         {
-            const ORCAD_DISPLAY_PROP* dp = sIt->second.second;
-            int                       fontId = displayFontId( *dp );
-            bool                      templateFont = displayUsesTemplateFont( *dp );
-            int                       size = textSizeIU( fontId, templateFont );
+            const ORCAD_DISPLAY_PROP& dp = *sIt->second.second;
 
-            field.SetPosition( sIt->second.first + displayBaselineShift( dp, size ) );
-            field.SetTextAngle( storedFieldAngle( dp ) );
-            field.SetTextSize( textSize( fontId, templateFont ) );
-            applyFont( &field, fontId, templateFont );
-            field.SetTextColor( OrcadColor( dp->color ) );
-            field.SetEffectiveHorizJustify( GR_TEXT_H_ALIGN_LEFT );
-            field.SetEffectiveVertJustify( GR_TEXT_V_ALIGN_TOP );
-            field.SetVisible( OrcadDisplayPropVisible( *dp ) );
-            field.SetNameShown( OrcadDisplayPropShowsName( *dp ) );
-            drawDisplayedField( &field, *dp );
+            applyDisplayProp( field, dp, sIt->second.first, symbolFlips );
+            drawDisplayedField( &field, dp );
         }
         else
         {
@@ -3743,6 +3806,41 @@ bool ORCAD_CONVERTER::displayUsesTemplateFont( const ORCAD_DISPLAY_PROP& aProp )
 }
 
 
+VECTOR2I ORCAD_CONVERTER::displayPropPosition( const ORCAD_DISPLAY_PROP& aDisplay, const VECTOR2I& aAnchorIu ) const
+{
+    int  fontId = displayFontId( aDisplay );
+    bool templateFont = displayUsesTemplateFont( aDisplay );
+    int  baseline = textBaselineOffset( textSizeIU( fontId, templateFont ), fontId, templateFont );
+
+    return aAnchorIu + ( ( aDisplay.rotation & 1 ) ? VECTOR2I( baseline, 0 ) : VECTOR2I( 0, baseline ) );
+}
+
+
+void ORCAD_CONVERTER::applyDisplayProp( SCH_FIELD& aField, const ORCAD_DISPLAY_PROP& aDisplay,
+                                        const VECTOR2I& aAnchorIu, bool aSymbolFlips, bool aApplyVisibility ) const
+{
+    int  fontId = displayFontId( aDisplay );
+    bool templateFont = displayUsesTemplateFont( aDisplay );
+    bool vertical = ( aDisplay.rotation & 1 ) != 0;
+
+    aField.SetPosition( displayPropPosition( aDisplay, aAnchorIu ) );
+    aField.SetTextAngle( vertical != aSymbolFlips ? ANGLE_VERTICAL : ANGLE_HORIZONTAL );
+    aField.SetTextSize( textSize( fontId, templateFont ) );
+    applyFont( &aField, fontId, templateFont );
+    aField.SetTextColor( OrcadColor( aDisplay.color ) );
+
+    // Effective justification reads the rendered box, so it must follow every geometry setter
+    aField.SetEffectiveHorizJustify( GR_TEXT_H_ALIGN_LEFT );
+    aField.SetEffectiveVertJustify( GR_TEXT_V_ALIGN_TOP );
+
+    if( aApplyVisibility )
+    {
+        aField.SetVisible( OrcadDisplayPropVisible( aDisplay ) );
+        aField.SetNameShown( OrcadDisplayPropShowsName( aDisplay ) );
+    }
+}
+
+
 int ORCAD_CONVERTER::wireAliasFontId( const ORCAD_ALIAS& aAlias ) const
 {
     if( !m_design.library.templateFonts.empty() )
@@ -3761,9 +3859,7 @@ int ORCAD_CONVERTER::textBaselineOffset( int aTextSize, int aFontIdx, bool aTemp
 
     if( resolved > 0 && resolved <= static_cast<int>( m_design.library.fonts.size() ) )
     {
-        std::string face = m_design.library.fonts[resolved - 1].face;
-        std::transform( face.begin(), face.end(), face.begin(),
-                        []( unsigned char aChar ) { return std::tolower( aChar ); } );
+        std::string face = OrcadLower( m_design.library.fonts[resolved - 1].face );
 
         if( face == "arial narrow" )
             return KiROUND( aTextSize * ( m_design.library.fonts[resolved - 1].bold ? 0.62 : 0.47 ) );
@@ -3822,9 +3918,7 @@ int ORCAD_CONVERTER::textSizeIU( int aFontIdx, bool aTemplateFont ) const
 
     if( resolved > 0 && resolved <= static_cast<int>( m_design.library.fonts.size() ) )
     {
-        std::string face = m_design.library.fonts[resolved - 1].face;
-        std::transform( face.begin(), face.end(), face.begin(),
-                        []( unsigned char aChar ) { return std::tolower( aChar ); } );
+        std::string face = OrcadLower( m_design.library.fonts[resolved - 1].face );
 
         if( face == "arial narrow" )
             compensation = m_design.library.fonts[resolved - 1].bold ? 1.6 : 1.46;
@@ -3857,9 +3951,7 @@ VECTOR2I ORCAD_CONVERTER::textSize( int aFontIdx, bool aTemplateFont ) const
 
     if( ( font.pitchAndFamily & 0x3 ) != c_FIXED_PITCH )
     {
-        std::string face = font.face;
-        std::transform( face.begin(), face.end(), face.begin(),
-                        []( unsigned char aChar ) { return std::tolower( aChar ); } );
+        std::string face = OrcadLower( font.face );
         // lfWidth is an average character width; KiCad's X size is an em scale.
         double averageEmRatio = 0.5;
 

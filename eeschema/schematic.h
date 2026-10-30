@@ -183,6 +183,14 @@ public:
     SCH_SHEET_LIST Hierarchy() const;
 
     /**
+     * True when any sheet in the hierarchy has unsaved changes.
+     *
+     * Answers the question without copying the sheet list, which matters on the paths that ask
+     * repeatedly, such as an idle-time check.
+     */
+    bool IsHierarchyModified() const;
+
+    /**
      * Check if the hierarchy has been built.
      *
      * @return true if RefreshHierarchy() has been called and the hierarchy is populated.
@@ -558,6 +566,14 @@ public:
 
     /**
      * Generate the connection data for the entire schematic hierarchy.
+     *
+     * @param aCommit
+     * @param aCleanupFlags
+     * @param aToolManager
+     * @param aProgressReporter
+     * @param aSchView
+     * @param aChangedItemHandler
+     * @param aLastChangeList
      * @param aCleanupDone the commit already applied cleanup; flags still select the rebuild scope.
      */
     void RecalculateConnections( SCH_COMMIT* aCommit, SCH_CLEANUP_FLAGS aCleanupFlags,
@@ -611,6 +627,7 @@ public:
      * Delete all information for @a aVariantName.
      *
      * @param aVariantName is the name of the variant to remove.
+     * @param aCommit is the commit object to handle undo/redo actions.
      */
     void DeleteVariant( const wxString& aVariantName, SCH_COMMIT* aCommit = nullptr );
 

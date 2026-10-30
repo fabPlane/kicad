@@ -149,6 +149,25 @@ Runtime requirements:
 | `macos/install-deps.sh`, `build.sh`, `bundle.sh` | Homebrew build (same flags as fab_pcb's `build-macos.sh`); `bundle.sh` walks `otool -L`, rewrites load commands to `@rpath`, re-signs |
 | `windows/setup-vcpkg.ps1`, `install-deps.ps1`, `build.ps1`, `bundle.ps1`, `import-check.ps1`, `triplets/` | vcpkg at the manifest's baseline with a files binary cache on the Actions cache; the overlay triplet builds release-only ports; `import-check.ps1` walks every static import with `dumpbin` (the `ldd` check's counterpart) |
 
+Build requirements beyond the usual KiCad set, new with the RHI renderer (upstream, Oct
+2026): `glslangValidator` and `spirv-opt` on every platform, plus `spirv-cross` on macOS,
+which turns the shaders into MSL for Metal (`cmake/RHIShaderCompilation.cmake` stops the
+configure without them). The Linux and macOS `install-deps.sh` install all three; on
+Windows they are vcpkg host ports in `vcpkg.json`, and `build.ps1` checks for them before
+the configure. macOS also needs a SQLite that is not the SDK's: the configure refuses the
+SDK copy, which cannot read WAL databases. `install-deps.sh` installs Homebrew's `sqlite`
+and `build.sh` passes `SQLite3_ROOT` for it. Homebrew's `nng` is 2.x now, which drops the 1.x API that
+`libs/kinng` uses, so the macOS `install-deps.sh` builds a pinned nng 1.x (static) and
+`build.sh` points the configure at it. Ubuntu's `libnng-dev` and the vcpkg baseline are
+still 1.x.
+
+To check a branch without publishing anything, dispatch the workflow with `publish`
+unticked, e.g.
+`gh workflow run nightly.yml --ref <branch> -f ref=<branch> -f force=true -f publish=false`.
+The builds, bundles and smoke tests run as usual and the archives stay on the run as
+artifacts for 7 days. The release job is skipped, so the `nightly` and dated releases are
+not touched.
+
 All of it runs by hand too, e.g. on Linux:
 
 ```bash

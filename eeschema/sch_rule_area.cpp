@@ -178,6 +178,9 @@ void SCH_RULE_AREA::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OP
 
     ptList.clear();
 
+    if( GetPolyShape().IsEmpty() )
+        return;
+
     const std::vector<VECTOR2I>& polyPoints = GetPolyShape().Outline( 0 ).CPoints();
 
     for( const VECTOR2I& pt : polyPoints )
@@ -326,7 +329,7 @@ void SCH_RULE_AREA::RefreshContainedItemsAndDirectives( SCH_SCREEN* screen )
                 addContainedItem( areaItem );
 
                 // Add child pins which are within the rule area
-                for( SCH_PIN* pin : symbol->GetPins() )
+                for( SCH_PIN* pin : symbol->GetGraphicalPins( ALL_UNITS, ALL_BODY_STYLES ) )
                 {
                     if( GetPolyShape().Collide( pin->GetPosition() ) )
                         addContainedItem( pin );
@@ -355,16 +358,32 @@ SCH_RULE_AREA::UpdateRuleAreasInScreens( std::unordered_set<SCH_SCREEN*>& screen
     for( SCH_SCREEN* screen : screens )
     {
         // First reset all item caches - must be done first to ensure two rule areas
-        // on the same item don't overwrite each other's caches
+        // on the same item don't overwrite each other's caches.  Pins are owned by
+        // symbols and are not in the screen's item tree, so clear them through their parent.
         for( SCH_ITEM* item : screen->Items() )
         {
             if( item->Type() == SCH_RULE_AREA_T )
                 static_cast<SCH_RULE_AREA*>( item )->resetCaches();
 
-            if( item->Type() == SCH_DIRECTIVE_LABEL_T && view )
-                view->Update( item, KIGFX::REPAINT );
+            if( item->Type() == SCH_DIRECTIVE_LABEL_T )
+            {
+                static_cast<SCH_DIRECTIVE_LABEL*>( item )->ClearConnectedRuleAreas();
+
+                if( view )
+                    view->Update( item, KIGFX::REPAINT );
+            }
 
             item->ClearRuleAreasCache();
+
+            if( item->Type() == SCH_SYMBOL_T )
+            {
+                item->RunOnChildren(
+                        []( SCH_ITEM* aChild )
+                        {
+                            aChild->ClearRuleAreasCache();
+                        },
+                        RECURSE_MODE::NO_RECURSE );
+            }
         }
 
         // Secondly refresh the contained items
@@ -437,8 +456,8 @@ void SCH_RULE_AREA::GetMsgPanelInfo( EDA_DRAW_FRAME* aFrame, std::vector<MSG_PAN
 {
     aList.emplace_back( _( "Rule Area" ), wxEmptyString );
 
-    wxString msg;
-    msg.Printf( wxS( "%d" ), GetPolyShape().Outline( 0 ).PointCount() );
+    wxString msg = wxString::Format( wxS( "%d" ),
+                                     GetPolyShape().IsEmpty() ? 0 : GetPolyShape().Outline( 0 ).PointCount() );
     aList.emplace_back( _( "Points" ), msg );
 
     m_stroke.GetMsgPanelInfo( aFrame, aList );

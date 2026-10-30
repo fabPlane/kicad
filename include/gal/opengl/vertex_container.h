@@ -28,6 +28,7 @@
 #ifndef VERTEX_CONTAINER_H_
 #define VERTEX_CONTAINER_H_
 
+#include <gal/gal.h>
 #include <gal/opengl/vertex_common.h>
 
 namespace KIGFX
@@ -35,7 +36,7 @@ namespace KIGFX
 class VERTEX_ITEM;
 class SHADER;
 
-class VERTEX_CONTAINER
+class GAL_API VERTEX_CONTAINER
 {
 public:
     /**
@@ -172,23 +173,23 @@ protected:
         return m_currentSize - m_freeSpace;
     }
 
-    ///< Free space left in the container, expressed in vertices
+    /// Free space left in the container, expressed in vertices
     unsigned int    m_freeSpace;
 
-    ///< Current container size, expressed in vertices
+    /// Current container size, expressed in vertices
     unsigned int    m_currentSize;
 
-    ///< Store the initial size, so it can be resized to this on Clear()
+    /// Store the initial size, so it can be resized to this on Clear()
     unsigned int    m_initialSize;
 
-    ///< Actual storage memory
+    /// Actual storage memory
     VERTEX*         m_vertices;
 
     // Status flags
     bool            m_failed;
     bool            m_dirty;
 
-    ///< Default initial size of a container (expressed in vertices)
+    /// Default initial size of a container (expressed in vertices)
     static constexpr unsigned int DEFAULT_SIZE = 1048576;
 };
 } // namespace KIGFX

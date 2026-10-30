@@ -294,7 +294,8 @@ double SCH_LINE::ViewGetLOD( int aLayer, const KIGFX::VIEW* aView ) const
 {
     if( aLayer == LAYER_OP_VOLTAGES )
     {
-        if( m_start == m_end )
+        // Nothing is drawn without a value, and a threshold per wire would redraw a kept canvas on every zoom
+        if( m_start == m_end || m_operatingPoint.IsEmpty() )
             return LOD_HIDE;
 
         const int height = std::abs( m_end.y - m_start.y );
@@ -558,7 +559,7 @@ SCH_LINE* SCH_LINE::MergeOverlap( SCH_SCREEN* aScreen, SCH_LINE* aLine, bool aCh
     wxCHECK_MSG( aLine != nullptr && aLine->Type() == SCH_LINE_T, nullptr,
                  wxT( "Cannot test line segment for overlap." ) );
 
-    if( this == aLine || GetLayer() != aLine->GetLayer() )
+    if( this == aLine || GetLayer() != aLine->GetLayer() || GetStroke() != aLine->GetStroke() )
         return nullptr;
 
     VECTOR2I leftmost_start = aLine->m_start;
@@ -866,8 +867,7 @@ wxString SCH_LINE::GetItemDescription( UNITS_PROVIDER* aUnitsProvider, bool aFul
         }
     }
 
-    return wxString::Format( txtfmt,
-                             aUnitsProvider->MessageTextFromValue( m_start.Distance( m_end ) ) );
+    return wxString::Format( txtfmt, aUnitsProvider->MessageTextFromValue( m_start.Distance( m_end ) ) );
 }
 
 
@@ -1097,7 +1097,7 @@ void SCH_LINE::GetMsgPanelInfo( EDA_DRAW_FRAME* aFrame, std::vector<MSG_PANEL_IT
 
     LINE_STYLE lineStyle = GetStroke().GetLineStyle();
 
-    if( GetEffectiveLineStyle() != lineStyle )
+    if( ( IsWire() || IsBus() ) && GetEffectiveLineStyle() != lineStyle )
         aList.emplace_back( _( "Line Style" ), _( "from netclass" ) );
     else
         m_stroke.GetMsgPanelInfo( aFrame, aList, true, false );

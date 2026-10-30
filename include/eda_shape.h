@@ -97,6 +97,8 @@ public:
 
     virtual ~EDA_SHAPE();
 
+    virtual EDA_ITEM* AsEdaItem() { return nullptr; }
+
     void SwapShape( EDA_SHAPE* aImage );
 
     void Serialize( google::protobuf::Any &aContainer ) const override;
@@ -174,11 +176,17 @@ public:
     virtual void SetShape( SHAPE_T aShape )    { m_shape = aShape; }
     SHAPE_T      GetShape() const              { return m_shape; }
 
-    const LINE_ENDING& GetStartEnding() const { return m_startEnding; }
-    void               SetStartEnding( const LINE_ENDING& aEnding ) { m_startEnding = aEnding; }
+    const LINE_ENDING& GetStartEnding() const
+    {
+        return IsClosed() ? m_blankEnding : m_startEnding;
+    }
+    void SetStartEnding( const LINE_ENDING& aEnding ) { m_startEnding = aEnding; }
 
-    const LINE_ENDING& GetEndEnding() const { return m_endEnding; }
-    void               SetEndEnding( const LINE_ENDING& aEnding ) { m_endEnding = aEnding; }
+    const LINE_ENDING& GetEndEnding() const
+    {
+        return IsClosed() ? m_blankEnding : m_endEnding;
+    }
+    void SetEndEnding( const LINE_ENDING& aEnding ) { m_endEnding = aEnding; }
 
     LINE_ENDING_STYLE GetStartEndingStyle() const { return m_startEnding.GetStyle(); }
     void              SetStartEndingStyle( LINE_ENDING_STYLE aStyle ) { m_startEnding.SetStyle( aStyle ); }
@@ -258,7 +266,7 @@ public:
      *
      * @return false if the outline is invalid or the line endings consume its body.
      */
-    bool ShortenBodyPolyPoints( std::vector<VECTOR2I>& aPoints, bool aClosed, int aOutlineIdx, int aLineWidth ) const;
+    bool ShortenBodyPolyPoints( std::vector<VECTOR2I>& aPoints, int aOutlineIdx, int aLineWidth ) const;
 
     /**
      * Copy an outline and apply line-ending body shortening when applicable.
@@ -427,7 +435,7 @@ public:
     const ELLIPSE<int>& GetEllipse() const { return m_ellipse; }
 
     VECTOR2I getCenter() const;
-    void     SetCenter( const VECTOR2I& aCenter );
+    virtual void SetCenter( const VECTOR2I& aCenter );
 
     /**
      * Set the end point from the angle center and start.
@@ -473,6 +481,12 @@ public:
      * the scenes.  However, they are what SHOULD be stored.
      */
     virtual void SetArcGeometry( const VECTOR2I& aStart, const VECTOR2I& aMid, const VECTOR2I& aEnd );
+
+    /**
+     * Set the shape from three points, falling back to a SEGMENT from \a aStart to \a aEnd when the points
+     * are collinear and so have no finite arc center.
+     */
+    void SetArcOrSegment( const VECTOR2I& aStart, const VECTOR2I& aMid, const VECTOR2I& aEnd );
 
     /**
      * Set the data used for mid point caching.
@@ -523,6 +537,8 @@ public:
                 break;
             }
         }
+
+        m_hatchingDirty = true;
     }
 
     void SetPolyPoints( const std::vector<VECTOR2I>& aPoints );
@@ -533,7 +549,7 @@ public:
      *
      * Has meaning only for #BEZIER shape.
      *
-     * @param aMinSegLen is the max deviation between the polyline and the curve.
+     * @param aMaxError is the max deviation between the polyline and the curve.
      */
     void RebuildBezierToSegmentsPointsList( int aMaxError );
     void RebuildBezierToSegmentsPointsList() { RebuildBezierToSegmentsPointsList( getMaxError() ); }
@@ -597,7 +613,7 @@ public:
 
     void SetRectangle( const long long int& aHeight, const long long int& aWidth );
 
-    void SetCornerRadius( int aRadius );
+    virtual void SetCornerRadius( int aRadius );
     int GetCornerRadius() const;
 
     bool IsClockwiseArc() const;
@@ -621,7 +637,9 @@ public:
      * @param aClearance is the clearance around the pad.
      * @param aError is the maximum deviation from a true arc.
      * @param aErrorLoc whether any approximation error should be placed inside or outside
-     * @param ignoreLineWidth is used for edge cut items where the line width is only for visualization
+     * @param ignoreLineWidth is used for edge cut items where the line width is only for
+     *                        visualization
+     * @param includeFill
      */
     void TransformShapeToPolygon( SHAPE_POLY_SET& aBuffer, int aClearance, int aError, ERROR_LOC aErrorLoc,
                                   bool ignoreLineWidth = false, bool includeFill = false ) const;
@@ -702,6 +720,7 @@ protected:
      *                  shapes.
      * @param aLineChainOnly indicates #SHAPE_POLY_SET is being abused slightly to represent a
      *                       lineChain rather than a closed polygon.
+     * @param aHittesting
      */
     // fixme: move to shape_compound
     std::vector<SHAPE*> makeEffectiveShapes( bool aEdgeOnly, bool aLineChainOnly = false,
@@ -734,6 +753,7 @@ protected:
     STROKE_PARAMS          m_stroke;       // Line style, width, etc.
     LINE_ENDING            m_startEnding;  // Line ending at start point
     LINE_ENDING            m_endEnding;    // Line ending at end point
+    LINE_ENDING            m_blankEnding;  // Used to return a blank ending for closed shapes
     FILL_T                 m_fill;
     COLOR4D                m_fillColor;
 

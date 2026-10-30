@@ -18,6 +18,7 @@
 */
 
 #include "pcb_io_ipc2581.h"
+#include "ipc2581_avl_order.h"
 #include "ipc2581_types.h"
 
 #include <base_units.h>
@@ -30,6 +31,15 @@
 #include <connectivity/connectivity_data.h>
 #include <connectivity/connectivity_algo.h>
 #include <convert_basic_shapes_to_polygon.h>
+#include <exporters/fab_model/fab_layer_index.h>
+#include <exporters/fab_model/fab_net_names.h>
+#include <exporters/fab_model/fab_test_points.h>
+#include <exporters/fab_model/fab_component_row.h>
+#include <exporters/fab_model/fab_drill.h>
+#include <exporters/fab_model/fab_drill_model.h>
+#include <exporters/fab_model/fab_pin.h>
+#include <exporters/fab_model/fab_stackup.h>
+#include <exporters/fab_model/fab_pad_geometry.h>
 #include <font/font.h>
 #include <footprint.h>
 #include <hash.h>
@@ -45,6 +55,7 @@
 #include <pgm_base.h>
 #include <progress_reporter.h>
 #include <settings/settings_manager.h>
+#include <scoped_set_reset.h>
 #include <string_utils.h>
 #include <wx_fstream_progress.h>
 
@@ -101,10 +112,19 @@ static void mixBackdrillIntoPadstackHash( size_t& aHash, const PADSTACK& aPadsta
 }
 
 
-static size_t ipcPadstackHash( const PCB_VIA* aVia )
+static size_t ipcPadstackHash( const PCB_VIA* aVia, const DRILL_OPERATION* aOperation )
 {
     size_t hash = hash_fp_item( aVia, 0 );
     mixBackdrillIntoPadstackHash( hash, aVia->Padstack() );
+
+    if( aOperation )
+    {
+        hash_combine( hash, aOperation->m_Filled, aOperation->m_Capped,
+                      aOperation->m_TopCovered, aOperation->m_BottomCovered,
+                      aOperation->m_TopPlugged, aOperation->m_BottomPlugged,
+                      aOperation->m_TopTented, aOperation->m_BottomTented );
+    }
+
     return hash;
 }
 
@@ -343,11 +363,15 @@ wxString PCB_IO_IPC2581::genString( const wxString& aStr, const char* aPrefix ) 
     wxString base = str;
     wxString name = base;
     int      suffix = 1;
+    // Designators and OEM part numbers use separate schema keys; other names share one set
+    wxString            prefix = aPrefix ? wxString( aPrefix ) : wxString();
+    bool                ownSet = prefix == wxS( "CMP" ) || prefix == wxS( "REF" );
+    std::set<wxString>& names = m_element_names[ownSet ? prefix : wxString()];
 
-    while( m_element_names.count( name ) )
+    while( names.count( name ) )
         name = wxString::Format( "%s_%d", base, suffix++ );
 
-    m_element_names.insert( name );
+    names.insert( name );
     m_generated_names[key] = name;
 
     return name;
@@ -394,30 +418,23 @@ wxString PCB_IO_IPC2581::genLayersString( PCB_LAYER_ID aTop, PCB_LAYER_ID aBotto
 
 wxString PCB_IO_IPC2581::pinName( const PAD* aPad ) const
 {
-    wxString name = aPad->GetNumber();
+    FOOTPRINT* footprint = aPad->GetParentFootprint();
+    size_t index = 0;
 
-    FOOTPRINT* fp = aPad->GetParentFootprint();
-    size_t ii = 0;
-
-    if( name.empty() && fp )
+    if( ( aPad->GetAttribute() == PAD_ATTRIB::NPTH || aPad->GetNumber().IsEmpty() ) && footprint )
     {
-        for( ii = 0; ii < fp->GetPadCount(); ++ii )
+        for( ; index < footprint->Pads().size(); ++index )
         {
-            if( fp->Pads()[ii] == aPad )
+            if( footprint->Pads()[index] == aPad )
+            {
                 break;
+            }
         }
     }
 
-    // Pins are required to have names, so if our pad doesn't have a name, we need to
-    // generate one that is unique
-    if( aPad->GetAttribute() == PAD_ATTRIB::NPTH )
-        name = wxString::Format( "NPTH%zu", ii );
-    else if( name.empty() )
-        name = wxString::Format( "PAD%zu", ii );
-
     // Pins are scoped per-package, so we only sanitize; uniqueness is handled by
     // the per-package pin_nodes map in addPackage().
-    return sanitizeId( name );
+    return sanitizeId( MakeFabPin( *aPad, index ).m_name );
 }
 
 
@@ -474,17 +491,7 @@ wxString PCB_IO_IPC2581::componentName( FOOTPRINT* aFootprint )
 
 wxString PCB_IO_IPC2581::floatVal( double aVal, int aSigFig ) const
 {
-    wxString str = wxString::FromCDouble( aVal, aSigFig == -1 ? m_sigfig : aSigFig );
-
-    // Remove all but the last trailing zeros from str
-    while( str.EndsWith( wxT( "00" ) ) )
-        str.RemoveLast();
-
-    // We don't want to output -0.0 as this value is just 0 for fabs
-    if( str == wxT( "-0.0" ) )
-        return wxT( "0.0" );
-
-    return str;
+    return FormatTrimmedDecimal( aVal, aSigFig == -1 ? m_sigfig : aSigFig );
 }
 
 
@@ -681,10 +688,7 @@ size_t PCB_IO_IPC2581::shapeHash( const PCB_SHAPE& aShape )
 
 wxXmlNode* PCB_IO_IPC2581::generateContentStackup( wxXmlNode* aContentNode )
 {
-
-    BOARD_DESIGN_SETTINGS& bds = m_board->GetDesignSettings();
-    BOARD_STACKUP& stackup = bds.GetStackupDescriptor();
-    stackup.SynchronizeWithBoard( &bds );
+    const BOARD_STACKUP& stackup = m_fabStackup->Stackup();
 
     wxXmlNode* color_node = new wxXmlNode( wxXML_ELEMENT_NODE, "DictionaryColor" );
 
@@ -741,14 +745,12 @@ wxString PCB_IO_IPC2581::netName( const wxString& aNetname, const wxString& aSuf
 {
     if( m_anonymizeNets )
     {
-        // One map for each view of a net keeps the file correct
-        // The name agrees with the qualifiedNameType of revision B
-        auto [it, inserted] = m_net_name_dict.emplace( aNetname, wxString() );
+        auto it = m_net_name_dict.find( aNetname );
 
-        if( inserted )
-            it->second = wxString::Format( "NET_%zu", m_net_name_dict.size() );
+        if( it != m_net_name_dict.end() )
+            return it->second + aSuffix;
 
-        return it->second + aSuffix;
+        return wxS( "NET_0" ) + aSuffix;
     }
 
     // Add the suffix before genString so that the name stays unique
@@ -1130,16 +1132,7 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PAD& aPad, PCB_LAY
 {
     int      maxError = m_board->GetDesignSettings().m_MaxError;
     wxString name;
-
-    // Per-side margin baked into the exported geometry on the solder mask and paste layers,
-    // mirroring PlotStandardLayer() in plot_board_layers.cpp so the export matches the
-    // plotted artwork.
-    VECTOR2I margin;
-
-    if( IsSolderMaskLayer( aLayer ) )
-        margin.x = margin.y = aPad.GetSolderMaskExpansion( aLayer );
-    else if( aLayer == F_Paste || aLayer == B_Paste )
-        margin = aPad.GetSolderPasteMargin( aLayer );
+    VECTOR2I margin = ResolvePadMargin( aPad, aLayer );
 
     // The same pad yields different geometry per layer: complex padstacks differ between
     // copper layers and the mask/paste margins are layer-specific.  The primitive cache must
@@ -1158,6 +1151,9 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PAD& aPad, PCB_LAY
         return;
     }
 
+    PAD_LAYER_GEOMETRY geometry = ResolvePadLayer( aPad, aLayer, maxError );
+    const PAD&         resolved = geometry.Pad();
+
     switch( aPad.GetShape( aLayer ) )
     {
     case PAD_SHAPE::CIRCLE:
@@ -1168,7 +1164,7 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PAD& aPad, PCB_LAY
         wxXmlNode* entry_node = appendNode( m_shape_std_node, "EntryStandard" );
         addAttribute( entry_node,  "id", name );
 
-        int diameter = aPad.GetSize( aLayer ).x + 2 * margin.x;
+        int diameter = resolved.GetSize( aLayer ).x;
 
         wxXmlNode* circle_node = appendNode( entry_node, "Circle" );
         addAttribute( circle_node, "diameter", floatVal( m_scale * diameter ) );
@@ -1183,7 +1179,7 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PAD& aPad, PCB_LAY
         wxXmlNode* entry_node = appendNode( m_shape_std_node, "EntryStandard" );
         addAttribute( entry_node,  "id", name );
 
-        VECTOR2I pad_size = aPad.GetSize( aLayer ) + 2 * margin;
+        VECTOR2I pad_size = resolved.GetSize( aLayer );
 
         // A positive margin inflates the rectangle into a rounded rectangle (the Minkowski
         // sum of the rectangle and a disc of radius margin); the board plotter promotes the
@@ -1193,7 +1189,7 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PAD& aPad, PCB_LAY
             wxXmlNode* rect_node = appendNode( entry_node, "RectRound" );
             addAttribute( rect_node, "width", floatVal( m_scale * std::abs( pad_size.x ) ) );
             addAttribute( rect_node, "height", floatVal( m_scale * std::abs( pad_size.y ) ) );
-            addAttribute( rect_node, "radius", floatVal( m_scale * margin.x ) );
+            addAttribute( rect_node, "radius", floatVal( m_scale * geometry.CornerRadius() ) );
             addAttribute( rect_node, "upperRight", "true" );
             addAttribute( rect_node, "upperLeft", "true" );
             addAttribute( rect_node, "lowerRight", "true" );
@@ -1217,7 +1213,7 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PAD& aPad, PCB_LAY
         wxXmlNode* entry_node = appendNode( m_shape_std_node, "EntryStandard" );
         addAttribute( entry_node,  "id", name );
 
-        VECTOR2I pad_size = aPad.GetSize( aLayer ) + 2 * margin;
+        VECTOR2I pad_size = resolved.GetSize( aLayer );
 
         wxXmlNode* oval_node = appendNode( entry_node, "Oval" );
         addAttribute( oval_node,  "width", floatVal( m_scale * pad_size.x ) );
@@ -1234,23 +1230,8 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PAD& aPad, PCB_LAY
         wxXmlNode* entry_node = appendNode( m_shape_std_node, "EntryStandard" );
         addAttribute( entry_node,  "id", name );
 
-        VECTOR2I pad_size = aPad.GetSize( aLayer ) + 2 * margin;
-        int      radius;
-
-        // An isotropic margin inflates a rounded rectangle into another rounded rectangle
-        // whose corner radius grows by the margin (Minkowski sum with a disc).  An
-        // anisotropic margin (e.g. a relative paste margin on a non-square pad) has no such
-        // closed form, so preserve the radius ratio against the adjusted size instead.  Both
-        // match PlotStandardLayer().
-        if( margin.x == margin.y )
-        {
-            radius = std::max( 0, aPad.GetRoundRectCornerRadius( aLayer ) + margin.x );
-        }
-        else
-        {
-            radius = KiROUND( aPad.GetRoundRectRadiusRatio( aLayer )
-                              * std::min( std::abs( pad_size.x ), std::abs( pad_size.y ) ) );
-        }
+        VECTOR2I pad_size = resolved.GetSize( aLayer );
+        int      radius = geometry.CornerRadius();
 
         wxXmlNode* roundrect_node = appendNode( entry_node, "RectRound" );
         addAttribute( roundrect_node,  "width", floatVal( m_scale * pad_size.x ) );
@@ -1277,7 +1258,7 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PAD& aPad, PCB_LAY
             // A deflated (or anisotropically inflated) chamfered rectangle keeps its
             // parametric shape, with the chamfer ratio applied to the adjusted size; this is
             // what PlotStandardLayer() plots.
-            VECTOR2I pad_size = aPad.GetSize( aLayer ) + 2 * margin;
+            VECTOR2I pad_size = resolved.GetSize( aLayer );
 
             wxXmlNode* chamfered_node = appendNode( entry_node, "RectCham" );
             addAttribute( chamfered_node, "width", floatVal( m_scale * pad_size.x ) );
@@ -1304,16 +1285,7 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PAD& aPad, PCB_LAY
             // An isotropically inflated chamfered rectangle is no longer a chamfered
             // rectangle (the chamfer corners become rounded), so export the polygon the
             // board plotter produces: the original outline inflated with rounded corners.
-            PAD dummy( aPad );
-            dummy.SetPosition( VECTOR2I( 0, 0 ) );
-            dummy.SetOffset( aLayer, VECTOR2I( 0, 0 ) );
-            dummy.SetOrientation( ANGLE_0 );
-
-            SHAPE_POLY_SET outline;
-            dummy.TransformShapeToPolygon( outline, aLayer, 0, maxError, ERROR_INSIDE );
-            outline.InflateWithLinkedHoles( margin.x, CORNER_STRATEGY::ROUND_ALL_CORNERS, maxError );
-
-            addContourNode( entry_node, outline );
+            addContourNode( entry_node, geometry.Contour() );
         }
 
         break;
@@ -1327,28 +1299,7 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PAD& aPad, PCB_LAY
         wxXmlNode* entry_node = appendNode( m_shape_std_node, "EntryStandard" );
         addAttribute( entry_node,  "id", name );
 
-        VECTOR2I       pad_size = aPad.GetSize( aLayer );
-        VECTOR2I       trap_delta = aPad.GetDelta( aLayer );
-        SHAPE_POLY_SET outline;
-        outline.NewOutline();
-        int dx = pad_size.x / 2;
-        int dy = pad_size.y / 2;
-        int ddx = trap_delta.x / 2;
-        int ddy = trap_delta.y / 2;
-
-        outline.Append( -dx - ddy,  dy + ddx );
-        outline.Append(  dx + ddy,  dy - ddx );
-        outline.Append(  dx - ddy, -dy + ddx );
-        outline.Append( -dx + ddy, -dy - ddx );
-
-        // Shape polygon can have holes so use InflateWithLinkedHoles(), not Inflate()
-        // which can create bad shapes if margin.x is < 0
-        if( margin.x )
-        {
-            outline.InflateWithLinkedHoles( margin.x, CORNER_STRATEGY::ROUND_ALL_CORNERS, maxError );
-        }
-
-        addContourNode( entry_node, outline );
+        addContourNode( entry_node, geometry.Contour() );
 
         break;
     }
@@ -1360,16 +1311,7 @@ void PCB_IO_IPC2581::addShape( wxXmlNode* aContentNode, const PAD& aPad, PCB_LAY
         wxXmlNode* entry_node = appendNode( m_shape_std_node, "EntryStandard" );
         addAttribute( entry_node,  "id", name );
 
-        SHAPE_POLY_SET shape;
-        aPad.MergePrimitivesAsPolygon( aLayer, &shape );
-
-        // Custom pads are expected to have margin.x == margin.y (see PlotStandardLayer()).
-        if( margin.x )
-        {
-            shape.InflateWithLinkedHoles( margin.x, CORNER_STRATEGY::ROUND_ALL_CORNERS, maxError );
-        }
-
-        addContourNode( entry_node, shape );
+        addContourNode( entry_node, geometry.Contour() );
         break;
     }
     default:
@@ -1751,12 +1693,10 @@ void PCB_IO_IPC2581::addSlotCavity( wxXmlNode* aNode, const PAD& aPad, const wxS
     addAttribute( slotNode, "minusTol", "0.0" );
 
     if( m_revision == IPC2581::REVISION::C )
-        addLocationNode( slotNode, aPad, false, aPad.GetLayer() );
+        addLocationNode( slotNode, aPad.GetPosition().x, aPad.GetPosition().y );
 
-    // Normally only oblong drill shapes should reach this code path since m_slot_holes
-    // is filtered to pads where DrillSizeX != DrillSizeY. However, use a fallback to
-    // ensure valid XML is always generated.
-    if( aPad.GetDrillShape() == PAD_DRILL_SHAPE::OBLONG )
+    // B1 SlotCavity accepts only Simple shapes, so revision B writes the hole outline
+    if( m_revision == IPC2581::REVISION::C && aPad.GetDrillShape() == PAD_DRILL_SHAPE::OBLONG )
     {
         VECTOR2I  drill_size = aPad.GetDrillSize();
         EDA_ANGLE rotation = aPad.GetOrientation().Normalize();
@@ -1783,7 +1723,7 @@ void PCB_IO_IPC2581::addSlotCavity( wxXmlNode* aNode, const PAD& aPad, const wxS
     }
     else
     {
-        // Fallback to polygon outline for non-oblong shapes
+        // Polygon outline for non-oblong drills and revision B
         SHAPE_POLY_SET poly_set;
         int            maxError = m_board->GetDesignSettings().m_MaxError;
         aPad.TransformHoleToPolygon( poly_set, 0, maxError, ERROR_INSIDE );
@@ -1893,6 +1833,7 @@ wxXmlNode* PCB_IO_IPC2581::generateBOMSection( wxXmlNode* aEcadNode )
 
     for( FOOTPRINT* fp_it : m_board->Footprints() )
     {
+        FAB_COMPONENT_ROW row = MakeFabComponentRow( *fp_it, m_variantName );
         std::unique_ptr<FOOTPRINT> fp( static_cast<FOOTPRINT*>( fp_it->Clone() ) );
         fp->SetParentGroup( nullptr );
         fp->SetPosition( {0, 0} );
@@ -1934,9 +1875,7 @@ wxXmlNode* PCB_IO_IPC2581::generateBOMSection( wxXmlNode* aEcadNode )
 
         // TODO: The options are "ELECTRICAL", "MECHANICAL", "PROGRAMMABLE", "DOCUMENT", "MATERIAL"
         //      We need to figure out how to determine this.
-        const wxString variantName = m_board ? m_board->GetCurrentVariant() : wxString();
-
-        if( entry->m_pads == 0 || fp_it->GetExcludedFromBOMForVariant( variantName ) )
+        if( entry->m_pads == 0 || row.m_excludedFromBom )
             entry->m_type = "DOCUMENT";
         else
             entry->m_type = "ELECTRICAL";
@@ -1955,15 +1894,14 @@ wxXmlNode* PCB_IO_IPC2581::generateBOMSection( wxXmlNode* aEcadNode )
         REFDES refdes;
         refdes.m_name = componentName( fp_it );
         refdes.m_pkg = iter->second;
-        refdes.m_populate = !fp->GetDNPForVariant( variantName )
-                            && !fp->GetExcludedFromBOMForVariant( variantName );
+        refdes.m_populate = !row.m_dnp && !row.m_excludedFromBom;
         refdes.m_layer = m_layer_name_map[fp_it->GetLayer()];
 
         ( *bom_iter )->m_refdes->push_back( refdes );
 
         // TODO: This amalgamates all the properties from all the footprints.  We need to decide
         // if we want to group footprints by their properties
-        for( PCB_FIELD* prop : fp->GetFields() )
+        for( PCB_FIELD* prop : fp_it->GetFields() )
         {
             // We don't include Reference, Datasheet, or Description in BOM characteristics.
             // Value and any user-defined fields are included.  Reference is captured above,
@@ -1971,7 +1909,7 @@ wxXmlNode* PCB_IO_IPC2581::generateBOMSection( wxXmlNode* aEcadNode )
             if( prop->IsMandatory() && !prop->IsValue() )
                 continue;
 
-            ( *bom_iter )->m_props->emplace( prop->GetName(), prop->GetShownText( RESOLVED ) );
+            ( *bom_iter )->m_props->emplace( prop->GetName(), row.Field( prop->GetName() ) );
         }
     }
 
@@ -2097,9 +2035,7 @@ wxXmlNode* PCB_IO_IPC2581::generateEcadSection()
 
 void PCB_IO_IPC2581::generateCadSpecs( wxXmlNode* aCadLayerNode )
 {
-    BOARD_DESIGN_SETTINGS& dsnSettings = m_board->GetDesignSettings();
-    BOARD_STACKUP&         stackup = dsnSettings.GetStackupDescriptor();
-    stackup.SynchronizeWithBoard( &dsnSettings );
+    const BOARD_STACKUP& stackup = m_fabStackup->Stackup();
 
     std::vector<BOARD_STACKUP_ITEM*> layers = stackup.GetList();
     std::set<PCB_LAYER_ID> added_layers;
@@ -2224,12 +2160,6 @@ void PCB_IO_IPC2581::addCadHeader( wxXmlNode* aEcadNode )
 }
 
 
-bool PCB_IO_IPC2581::isValidLayerFor2581( PCB_LAYER_ID aLayer )
-{
-    return IsCopperLayer( aLayer ) || ( IsNonCopperLayer( aLayer ) && aLayer <= User_9 ) || aLayer == UNDEFINED_LAYER;
-}
-
-
 void PCB_IO_IPC2581::addLayerAttributes( wxXmlNode* aNode, PCB_LAYER_ID aLayer )
 {
     switch( aLayer )
@@ -2280,15 +2210,6 @@ void PCB_IO_IPC2581::addLayerAttributes( wxXmlNode* aNode, PCB_LAYER_ID aLayer )
     case Eco1_User:
     case Eco2_User:
     case Margin:
-    case User_1:
-    case User_2:
-    case User_3:
-    case User_4:
-    case User_5:
-    case User_6:
-    case User_7:
-    case User_8:
-    case User_9:
         addAttribute( aNode,  "layerFunction", "DOCUMENT" );
         addAttribute( aNode,  "polarity", "POSITIVE" );
         addAttribute( aNode,  "side", "NONE" );
@@ -2304,6 +2225,12 @@ void PCB_IO_IPC2581::addLayerAttributes( wxXmlNode* aNode, PCB_LAYER_ID aLayer )
                                          : aLayer == B_Cu ? "BOTTOM"
                                                           : "INTERNAL" );
         }
+        else if( IsUserLayer( aLayer ) )
+        {
+            addAttribute( aNode, "layerFunction", "DOCUMENT" );
+            addAttribute( aNode, "polarity", "POSITIVE" );
+            addAttribute( aNode, "side", "NONE" );
+        }
 
         break; // Do not handle other layers
     }
@@ -2312,9 +2239,7 @@ void PCB_IO_IPC2581::addLayerAttributes( wxXmlNode* aNode, PCB_LAYER_ID aLayer )
 
 void PCB_IO_IPC2581::generateStackup( wxXmlNode* aCadLayerNode )
 {
-    BOARD_DESIGN_SETTINGS& dsnSettings = m_board->GetDesignSettings();
-    BOARD_STACKUP&         stackup = dsnSettings.GetStackupDescriptor();
-    stackup.SynchronizeWithBoard( &dsnSettings );
+    const BOARD_STACKUP& stackup = m_fabStackup->Stackup();
 
     // The coating goes with the miscellaneous fab layers and its Spec needs IPC-2581C
     surfaceFinishType finishType = getSurfaceFinishType( stackup.m_FinishType );
@@ -2404,10 +2329,7 @@ void PCB_IO_IPC2581::generateStackup( wxXmlNode* aCadLayerNode )
 
 void PCB_IO_IPC2581::generateCadLayers( wxXmlNode* aCadLayerNode )
 {
-
-    BOARD_DESIGN_SETTINGS& dsnSettings = m_board->GetDesignSettings();
-    BOARD_STACKUP&         stackup = dsnSettings.GetStackupDescriptor();
-    stackup.SynchronizeWithBoard( &dsnSettings );
+    const BOARD_STACKUP& stackup = m_fabStackup->Stackup();
 
     std::vector<BOARD_STACKUP_ITEM*> layers = stackup.GetList();
     std::set<PCB_LAYER_ID> added_layers;
@@ -2457,8 +2379,7 @@ void PCB_IO_IPC2581::generateCadLayers( wxXmlNode* aCadLayerNode )
 
     for( PCB_LAYER_ID layer : layer_seq )
     {
-        if( added_layers.find( layer ) != added_layers.end() || !isValidLayerFor2581( layer )
-            || !layerIncluded( layer ) )
+        if( added_layers.find( layer ) != added_layers.end() || !layerIncluded( layer ) )
         {
             continue;
         }
@@ -2497,39 +2418,32 @@ void PCB_IO_IPC2581::generateCadLayers( wxXmlNode* aCadLayerNode )
 
 void PCB_IO_IPC2581::generateDrillLayers( wxXmlNode* aCadLayerNode )
 {
-    for( BOARD_ITEM* item : m_board->Tracks() )
+    for( const FAB_DRILL_LAYER& layer : m_fabDrillModel->Layers() )
     {
-        if( item->Type() == PCB_VIA_T )
+        if( layer.m_Span.m_IsBackdrill )
+            continue;
+
+        for( const DRILL_OPERATION& op : layer.m_Holes )
+            m_drill_layers[layer.m_Span].push_back( op.m_SourceItem );
+
+        for( const DRILL_OPERATION& op : layer.m_Slots )
         {
-            PCB_VIA* via = static_cast<PCB_VIA*>( item );
-            m_drill_layers[std::make_pair( via->TopLayer(), via->BottomLayer() )].push_back( via );
+            if( op.m_SourceItem->Type() == PCB_PAD_T )
+                m_slot_holes[layer.m_Span.Pair()].push_back( static_cast<PAD*>( op.m_SourceItem ) );
         }
     }
 
-    for( FOOTPRINT* fp : m_board->Footprints() )
-    {
-        for( PAD* pad : fp->Pads() )
-        {
-            // Shared with the drill writers and ODB++, which each used to decide this
-            // separately and disagreed on a circular drill shape with unequal sizes
-            if( IsDrillSlot( *pad ) )
-                m_slot_holes[std::make_pair( F_Cu, B_Cu )].push_back( pad );
-            else if( pad->HasHole() )
-                m_drill_layers[std::make_pair( F_Cu, B_Cu )].push_back( pad );
-        }
-    }
-
-    for( const auto& [layers, vec] : m_drill_layers )
+    for( const auto& [span, vec] : m_drill_layers )
     {
         wxXmlNode* drillNode = appendNode( aCadLayerNode, "Layer" );
-        drillNode->AddAttribute( "name", genLayersString( layers.first, layers.second, "DRILL" ) );
+        drillNode->AddAttribute( "name", genLayersString( span.TopLayer(), span.BottomLayer(), "DRILL" ) );
         addAttribute( drillNode,  "layerFunction", "DRILL" );
         addAttribute( drillNode,  "polarity", "POSITIVE" );
         addAttribute( drillNode,  "side", "ALL" );
 
         wxXmlNode* spanNode = appendNode( drillNode, "Span" );
-        addAttribute( spanNode,  "fromLayer", genLayerString( layers.first, "LAYER" ) );
-        addAttribute( spanNode,  "toLayer", genLayerString( layers.second, "LAYER" ) );
+        addAttribute( spanNode, "fromLayer", genLayerString( span.TopLayer(), "LAYER" ) );
+        addAttribute( spanNode, "toLayer", genLayerString( span.BottomLayer(), "LAYER" ) );
     }
 
     for( const auto& [layers, vec] : m_slot_holes )
@@ -2556,24 +2470,31 @@ void PCB_IO_IPC2581::generateAuxilliaryLayers( wxXmlNode* aCadLayerNode )
             continue;
 
         PCB_VIA* via = static_cast<PCB_VIA*>( item );
+        const DRILL_OPERATION* op = m_fabDrillModel->Find(
+                DRILL_SPAN( via->TopLayer(), via->BottomLayer(), false, false ), via );
+
+        if( !op )
+            continue;
 
         std::vector<std::tuple<auxLayerType, PCB_LAYER_ID, PCB_LAYER_ID>> new_layers;
 
-        if( via->Padstack().IsFilled().value_or( false ) )
+        if( op->m_Filled )
             new_layers.emplace_back( auxLayerType::FILLING, via->TopLayer(), via->BottomLayer() );
 
-        if( via->Padstack().IsCapped().value_or( false ) )
+        if( op->m_Capped )
             new_layers.emplace_back( auxLayerType::CAPPING, via->TopLayer(), via->BottomLayer() );
 
         for( PCB_LAYER_ID layer : { via->TopLayer(), via->BottomLayer() } )
         {
-            if( via->Padstack().IsPlugged( layer ).value_or( false ) )
+            bool top = layer == op->m_TopLayer;
+
+            if( top ? op->m_TopPlugged : op->m_BottomPlugged )
                 new_layers.emplace_back( auxLayerType::PLUGGING, layer, UNDEFINED_LAYER );
 
-            if( via->Padstack().IsCovered( layer ).value_or( false ) )
+            if( top ? op->m_TopCovered : op->m_BottomCovered )
                 new_layers.emplace_back( auxLayerType::COVERING, layer, UNDEFINED_LAYER );
 
-            if( via->Padstack().IsTented( layer ).value_or( false ) )
+            if( top ? op->m_TopTented : op->m_BottomTented )
                 new_layers.emplace_back( auxLayerType::TENTING, layer, UNDEFINED_LAYER );
         }
 
@@ -2787,15 +2708,17 @@ void PCB_IO_IPC2581::addPadStack( wxXmlNode* aPadNode, const PAD* aPad )
 
     // Only handle round holes here because IPC2581 does not support non-round holes
     // These will be handled in a slot layer
-    if( aPad->HasDrilledHole() )
+    if( aPad->HasHole() && !IsDrillSlot( *aPad ) )
     {
         wxXmlNode* padStackHoleNode = appendNode( padStackDefNode, "PadstackHoleDef" );
         padStackHoleNode->AddAttribute( "name",
                                         wxString::Format( "%s%d_%d",
                                                           aPad->GetAttribute() == PAD_ATTRIB::PTH ? "PTH" : "NPTH",
-                                                          aPad->GetDrillSizeX(), aPad->GetDrillSizeY() ) );
+                                                          aPad->GetDrillSize().x, aPad->GetDrillSize().y ) );
 
-        addAttribute( padStackHoleNode,  "diameter", floatVal( m_scale * aPad->GetDrillSizeX() ) );
+        // A round drill with unequal axes is drilled at its smaller axis, like its layer hole
+        int diameter = std::min( aPad->GetDrillSize().x, aPad->GetDrillSize().y );
+        addAttribute( padStackHoleNode,  "diameter", floatVal( m_scale * diameter ) );
         addAttribute( padStackHoleNode,  "platingStatus",
                       aPad->GetAttribute() == PAD_ATTRIB::PTH ? "PLATED" : "NONPLATED" );
         addAttribute( padStackHoleNode,  "plusTol", "0.0" );
@@ -2818,11 +2741,11 @@ void PCB_IO_IPC2581::addPadStack( wxXmlNode* aPadNode, const PAD* aPad )
         addAttribute( padStackPadDefNode,  "padUse", "REGULAR" );
         addLocationNode( padStackPadDefNode, offset.x, offset.y );
 
-        if( aPad->HasHole() || !aPad->FlashLayer( layer ) )
+        if( !aPad->FlashLayer( layer ) )
         {
             PCB_SHAPE shape( nullptr, SHAPE_T::CIRCLE );
             shape.SetStart( offset );
-            shape.SetEnd( shape.GetStart() + aPad->GetDrillSize() / 2 );
+            shape.SetEnd( offset + VECTOR2I( std::min( aPad->GetDrillSize().x, aPad->GetDrillSize().y ) / 2, 0 ) );
             addShape( padStackPadDefNode, shape );
         }
         else
@@ -2835,7 +2758,9 @@ void PCB_IO_IPC2581::addPadStack( wxXmlNode* aPadNode, const PAD* aPad )
 
 void PCB_IO_IPC2581::addPadStack( wxXmlNode* aContentNode, const PCB_VIA* aVia )
 {
-    size_t hash = ipcPadstackHash( aVia );
+    const DRILL_OPERATION* op = m_fabDrillModel->Find(
+            DRILL_SPAN( aVia->TopLayer(), aVia->BottomLayer(), false, false ), aVia );
+    size_t hash = ipcPadstackHash( aVia, op );
     wxString name = wxString::Format( "PADSTACK_%zu", m_padstack_dict.size() + 1 );
     auto [ via_pair, success ] = m_padstack_dict.emplace( hash, name );
 
@@ -2899,27 +2824,32 @@ void PCB_IO_IPC2581::addPadStack( wxXmlNode* aContentNode, const PCB_VIA* aVia )
         addPadShape( layer, aVia, m_layer_name_map[layer], false );
     }
 
-    if( included( IPC2581::SECTION::MISC_FAB ) )
-    {
-        if( aVia->Padstack().IsFilled().value_or( false ) )
-            addPadShape( UNDEFINED_LAYER, aVia, genLayersString( aVia->TopLayer(), aVia->BottomLayer(), "FILLING" ), true );
+    if( !op || !included( IPC2581::SECTION::MISC_FAB ) )
+        return;
 
-        if( aVia->Padstack().IsCapped().value_or( false ) )
-            addPadShape( UNDEFINED_LAYER, aVia, genLayersString( aVia->TopLayer(), aVia->BottomLayer(), "CAPPING" ), true );
+    if( op->m_Filled )
+    {
+        wxString fillingRef = genLayersString( aVia->TopLayer(), aVia->BottomLayer(), "FILLING" );
+        addPadShape( UNDEFINED_LAYER, aVia, fillingRef, true );
+    }
+
+    if( op->m_Capped )
+    {
+        wxString cappingRef = genLayersString( aVia->TopLayer(), aVia->BottomLayer(), "CAPPING" );
+        addPadShape( UNDEFINED_LAYER, aVia, cappingRef, true );
     }
 
     for( PCB_LAYER_ID layer : { aVia->TopLayer(), aVia->BottomLayer() } )
     {
-        if( !included( IPC2581::SECTION::MISC_FAB ) )
-            break;
+        bool top = layer == op->m_TopLayer;
 
-        if( aVia->Padstack().IsPlugged( layer ).value_or( false ) )
+        if( top ? op->m_TopPlugged : op->m_BottomPlugged )
             addPadShape( layer, aVia, genLayerString( layer, "PLUGGING" ), true );
 
-        if( aVia->Padstack().IsCovered( layer ).value_or( false ) )
+        if( top ? op->m_TopCovered : op->m_BottomCovered )
             addPadShape( layer, aVia, genLayerString( layer, "COVERING" ), false );
 
-        if( aVia->Padstack().IsTented( layer ).value_or( false ) )
+        if( top ? op->m_TopTented : op->m_BottomTented )
             addPadShape( layer, aVia, genLayerString( layer, "TENTING" ), false );
     }
 }
@@ -2979,43 +2909,9 @@ void PCB_IO_IPC2581::ensureBackdrillSpecs( const wxString& aPadstackName, const 
         return;
     }
 
-    BOARD_DESIGN_SETTINGS& dsnSettings = m_board->GetDesignSettings();
-    BOARD_STACKUP&         stackup = dsnSettings.GetStackupDescriptor();
-    stackup.SynchronizeWithBoard( &dsnSettings );
+    const BOARD_STACKUP& stackup = m_fabStackup->Stackup();
 
-    // KiCad's DRILL_PROPS.end is the must-cut layer (deepest copper the drill
-    // must pass through, per the UI label "backdrill must-cut"). IPC-2581
-    // requires the must-not-cut layer, which is the next enabled copper layer
-    // past the must-cut layer going inward (away from the drill start surface).
     LSEQ cuStack = m_board->GetEnabledLayers().CuStack();
-
-    auto computeMustNotCutLayer = [&]( const PADSTACK::DRILL_PROPS& aDrill ) -> PCB_LAYER_ID
-    {
-        auto it = std::find( cuStack.begin(), cuStack.end(), aDrill.end );
-
-        if( it == cuStack.end() )
-            return UNDEFINED_LAYER;
-
-        if( aDrill.start == F_Cu )
-        {
-            ++it;
-
-            if( it == cuStack.end() )
-                return UNDEFINED_LAYER;
-
-            return *it;
-        }
-
-        if( aDrill.start == B_Cu )
-        {
-            if( it == cuStack.begin() )
-                return UNDEFINED_LAYER;
-
-            return *( --it );
-        }
-
-        return UNDEFINED_LAYER;
-    };
 
     auto createSpec = [&]( const PADSTACK::DRILL_PROPS& aDrill,
                            const wxString& aSpecName ) -> wxString
@@ -3028,34 +2924,11 @@ void PCB_IO_IPC2581::ensureBackdrillSpecs( const wxString& aPadstackName, const 
         if( startLayer == m_layer_name_map.end() )
             return wxString();
 
-        PCB_LAYER_ID mustNotCut = computeMustNotCutLayer( aDrill );
+        PCB_LAYER_ID mustNotCut = FabBackdrillMustNotCut( cuStack, aDrill.start, aDrill.end );
         auto         mustNotCutEntry = m_layer_name_map.find( mustNotCut );
 
         wxXmlNode* specNode = appendNode( m_cad_header_node, "Spec" );
         addAttribute( specNode, "name", aSpecName );
-
-        // Counterbore/countersink hint. SpecType has no comment attribute, so
-        // surface it as an OTHER-typed Backdrill child whose comment field is
-        // schema-allowed.
-        PAD_DRILL_POST_MACHINING_MODE pm_mode = PAD_DRILL_POST_MACHINING_MODE::UNKNOWN;
-
-        if( aDrill.start == F_Cu )
-        {
-            pm_mode = aPadstack.FrontPostMachining().mode.value_or(
-                    PAD_DRILL_POST_MACHINING_MODE::UNKNOWN );
-        }
-        else if( aDrill.start == B_Cu )
-        {
-            pm_mode = aPadstack.BackPostMachining().mode.value_or(
-                    PAD_DRILL_POST_MACHINING_MODE::UNKNOWN );
-        }
-
-        wxString postMachiningComment;
-
-        if( pm_mode == PAD_DRILL_POST_MACHINING_MODE::COUNTERBORE )
-            postMachiningComment = wxT( "post-machining=COUNTERBORE" );
-        else if( pm_mode == PAD_DRILL_POST_MACHINING_MODE::COUNTERSINK )
-            postMachiningComment = wxT( "post-machining=COUNTERSINK" );
 
         // START_LAYER
         {
@@ -3076,19 +2949,11 @@ void PCB_IO_IPC2581::ensureBackdrillSpecs( const wxString& aPadstackName, const 
             addAttribute( p, "layerOrGroupRef", mustNotCutEntry->second );
         }
 
-        // MAX_STUB_LENGTH: the maximum residual copper allowed past the
-        // must-cut layer. KiCad has no explicit fabricator tolerance, so use
-        // half the dielectric thickness between must-cut and must-not-cut as
-        // a nominal midpoint. Falls back to zero if no inner signal exists.
-        int stubLength = 0;
-
-        if( mustNotCut != UNDEFINED_LAYER )
-        {
-            int dielectric = stackup.GetLayerDistance( aDrill.end, mustNotCut );
-
-            if( dielectric > 0 )
-                stubLength = dielectric / 2;
-        }
+        // MAX_STUB_LENGTH: the maximum residual copper allowed past the must-cut layer. KiCad has
+        // no explicit fabricator tolerance, so use half the dielectric thickness between must-cut
+        // and must-not-cut as a nominal midpoint. Falls back to zero if no inner signal exists.
+        int stubLength = mustNotCut == UNDEFINED_LAYER ? 0
+                                                       : stackup.GetDrillDepth( aDrill.start, aDrill.end );
 
         {
             wxXmlNode* bd = appendNode( specNode, "Backdrill" );
@@ -3097,13 +2962,6 @@ void PCB_IO_IPC2581::ensureBackdrillSpecs( const wxString& aPadstackName, const 
             wxXmlNode* p = appendNode( bd, "Property" );
             addAttribute( p, "value", floatVal( m_scale * stubLength ) );
             addAttribute( p, "unit", propertyUnitForCadUnits( m_units_str ) );
-        }
-
-        if( !postMachiningComment.IsEmpty() )
-        {
-            wxXmlNode* bd = appendNode( specNode, "Backdrill" );
-            addAttribute( bd, "type", wxT( "OTHER" ) );
-            addAttribute( bd, "comment", postMachiningComment );
         }
 
         m_backdrill_spec_nodes[aSpecName] = specNode;
@@ -3144,6 +3002,70 @@ void PCB_IO_IPC2581::addBackdrillSpecRefs( wxXmlNode* aHoleNode, const wxString&
 
     for( const wxString& specName : it->second )
         addRef( specName );
+}
+
+
+void PCB_IO_IPC2581::addPostMachiningSpecRefs( wxXmlNode* aHoleNode, const DRILL_OPERATION& aOperation )
+{
+    if( m_revision != IPC2581::REVISION::C || !m_cad_header_node || aOperation.IsBackdrill() )
+        return;
+
+    auto addSide = [&]( const DRILL_POST_MACHINING& aMachining, bool aFront )
+    {
+        bool countersink = aMachining.m_Mode == PAD_DRILL_POST_MACHINING_MODE::COUNTERSINK;
+        bool counterbore = aMachining.m_Mode == PAD_DRILL_POST_MACHINING_MODE::COUNTERBORE;
+
+        if( aMachining.m_Size <= 0 || ( !countersink && !counterbore ) )
+            return;
+
+        auto key = std::make_tuple( aFront, static_cast<int>( aMachining.m_Mode ), aMachining.m_Size,
+                                    counterbore ? aMachining.m_Depth : 0, countersink ? aMachining.m_Angle : 0 );
+        auto [it, inserted] = m_post_machining_specs.try_emplace( key );
+
+        if( inserted )
+        {
+            it->second = wxString::Format( countersink ? wxT( "CSK_%zu" ) : wxT( "CBORE_%zu" ),
+                                           m_post_machining_specs.size() );
+            wxXmlNode* spec = appendNode( m_cad_header_node, "Spec" );
+            addAttribute( spec, "name", it->second );
+
+            auto addValue = [&]( const wxString& aType, const wxString& aValue, const wxString& aUnit )
+            {
+                wxXmlNode* drill = appendNode( spec, "SecondaryDrill" );
+                addAttribute( drill, "type", aType );
+                wxXmlNode* property = appendNode( drill, "Property" );
+                addAttribute( property, "value", aValue );
+                addAttribute( property, "unit", aUnit );
+            };
+
+            wxString lengthUnit = propertyUnitForCadUnits( m_units_str );
+            addValue( wxT( "MAJOR_DIAMETER" ), floatVal( m_scale * aMachining.m_Size ), lengthUnit );
+
+            if( counterbore && aMachining.m_Depth > 0 )
+                addValue( wxT( "DEPTH" ), floatVal( m_scale * aMachining.m_Depth ), lengthUnit );
+
+            if( countersink && aMachining.m_Angle > 0 )
+                addValue( wxT( "ANGLE" ), floatVal( aMachining.m_Angle / 10.0 ), wxT( "DEGREES" ) );
+
+            wxXmlNode* side = appendNode( spec, "SecondaryDrill" );
+            addAttribute( side, "type", "SIDE" );
+            wxXmlNode* property = appendNode( side, "Property" );
+            addAttribute( property, "text", aFront ? wxT( "TOP" ) : wxT( "BOTTOM" ) );
+
+            if( ( counterbore && aMachining.m_Depth <= 0 ) || ( countersink && aMachining.m_Angle <= 0 ) )
+            {
+                wxXmlNode* other = appendNode( spec, "SecondaryDrill" );
+                addAttribute( other, "type", "OTHER" );
+                addAttribute( other, "comment", counterbore ? wxT( "COUNTERBORE" ) : wxT( "COUNTERSINK" ) );
+            }
+        }
+
+        wxXmlNode* ref = appendNode( aHoleNode, "SpecRef" );
+        addAttribute( ref, "id", it->second );
+    };
+
+    addSide( aOperation.m_FrontPostMachining, true );
+    addSide( aOperation.m_BackPostMachining, false );
 }
 
 
@@ -3692,7 +3614,8 @@ wxXmlNode* PCB_IO_IPC2581::addPackage( wxXmlNode* aContentNode, FOOTPRINT* aFp )
     for( size_t ii = 0; ii < fp->Pads().size(); ++ii )
     {
         PAD* pad = fp->Pads()[ii];
-        wxString pin_name = pinName( pad );
+        FAB_PIN fabPin = MakeFabPin( *pad, ii );
+        wxString pin_name = sanitizeId( fabPin.m_name );
         wxXmlNode* pinNode = nullptr;
 
         auto [ it, inserted ] = pin_nodes.emplace( pin_name, nullptr );
@@ -3704,12 +3627,12 @@ wxXmlNode* PCB_IO_IPC2581::addPackage( wxXmlNode* aContentNode, FOOTPRINT* aFp )
 
             addAttribute( pinNode,  "number", pin_name );
 
-            if( pad->GetAttribute() == PAD_ATTRIB::NPTH )
-                addAttribute( pinNode,  "electricalType", "MECHANICAL" );
-            else if( pad->IsOnCopperLayer() )
-                addAttribute( pinNode,  "electricalType", "ELECTRICAL" );
-            else
-                addAttribute( pinNode,  "electricalType", "UNDEFINED" );
+            switch( fabPin.m_electrical )
+            {
+            case FAB_ELECTRICAL::MECHANICAL: addAttribute( pinNode, "electricalType", "MECHANICAL" ); break;
+            case FAB_ELECTRICAL::ELECTRICAL: addAttribute( pinNode, "electricalType", "ELECTRICAL" ); break;
+            case FAB_ELECTRICAL::UNDEFINED:  addAttribute( pinNode, "electricalType", "UNDEFINED" ); break;
+            }
 
             if( pad->HasHole() )
                 addAttribute( pinNode,  "type", "THRU" );
@@ -3761,6 +3684,7 @@ void PCB_IO_IPC2581::generateComponents( wxXmlNode* aStepNode )
     for( FOOTPRINT* fp : m_board->Footprints() )
     {
         tickProgress();
+        FAB_COMPONENT_ROW row = MakeFabComponentRow( *fp, m_variantName );
 
         wxXmlNode* componentNode = new wxXmlNode( wxXML_ELEMENT_NODE, "Component" );
         if( refDesEmitted() )
@@ -3771,30 +3695,21 @@ void PCB_IO_IPC2581::generateComponents( wxXmlNode* aStepNode )
         for( PAD* pad : fp->Pads() )
         {
             if( pad->GetNetCode() > 0 )
-                m_net_pin_dict[pad->GetNetCode()].emplace_back( componentName( fp ), pad->GetNumber() );
+                m_net_pin_dict[pad->GetNetCode()].emplace_back( componentName( fp ), pinName( pad ) );
         }
         wxXmlNode* pkg = addPackage( componentNode, fp );
 
         if( pkg )
             packageNodes.push_back( pkg );
 
-        wxString name;
+        wxString name = generate_unique ? wxString() : row.Field( m_OEMRef );
 
-        PCB_FIELD* field = nullptr;
-
-        if( !generate_unique )
-            field = fp->GetField( m_OEMRef );
-
-        if( field && !field->GetText().empty() )
-        {
-            name = field->GetShownText( RESOLVED );
-        }
-        else
+        if( name.IsEmpty() )
         {
             name = wxString::Format( "%s_%s_%s",
                                      fp->GetFPID().GetFullLibraryName(),
                                      fp->GetFPID().GetLibItemName().wx_str(),
-                                     fp->GetValue() );
+                                     row.Value() );
         }
 
         if( !m_OEMRef_dict.emplace( fp, name ).second )
@@ -3806,9 +3721,9 @@ void PCB_IO_IPC2581::generateComponents( wxXmlNode* aStepNode )
         addAttribute( componentNode,  "part", genString( name, "REF" ) );
         addAttribute( componentNode,  "layerRef", m_layer_name_map[fp->GetLayer()] );
 
-        if( fp->GetAttributes() & FP_THROUGH_HOLE )
+        if( row.m_mount == FAB_MOUNT::THT )
             addAttribute( componentNode,  "mountType", "THMT" );
-        else if( fp->GetAttributes() & FP_SMD )
+        else if( row.m_mount == FAB_MOUNT::SMT )
             addAttribute( componentNode,  "mountType", "SMT" );
         else
             addAttribute( componentNode,  "mountType", "OTHER" );
@@ -3909,28 +3824,18 @@ void PCB_IO_IPC2581::generatePhyNetGroup( wxXmlNode* aStepNode )
     std::map<int, std::vector<NET_POINT>> byNet;
 
     reportPhase( _( "Generating physical netlist" ) );
+    std::vector<FAB_TEST_POINT> testPoints = FabTestPoints( *m_board );
 
     if( m_progressReporter )
-    {
-        m_progressReporter->SetMaxProgress( m_board->Footprints().size()
-                                            + m_board->Tracks().size() );
-    }
+        m_progressReporter->SetMaxProgress( static_cast<int>( testPoints.size() ) );
 
     // Section 8.2.3.9.1 makes a physical net point a location that you can probe
     // Thus only a feature on an outer layer applies
-    auto access =
-            [&]( const LSET& aLayers, bool& aFront, bool& aBack )
-            {
-                aFront = aLayers.test( F_Cu );
-                aBack = aLayers.test( B_Cu );
-                return aFront || aBack;
-            };
-
     auto exposure =
-            [&]( const LSET& aLayers, bool aFront, bool aBack ) -> wxString
+            []( const FAB_TEST_POINT& aPoint ) -> wxString
             {
-                bool frontOpen = !aFront || aLayers.test( F_Mask );
-                bool backOpen = !aBack || aLayers.test( B_Mask );
+                bool frontOpen = !aPoint.m_front || aPoint.m_frontMask;
+                bool backOpen = !aPoint.m_back || aPoint.m_backMask;
 
                 if( frontOpen && backOpen )
                     return wxT( "EXPOSED" );
@@ -3944,67 +3849,32 @@ void PCB_IO_IPC2581::generatePhyNetGroup( wxXmlNode* aStepNode )
                 return wxT( "COVERED" );
             };
 
-    for( FOOTPRINT* fp : m_board->Footprints() )
+    // Keep IPC-2581's pad-first order within each physical net
+    for( bool wantPad : { true, false } )
     {
-        tickProgress();
-
-        for( PAD* pad : fp->Pads() )
+        for( const FAB_TEST_POINT& testPoint : testPoints )
         {
-            bool front = false;
-            bool back = false;
-
-            if( pad->GetNetCode() <= 0 || !access( pad->GetLayerSet(), front, back ) )
+            // Buried vias and inner-only pads cannot be probed
+            if( ( testPoint.m_pad != nullptr ) != wantPad || testPoint.m_netCode <= 0
+                || ( !testPoint.m_front && !testPoint.m_back ) )
+            {
                 continue;
+            }
 
             NET_POINT point;
-            point.m_pos = pad->GetPosition();
-            point.m_layer = front ? F_Cu : B_Cu;
-            point.m_secondary = ( front && back ) ? B_Cu : UNDEFINED_LAYER;
-            point.m_exposure = exposure( pad->GetLayerSet(), front, back );
-            point.m_end = true;
-            point.m_via = false;
-            point.m_width = pad->GetSize( point.m_layer ).x;
-            point.m_drill = pad->HasHole() ? std::min( pad->GetDrillSize().x,
-                                                       pad->GetDrillSize().y )
-                                           : 0;
-            point.m_pad = pad;
-
-            byNet[pad->GetNetCode()].push_back( point );
+            point.m_pos = testPoint.m_position;
+            point.m_layer = testPoint.m_front ? F_Cu : B_Cu;
+            point.m_secondary = ( testPoint.m_front && testPoint.m_back ) ? B_Cu : UNDEFINED_LAYER;
+            point.m_exposure = exposure( testPoint );
+            point.m_end = testPoint.m_netEnd;
+            point.m_via = testPoint.m_via != nullptr;
+            point.m_width = testPoint.m_pad ? testPoint.m_pad->GetSize( point.m_layer ).x
+                                            : testPoint.m_via->GetWidth( point.m_layer );
+            point.m_drill = testPoint.m_drill;
+            point.m_pad = testPoint.m_pad;
+            byNet[testPoint.m_netCode].push_back( point );
+            tickProgress();
         }
-    }
-
-    std::shared_ptr<CONNECTIVITY_DATA> connectivity = m_board->GetConnectivity();
-
-    for( PCB_TRACK* track : m_board->Tracks() )
-    {
-        tickProgress();
-
-        if( track->Type() != PCB_VIA_T || track->GetNetCode() <= 0 )
-            continue;
-
-        PCB_VIA* via = static_cast<PCB_VIA*>( track );
-        bool     front = false;
-        bool     back = false;
-
-        // You cannot probe a buried via thus it is not a physical net point
-        if( !access( via->GetLayerSet(), front, back ) )
-            continue;
-
-        NET_POINT point;
-        point.m_pos = via->GetPosition();
-        point.m_layer = front ? F_Cu : B_Cu;
-        point.m_secondary = ( front && back ) ? B_Cu : UNDEFINED_LAYER;
-        point.m_exposure = exposure( via->GetLayerSet(), front, back );
-        point.m_via = true;
-        point.m_width = via->GetWidth( point.m_layer );
-        point.m_drill = via->GetDrillValue();
-        point.m_pad = nullptr;
-
-        // A via with more copper after it is a midpoint and not a net end
-        point.m_end = connectivity->GetConnectedItemsAtAnchor( via, via->GetPosition(),
-                                                               { PCB_TRACE_T, PCB_ARC_T } ).size() < 2;
-
-        byNet[via->GetNetCode()].push_back( point );
     }
 
     if( byNet.empty() )
@@ -4067,100 +3937,7 @@ void PCB_IO_IPC2581::generateLayerFeatures( wxXmlNode* aStepNode )
 {
     LSEQ layers = m_board->GetEnabledLayers().Seq();
     const NETINFO_LIST& nets = m_board->GetNetInfo();
-    std::vector<std::unique_ptr<FOOTPRINT>> footprints;
-
-    // To avoid the overhead of repeatedly cycling through the layers and nets,
-    // we pre-sort the board items into a map of layer -> net -> items
-    std::map<PCB_LAYER_ID, std::map<int, std::vector<BOARD_ITEM*>>> elements;
-
-    std::for_each( m_board->Tracks().begin(), m_board->Tracks().end(),
-            [&layers, &elements]( PCB_TRACK* aTrack )
-            {
-                if( aTrack->Type() == PCB_VIA_T )
-                {
-                    PCB_VIA* via = static_cast<PCB_VIA*>( aTrack );
-
-                    for( PCB_LAYER_ID layer : layers )
-                    {
-                        if( via->FlashLayer( layer ) )
-                            elements[layer][via->GetNetCode()].push_back( via );
-                    }
-                }
-                else
-                {
-                    // A track with exposed copper also occupies the mask layer, so distribute
-                    // it across its full layer set the same way pads and zones are handled.
-                    for( PCB_LAYER_ID layer : aTrack->GetLayerSet().Seq() )
-                        elements[layer][aTrack->GetNetCode()].push_back( aTrack );
-                }
-            } );
-
-    std::for_each( m_board->Zones().begin(), m_board->Zones().end(),
-            [ &elements ]( ZONE* zone )
-            {
-                LSEQ zone_layers = zone->GetLayerSet().Seq();
-
-                for( PCB_LAYER_ID layer : zone_layers )
-                    elements[layer][zone->GetNetCode()].push_back( zone );
-            } );
-
-    for( BOARD_ITEM* item : m_board->Drawings() )
-    {
-        int netcode = 0;
-
-        if( BOARD_CONNECTED_ITEM* conn_it = dynamic_cast<BOARD_CONNECTED_ITEM*>( item ) )
-            netcode = conn_it->GetNetCode();
-
-        // A graphic item can belong to several layers at once (e.g. a copper shape that also
-        // opens the solder mask), so distribute it across its whole layer set rather than
-        // only its primary layer.
-        for( PCB_LAYER_ID layer : item->GetLayerSet().Seq() )
-            elements[layer][netcode].push_back( item );
-    }
-
-    for( FOOTPRINT* fp : m_board->Footprints() )
-    {
-        for( PCB_FIELD* field : fp->GetFields() )
-            elements[field->GetLayer()][0].push_back( field );
-
-        // A graphic can live on several layers at once (e.g. copper + mask). KiCad plots it on
-        // each, so emit it on every layer in its set rather than only its primary layer.
-        for( BOARD_ITEM* item : fp->GraphicalItems() )
-        {
-            for( PCB_LAYER_ID layer : item->GetLayerSet().Seq() )
-                elements[layer][0].push_back( item );
-        }
-
-        for( PAD* pad : fp->Pads() )
-        {
-            LSEQ pad_layers = pad->GetLayerSet().Seq();
-
-            for( PCB_LAYER_ID layer : pad_layers )
-            {
-                if( pad->FlashLayer( layer ) )
-                    elements[layer][pad->GetNetCode()].push_back( pad );
-            }
-
-            // Some SMD pad definitions omit the mask layer even though their copper needs a
-            // mask opening. Add those implicit mask features on the corresponding copper side.
-            // This only applies when the pad authors no mask side at all. A pad that carries a
-            // mask on one side only (e.g. *.Cu + B.Mask) has intentionally suppressed the other,
-            // so it must not receive an implicit opening there.
-            // Solder paste is intentionally NOT added here. Absence of F.Paste/B.Paste in the
-            // pad's layer set means "no paste" and must be respected, e.g. for thermal/exposed
-            // pads whose stencil apertures are modeled as separate paste-only pads.
-            bool hasAuthoredMask = pad->IsOnLayer( F_Mask ) || pad->IsOnLayer( B_Mask );
-
-            if( !hasAuthoredMask )
-            {
-                if( pad->IsOnLayer( F_Cu ) && pad->FlashLayer( F_Cu ) )
-                    elements[F_Mask][pad->GetNetCode()].push_back( pad );
-
-                if( pad->IsOnLayer( B_Cu ) && pad->FlashLayer( B_Cu ) )
-                    elements[B_Mask][pad->GetNetCode()].push_back( pad );
-            }
-        }
-    }
+    FAB_LAYER_INDEX index( *m_board );
 
     for( PCB_LAYER_ID layer : layers )
     {
@@ -4174,23 +3951,16 @@ void PCB_IO_IPC2581::generateLayerFeatures( wxXmlNode* aStepNode )
         wxXmlNode* layerNode = appendNode( aStepNode, "LayerFeature" );
         addAttribute( layerNode,  "layerRef", m_layer_name_map[layer] );
 
+        const FAB_LAYER_INDEX::NET_ITEMS& netsOnLayer = index.Items( layer );
+
         auto process_net = [&] ( int net )
         {
-            std::vector<BOARD_ITEM*>& vec = elements[layer][net];
+            auto netItems = netsOnLayer.find( net );
 
-            if( vec.empty() )
+            if( netItems == netsOnLayer.end() || netItems->second.empty() )
                 return;
 
-            std::stable_sort( vec.begin(), vec.end(),
-                       []( BOARD_ITEM* a, BOARD_ITEM* b )
-                       {
-                            if( a->GetParentFootprint() == b->GetParentFootprint() )
-                                return a->Type() < b->Type();
-
-                            return a->GetParentFootprint() < b->GetParentFootprint();
-                       } );
-
-            generateLayerSetNet( layerNode, layer, vec );
+            generateLayerSetNet( layerNode, layer, netItems->second );
         };
 
         for( const NETINFO_ITEM* net : nets )
@@ -4218,17 +3988,22 @@ void PCB_IO_IPC2581::generateLayerSetDrill( wxXmlNode* aLayerNode )
 
     int hole_count = 1;
 
-    for( const auto& [layers, vec] : m_drill_layers )
+    for( const auto& [span, vec] : m_drill_layers )
     {
         wxXmlNode* layerNode = appendNode( aLayerNode, "LayerFeature" );
-        layerNode->AddAttribute( "layerRef", genLayersString( layers.first, layers.second, "DRILL" ) );
+        layerNode->AddAttribute( "layerRef", genLayersString( span.TopLayer(), span.BottomLayer(), "DRILL" ) );
 
         for( BOARD_ITEM* item : vec )
         {
             if( item->Type() == PCB_VIA_T )
             {
                 PCB_VIA* via = static_cast<PCB_VIA*>( item );
-                auto it = m_padstack_dict.find( ipcPadstackHash( via ) );
+                const DRILL_OPERATION* operation = m_fabDrillModel->Find( span, via );
+
+                if( !operation )
+                    continue;
+
+                auto it = m_padstack_dict.find( ipcPadstackHash( via, operation ) );
 
                 if( it == m_padstack_dict.end() )
                 {
@@ -4245,16 +4020,22 @@ void PCB_IO_IPC2581::generateLayerSetDrill( wxXmlNode* aLayerNode )
 
                 wxXmlNode* holeNode = appendNode( padNode, "Hole" );
                 addAttribute( holeNode,  "name", wxString::Format( "H%d", hole_count++ ) );
-                addAttribute( holeNode,  "diameter", floatVal( m_scale * via->GetDrillValue() ) );
+                addAttribute( holeNode,  "diameter", floatVal( m_scale * operation->m_Diameter ) );
                 addAttribute( holeNode,  "platingStatus", "VIA" );
                 addAttribute( holeNode,  "plusTol", "0.0" );
                 addAttribute( holeNode,  "minusTol", "0.0" );
                 addXY( holeNode, via->GetPosition() );
                 addBackdrillSpecRefs( holeNode, it->second );
+                addPostMachiningSpecRefs( holeNode, *operation );
             }
             else if( item->Type() == PCB_PAD_T )
             {
                 PAD* pad = static_cast<PAD*>( item );
+                const DRILL_OPERATION* operation = m_fabDrillModel->Find( span, pad, true );
+
+                if( !operation )
+                    continue;
+
                 auto it = m_padstack_dict.find( ipcPadstackHash( pad ) );
 
                 if( it == m_padstack_dict.end() )
@@ -4272,13 +4053,14 @@ void PCB_IO_IPC2581::generateLayerSetDrill( wxXmlNode* aLayerNode )
 
                 wxXmlNode* holeNode = appendNode( padNode, "Hole" );
                 addAttribute( holeNode,  "name", wxString::Format( "H%d", hole_count++ ) );
-                addAttribute( holeNode,  "diameter", floatVal( m_scale * pad->GetDrillSizeX() ) );
+                addAttribute( holeNode,  "diameter", floatVal( m_scale * operation->m_Diameter ) );
                 addAttribute( holeNode,  "platingStatus",
                               pad->GetAttribute() == PAD_ATTRIB::PTH ? "PLATED" : "NONPLATED" );
                 addAttribute( holeNode,  "plusTol", "0.0" );
                 addAttribute( holeNode,  "minusTol", "0.0" );
                 addXY( holeNode, pad->GetPosition() );
                 addBackdrillSpecRefs( holeNode, it->second );
+                addPostMachiningSpecRefs( holeNode, *operation );
             }
         }
     }
@@ -4298,13 +4080,19 @@ void PCB_IO_IPC2581::generateLayerSetDrill( wxXmlNode* aLayerNode )
                 addAttribute( padNode,  "net", netName( pad->GetNetname() ) );
 
             addSlotCavity( padNode, *pad, wxString::Format( "SLOT%d", hole_count++ ) );
+
+            // SlotCavity has no SpecRef, so the slot's own Set carries its post-machining
+            DRILL_SPAN span( layers.first, layers.second, false, false );
+
+            if( const DRILL_OPERATION* operation = m_fabDrillModel->Find( span, pad, true ) )
+                addPostMachiningSpecRefs( padNode, *operation );
         }
     }
 }
 
 
 void PCB_IO_IPC2581::generateLayerSetNet( wxXmlNode* aLayerNode, PCB_LAYER_ID aLayer,
-                                          std::vector<BOARD_ITEM*>& aItems )
+                                          const std::vector<BOARD_ITEM*>& aItems )
 {
     auto it = aItems.begin();
     wxXmlNode* layerSetNode = appendNode( aLayerNode, "Set" );
@@ -4333,26 +4121,12 @@ void PCB_IO_IPC2581::generateLayerSetNet( wxXmlNode* aLayerNode, PCB_LAYER_ID aL
     auto add_track =
             [&]( PCB_TRACK* track )
             {
-                // The mask-layer copy of an exposed track includes the solder mask expansion,
-                // matching the plotted artwork.  Note that vias must not take this path:
-                // PCB_VIA::GetWidth() requires a layer argument.
-                auto maskAdjustedWidth =
-                        [&]( const PCB_TRACK* aTrack )
-                        {
-                            int width = aTrack->GetWidth();
-
-                            if( IsSolderMaskLayer( aLayer ) )
-                                width += 2 * aTrack->GetSolderMaskExpansion();
-
-                            return width;
-                        };
-
                 if( track->Type() == PCB_TRACE_T )
                 {
                     PCB_SHAPE shape( nullptr, SHAPE_T::SEGMENT );
                     shape.SetStart( track->GetStart() );
                     shape.SetEnd( track->GetEnd() );
-                    shape.SetWidth( maskAdjustedWidth( track ) );
+                    shape.SetWidth( FabTrackWidth( *track, aLayer ) );
                     addShape( specialNode, shape );
                 }
                 else if( track->Type() == PCB_ARC_T )
@@ -4365,7 +4139,7 @@ void PCB_IO_IPC2581::generateLayerSetNet( wxXmlNode* aLayerNode, PCB_LAYER_ID aL
                     {
                         PCB_SHAPE shape( nullptr, SHAPE_T::ARC );
                         shape.SetArcGeometry( arc->GetStart(), arc->GetMid(), arc->GetEnd() );
-                        shape.SetWidth( maskAdjustedWidth( arc ) );
+                        shape.SetWidth( FabTrackWidth( *arc, aLayer ) );
                         addShape( specialNode, shape );
                     }
                     else
@@ -4374,7 +4148,7 @@ void PCB_IO_IPC2581::generateLayerSetNet( wxXmlNode* aLayerNode, PCB_LAYER_ID aL
                         PCB_SHAPE shape( nullptr, SHAPE_T::SEGMENT );
                         shape.SetStart( track->GetStart() );
                         shape.SetEnd( track->GetEnd() );
-                        shape.SetWidth( maskAdjustedWidth( track ) );
+                        shape.SetWidth( FabTrackWidth( *track, aLayer ) );
                         addShape( specialNode, shape );
                     }
                 }
@@ -4458,56 +4232,10 @@ void PCB_IO_IPC2581::generateLayerSetNet( wxXmlNode* aLayerNode, PCB_LAYER_ID aL
     auto add_shape =
             [&] ( PCB_SHAPE* shape )
             {
-                std::optional<PCB_SHAPE> maskShape;
+                PCB_SHAPE adjusted( nullptr );
 
-                if( IsSolderMaskLayer( aLayer )
-                    && shape->HasSolderMask()
-                    && IsExternalCopperLayer( shape->GetLayer() )
-                    && shape->GetSolderMaskExpansion() )
-                {
-                    maskShape.emplace( *shape );
-
-                    int expansion = shape->GetSolderMaskExpansion();
-                    int thickness = shape->GetWidth() + 2 * expansion;
-
-                    // Increase/decrease thickness of shape's edge to account for solder mask expansion
-                    maskShape->SetWidth( std::max( thickness, 0 ) );
-
-                    // If we run out of thickness due to a negative solder mask expansion, then we've got
-                    // more work to do for closed shapes.
-                    if( thickness < 0 )
-                    {
-                        int excess = - thickness;
-
-                        switch( shape->GetShape() )
-                        {
-                        case SHAPE_T::CIRCLE:
-                            maskShape->SetRadius( std::max( shape->GetRadius() - excess, 1 ) );
-                            break;
-
-                        case SHAPE_T::RECTANGLE:
-                            maskShape->SetRectangleWidth( shape->GetRectangleWidth() - ( excess * 2 ) );
-                            maskShape->SetRectangleHeight( shape->GetRectangleHeight() - ( excess * 2 ) );
-                            maskShape->SetCornerRadius( std::max( shape->GetCornerRadius() - excess, 0 ) );
-                            break;
-
-                        case SHAPE_T::POLY:
-                            if( shape->IsPolyShapeValid() )
-                            {
-                                SHAPE_POLY_SET& poly = maskShape->GetPolyShape();
-                                poly.Fracture();
-                                poly.Deflate( excess, CORNER_STRATEGY::ROUND_ALL_CORNERS, shape->GetMaxError() );
-                            }
-
-                            break;
-
-                        default:
-                            break;
-                        }
-                    }
-
-                    shape = &maskShape.value();
-                }
+                if( FabMaskShape( *shape, aLayer, adjusted ) )
+                    shape = &adjusted;
 
                 FOOTPRINT* fp = shape->GetParentFootprint();
 
@@ -4812,9 +4540,24 @@ wxXmlNode* PCB_IO_IPC2581::generateAvlSection()
 
     std::set<wxString> unique_parts;
     std::map<wxString,wxString> unique_vendors;
+    std::vector<FOOTPRINT*>     footprints;
+    std::vector<AVL_ROW>        rows;
 
-    for( auto& [fp, name] : m_OEMRef_dict )
+    for( FOOTPRINT* fp : m_board->Footprints() )
     {
+        auto it = m_OEMRef_dict.find( fp );
+
+        if( it == m_OEMRef_dict.end() )
+            continue;
+
+        footprints.push_back( fp );
+        rows.push_back( { it->second, fp->GetReference() } );
+    }
+
+    for( size_t index : OrderAvlRows( rows ) )
+    {
+        FOOTPRINT*      fp = footprints[index];
+        const wxString& name = rows[index].m_oemName;
         auto [ it, success ] = unique_parts.insert( name );
 
         if( !success )
@@ -4899,10 +4642,16 @@ void PCB_IO_IPC2581::SaveBoard( const wxString& aFileName, BOARD& aBoard,
     m_lastAppendedNode = nullptr;
 
     m_board = &aBoard;
+    FAB_STACKUP                          fabStackup( aBoard );
+    SCOPED_SET_RESET<const FAB_STACKUP*> fabStackupScope( m_fabStackup, &fabStackup );
+    FAB_DRILL_MODEL                          fabDrillModel( aBoard );
+    SCOPED_SET_RESET<const FAB_DRILL_MODEL*> fabDrillScope( m_fabDrillModel, &fabDrillModel );
+    m_variantName = aBoard.GetCurrentVariant();
     m_padstack_backdrill_specs.clear();
     m_backdrill_spec_nodes.clear();
     m_backdrill_spec_used.clear();
     m_backdrill_spec_index = 0;
+    m_post_machining_specs.clear();
     m_cad_header_node = nullptr;
     m_layer_name_map.clear();
 
@@ -4947,6 +4696,9 @@ void PCB_IO_IPC2581::SaveBoard( const wxString& aFileName, BOARD& aBoard,
 
     if( !aProperties )
         aProperties = &emptyProperties;
+
+    if( auto it = aProperties->find( "variant" ); it != aProperties->end() )
+        m_variantName = it->second.wx_str();
 
     if( auto it = aProperties->find( "units" ); it != aProperties->end() )
     {
@@ -5007,6 +4759,15 @@ void PCB_IO_IPC2581::SaveBoard( const wxString& aFileName, BOARD& aBoard,
 
     if( auto it = aProperties->find( "netnames" ); it != aProperties->end() )
         m_anonymizeNets = it->second == "anonymize";
+
+    if( m_anonymizeNets )
+    {
+        for( const auto& [code, name] : FabAnonymousNetNames( *m_board ) )
+        {
+            if( NETINFO_ITEM* net = m_board->GetNetInfo().GetNetItem( code ) )
+                m_net_name_dict.emplace( net->GetNetname(), name );
+        }
+    }
 
     if( auto it = aProperties->find( "refdes" ); it != aProperties->end() )
         m_omitRefDes = it->second == "omit";

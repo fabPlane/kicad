@@ -628,12 +628,15 @@ static bool matchesSymbolFilter( const wxString& aReference, SYMBOL_FILTER aSymb
 
     switch( aSymbolFilter )
     {
-    case SYMBOL_FILTER_POWER: return isPowerSymbol;
+    case SYMBOL_FILTER_POWER:
+        return isPowerSymbol;
 
-    case SYMBOL_FILTER_ALL: return true;
+    case SYMBOL_FILTER_ALL:
+        return true;
 
     case SYMBOL_FILTER_NON_POWER:
-    default: return !isPowerSymbol;
+    default:
+        return !isPowerSymbol;
     }
 }
 
@@ -1382,7 +1385,7 @@ SCH_ITEM* SCH_SHEET_PATH::ResolveItem( const KIID& aID ) const
 }
 
 
-void SCH_SHEET_LIST::FillItemMap( std::map<KIID, EDA_ITEM*>& aMap )
+void SCH_SHEET_LIST::FillItemMap( std::unordered_map<KIID, EDA_ITEM*>& aMap ) const
 {
     for( const SCH_SHEET_PATH& sheet : *this )
     {
@@ -1398,77 +1401,6 @@ void SCH_SHEET_LIST::FillItemMap( std::map<KIID, EDA_ITEM*>& aMap )
                         aMap[ aChild->m_Uuid ] = aChild;
                     },
                     RECURSE_MODE::NO_RECURSE );
-        }
-    }
-}
-
-
-void SCH_SHEET_LIST::AnnotatePowerSymbols()
-{
-    // List of reference for power symbols
-    SCH_REFERENCE_LIST references;
-
-    // Map of locked symbols (not used, but needed by Annotate()
-    SCH_MULTI_UNIT_REFERENCE_MAP lockedSymbols;
-
-    // Build the list of power symbols:
-    for( SCH_SHEET_PATH& sheet : *this )
-    {
-        for( SCH_ITEM* item : sheet.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
-        {
-            SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
-            LIB_SYMBOL* libSymbol = symbol->GetLibSymbolRef().get();
-
-            if( libSymbol && libSymbol->IsPower() )
-            {
-                SCH_REFERENCE schReference( symbol, sheet );
-                references.AddItem( schReference );
-            }
-        }
-    }
-
-    // Find duplicate, and silently clear annotation of duplicate
-    std::map<wxString, int> ref_list;   // stores the existing references
-
-    for( unsigned ii = 0; ii< references.GetCount(); ++ii )
-    {
-        wxString curr_ref = references[ii].GetRef();
-
-        if( curr_ref.IsEmpty() )
-            continue;
-
-        if( ref_list.find( curr_ref ) == ref_list.end() )
-        {
-            ref_list[curr_ref] = ii;
-            continue;
-        }
-
-        // Possible duplicate, if the ref ends by a number:
-        if( curr_ref.Last() < '0' && curr_ref.Last() > '9' )
-            continue;   // not annotated
-
-        // Duplicate: clear annotation by removing the number ending the ref
-        while( !curr_ref.IsEmpty() && curr_ref.Last() >= '0' && curr_ref.Last() <= '9' )
-            curr_ref.RemoveLast();
-
-        references[ii].SetRef( curr_ref );
-    }
-
-    // Break full symbol reference into name (prefix) and number:
-    // example: IC1 become IC, and 1
-    references.SplitReferences();
-
-    // Ensure all power symbols have the reference starting by '#'
-    // (Not sure this is really useful)
-    for( unsigned ii = 0; ii< references.GetCount(); ++ii )
-    {
-        SCH_REFERENCE& ref_unit = references[ii];
-
-        if( ref_unit.GetRef()[0] != '#' )
-        {
-            wxString new_ref = "#" + ref_unit.GetRef();
-            ref_unit.SetRef( new_ref );
-            ref_unit.SetRefNum( ii );
         }
     }
 }

@@ -30,6 +30,7 @@
 #include "../3d_placeholder_utils.h"
 #include <board.h>
 #include <footprint.h>
+#include <pcb_3d_body.h>
 #include <kicad_gl/gl_context_mgr.h>
 #include <3d_math.h>
 #include <glm/geometric.hpp>
@@ -236,6 +237,21 @@ void RENDER_3D_OPENGL::setupMaterials()
     m_materials.m_Paste.m_Shininess = 0.1f * 128.0f;
     m_materials.m_Paste.m_Emissive = SFVEC3F( 0.0f, 0.0f, 0.0f );
 
+    m_materials.m_Adhesive.m_Ambient = SFVEC3F( m_boardAdapter.m_AdhesiveColor.r,
+                                                m_boardAdapter.m_AdhesiveColor.g,
+                                                m_boardAdapter.m_AdhesiveColor.b );
+
+    m_materials.m_Adhesive.m_Specular = SFVEC3F( m_boardAdapter.m_AdhesiveColor.r *
+                                                 m_boardAdapter.m_AdhesiveColor.r,
+                                                 m_boardAdapter.m_AdhesiveColor.g *
+                                                 m_boardAdapter.m_AdhesiveColor.g,
+                                                 m_boardAdapter.m_AdhesiveColor.b *
+                                                 m_boardAdapter.m_AdhesiveColor.b );
+
+    m_materials.m_Adhesive.m_Shininess = 0.1f * 128.0f;
+    m_materials.m_Adhesive.m_Emissive = SFVEC3F( 0.0f, 0.0f, 0.0f );
+
+
     // Silk screen material mixed with silk screen color
     m_materials.m_SilkSTop.m_Ambient = SFVEC3F( m_boardAdapter.m_SilkScreenColorTop.r,
                                                 m_boardAdapter.m_SilkScreenColorTop.g,
@@ -331,6 +347,10 @@ void RENDER_3D_OPENGL::setLayerMaterial( PCB_LAYER_ID aLayerID )
 
     case B_Adhes:
     case F_Adhes:
+        m_materials.m_Adhesive.m_Diffuse = m_boardAdapter.m_AdhesiveColor;
+        OglSetMaterial( m_materials.m_Adhesive, 1.0f );
+        break;
+
     case Dwgs_User:
     case Cmts_User:
     case Eco1_User:
@@ -1161,18 +1181,14 @@ void RENDER_3D_OPENGL::get3dModelsSelected( std::list<MODELTORENDER> &aDstRender
                 continue;
         }
 
-        bool hasModels = !fp->Models().empty();
-        bool showMissing = m_boardAdapter.m_Cfg->m_Render.show_missing_models;
-
-        if( hasModels || showMissing )
+        if( !fp->Models().empty() || m_boardAdapter.ShowMissingModels() )
         {
             if( m_boardAdapter.IsFootprintShown( fp ) )
             {
                 const bool isFlipped = fp->IsFlipped();
 
                 if( aGetTop == !isFlipped || aGetBot == isFlipped )
-                    get3dModelsFromFootprint( aDstRenderList, fp, aRenderTransparentOnly,
-                                              highlight );
+                    get3dModelsFromFootprint( aDstRenderList, fp, aRenderTransparentOnly, highlight );
             }
         }
     }
@@ -1270,7 +1286,7 @@ void RENDER_3D_OPENGL::renderPlaceholderForFootprint( std::list<MODELTORENDER>& 
                                                       const glm::mat4& aFpMatrix, const FOOTPRINT* aFootprint,
                                                       bool aRenderTransparentOnly, bool aIsSelected, float aOpacity )
 {
-    if( !m_boardAdapter.m_Cfg->m_Render.show_missing_models || !m_placeholderModel )
+    if( !m_boardAdapter.ShowMissingModels() || !m_placeholderModel )
         return;
 
     // Suppress placeholder if a valid extruded body was built
@@ -1360,7 +1376,7 @@ void RENDER_3D_OPENGL::renderExtrudedBodies( bool aTransparentPass )
 
     for( auto& [fp, renderListDef] : m_extrudedBodyLists )
     {
-        const EXTRUDED_3D_BODY* body = fp->GetExtrudedBody();
+        const EXTRUDED_3D_BODY* body = fp->GetBody() ? fp->GetBody()->GetExtruded() : nullptr;
 
         if( !body )
             continue;

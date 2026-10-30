@@ -106,10 +106,8 @@ bool PCB_BASE_FRAME::canCloseWindow( wxCloseEvent& aEvent )
 {
     // Close modeless dialogs.  They're trouble when they get destroyed after the frame and/or
     // board.
-    wxWindow* viewer3D = Get3DViewerFrame();
-
-    if( viewer3D )
-        viewer3D->Close( true );
+    if( wxWindow* our3DViewer = GetOur3DViewerFrame() )
+        our3DViewer->Close( true );
 
     // Similarly, wxConvBrokenFileNames uses some statically allocated variables that make it
     // crash when run later from a d'tor.
@@ -137,7 +135,7 @@ void PCB_BASE_FRAME::handleIconizeEvent( wxIconizeEvent& aEvent )
 }
 
 
-EDA_3D_VIEWER_FRAME* PCB_BASE_FRAME::Get3DViewerFrame()
+EDA_3D_VIEWER_FRAME* PCB_BASE_FRAME::GetOur3DViewerFrame()
 {
     wxWindow* frame = FindWindowByName( QUALIFIED_VIEWER3D_FRAMENAME( this ) );
     return dynamic_cast<EDA_3D_VIEWER_FRAME*>( frame );
@@ -146,9 +144,7 @@ EDA_3D_VIEWER_FRAME* PCB_BASE_FRAME::Get3DViewerFrame()
 
 void PCB_BASE_FRAME::Update3DView( bool aMarkDirty, bool aRefresh, const wxString* aTitle )
 {
-    EDA_3D_VIEWER_FRAME* draw3DFrame = Get3DViewerFrame();
-
-    if( draw3DFrame )
+    if( EDA_3D_VIEWER_FRAME* draw3DFrame = GetOur3DViewerFrame() )
     {
         if( aTitle )
             draw3DFrame->SetTitle( *aTitle );
@@ -239,7 +235,7 @@ void PCB_BASE_FRAME::FocusOnItem( BOARD_ITEM* aItem, PCB_LAYER_ID aLayer, bool a
 }
 
 
-void PCB_BASE_FRAME::FocusOnItems( std::vector<BOARD_ITEM*> aItems, PCB_LAYER_ID aLayer, bool aAllowScroll )
+void PCB_BASE_FRAME::FocusOnItems( const std::vector<BOARD_ITEM*>& aItems, PCB_LAYER_ID aLayer, bool aAllowScroll )
 {
     static std::vector<KIID> lastBrightenedItemIDs;
 
@@ -667,16 +663,14 @@ void PCB_BASE_FRAME::ShowChangedLanguage()
     // tooltips in toolbars
     RecreateToolbars();
 
-    EDA_3D_VIEWER_FRAME* viewer3D = Get3DViewerFrame();
-
-    if( viewer3D )
+    if( EDA_3D_VIEWER_FRAME* viewer3D = GetOur3DViewerFrame() )
         viewer3D->ShowChangedLanguage();
 }
 
 
 EDA_3D_VIEWER_FRAME* PCB_BASE_FRAME::CreateAndShow3D_Frame()
 {
-    EDA_3D_VIEWER_FRAME* draw3DFrame = Get3DViewerFrame();
+    EDA_3D_VIEWER_FRAME* draw3DFrame = GetOur3DViewerFrame();
 
     if( !draw3DFrame )
         draw3DFrame = new EDA_3D_VIEWER_FRAME( &Kiway(), this, _( "3D Viewer" ) );
@@ -862,9 +856,7 @@ SEVERITY PCB_BASE_FRAME::GetSeverity( int aErrorCode ) const
     if( aErrorCode >= CLEANUP_FIRST )
         return RPT_SEVERITY_ACTION;
 
-    BOARD_DESIGN_SETTINGS& bds = GetBoard()->GetDesignSettings();
-
-    return bds.m_DRCSeverities[ aErrorCode ];
+    return GetBoard()->GetDesignSettings().m_DRCSeverities[ aErrorCode ];
 }
 
 
@@ -976,9 +968,7 @@ void PCB_BASE_FRAME::CommonSettingsChanged( int aFlags )
     RecreateToolbars();
 
     // The 3D viewer isn't in the Kiway, so send its update manually
-    EDA_3D_VIEWER_FRAME* viewer = Get3DViewerFrame();
-
-    if( viewer )
+    if( EDA_3D_VIEWER_FRAME* viewer = GetOur3DViewerFrame() )
         viewer->CommonSettingsChanged( aFlags );
 }
 

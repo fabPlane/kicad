@@ -33,6 +33,7 @@
 #include <pcb_text.h>
 #include <view/view.h>
 #include <board_design_settings.h>
+#include <board_design_settings_defaults.h>
 #include <geometry/shape_compound.h>
 #include <geometry/shape_circle.h>
 #include <geometry/shape_segment.h>
@@ -396,6 +397,10 @@ bool PCB_DIMENSION_BASE::Deserialize( const google::protobuf::Any &aContainer )
     SetUuidDirect( KIID( dimension.id().value() ) );
     SetLocked( dimension.locked() == types::LockedState::LS_LOCKED );
 
+    // Setting text attributes triggers Update(), which must already see the text position mode
+    SetTextPositionMode( FromProtoEnum<DIM_TEXT_POSITION>( dimension.text_position() ) );
+    SetKeepTextAligned( dimension.keep_text_aligned() );
+
     EDA_TEXT::Deserialize( dimension.text(), pcbIUScale );
 
     SetOverrideTextEnabled( dimension.override_text_enabled() );
@@ -412,14 +417,12 @@ bool PCB_DIMENSION_BASE::Deserialize( const google::protobuf::Any &aContainer )
     SetLineThickness( dimension.line_thickness().value_nm() );
     SetArrowLength( dimension.arrow_length().value_nm() );
     SetExtensionOffset( dimension.extension_offset().value_nm() );
-    SetTextPositionMode( FromProtoEnum<DIM_TEXT_POSITION>( dimension.text_position() ) );
-    SetKeepTextAligned( dimension.keep_text_aligned() );
 
     kiapi::common::UnpackCustomProperties( dimension.custom_properties(), *this );
 
     // Sync the footprint-relative angle copy (see PCB_TEXT::Deserialize).  Done after the text
     // position mode is known: the setter triggers Update(), which moves automatic text.
-    SetTextAngle( GetAttributes().m_Angle );
+    SetTextAngle( GetAttributes().m_Angle.GetAngle() );
 
     Update();
 
@@ -519,7 +522,7 @@ wxString PCB_DIMENSION_BASE::GetValueText() const
 
     text.Printf( format, EDA_UNIT_UTILS::UI::ToUserUnit( pcbIUScale, m_units, val ) );
 
-    if( m_suppressZeroes )
+    if( m_suppressZeroes && precision > 0 )
     {
         while( text.EndsWith( '0' ) )
         {
@@ -539,10 +542,7 @@ wxString PCB_DIMENSION_BASE::GetValueText() const
 
 DIM_VALUE_MODE PCB_DIMENSION_BASE::GetValueMode() const
 {
-    // Read only here but shared lookup helpers require a mutable board pointer
-    BOARD* board = const_cast<BOARD*>( GetBoard() );
-
-    return DimensionValueMode( board, this );
+    return DimensionValueMode( GetBoard(), this );
 }
 
 
@@ -559,8 +559,7 @@ wxString PCB_DIMENSION_BASE::GetValueFieldText() const
     {
     case DIM_VALUE_MODE::DRIVING:
     {
-        PCB_CONSTRAINT* lengthConstraint =
-                FindDimensionLengthConstraint( const_cast<BOARD*>( GetBoard() ), this );
+        PCB_CONSTRAINT* lengthConstraint = FindDimensionLengthConstraint( GetBoard(), this );
 
         if( lengthConstraint && lengthConstraint->GetValue() )
         {
@@ -726,7 +725,7 @@ void PCB_DIMENSION_BASE::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDire
 {
     Mirror( aCentre, aFlipDirection );
 
-    SetLayer( GetBoard()->FlipLayer( GetLayer() ) );
+    SetLayer( GetFlippedLayer( GetLayer() ) );
 }
 
 
@@ -782,17 +781,17 @@ void PCB_DIMENSION_BASE::Mirror( const VECTOR2I& axis_pos, FLIP_DIRECTION aFlipD
 }
 
 
-void PCB_DIMENSION_BASE::StyleFromSettings( const BOARD_DESIGN_SETTINGS& settings, bool aCheckSide )
+void PCB_DIMENSION_BASE::StyleFromSettings( const BOARD_DESIGN_SETTINGS& aSettings, bool aCheckSide )
 {
-    PCB_TEXT::StyleFromSettings( settings, aCheckSide );
+    PCB_TEXT::StyleFromSettings( aSettings, aCheckSide );
 
-    SetLineThickness( settings.GetLineThickness( m_layer ) );
-    SetUnitsMode( settings.m_DimensionUnitsMode );
-    SetUnitsFormat( settings.m_DimensionUnitsFormat );
-    SetPrecision( settings.m_DimensionPrecision );
-    SetSuppressZeroes( settings.m_DimensionSuppressZeroes );
-    SetTextPositionMode( settings.m_DimensionTextPosition );
-    SetKeepTextAligned( settings.m_DimensionKeepTextAligned );
+    SetLineThickness( aSettings.GetLineThickness( m_layer ) );
+    SetUnitsMode( aSettings.m_DimensionUnitsMode );
+    SetUnitsFormat( aSettings.m_DimensionUnitsFormat );
+    SetPrecision( aSettings.m_DimensionPrecision );
+    SetSuppressZeroes( aSettings.m_DimensionSuppressZeroes );
+    SetTextPositionMode( aSettings.m_DimensionTextPosition );
+    SetKeepTextAligned( aSettings.m_DimensionKeepTextAligned );
 
     Update();    // refresh text & geometry
 
@@ -1026,6 +1025,13 @@ double PCB_DIMENSION_BASE::ViewGetLOD( int aLayer, const KIGFX::VIEW* aView ) co
     }
 
     return PCB_TEXT::ViewGetLOD( aLayer, aView );
+}
+
+
+double PCB_DIMENSION_BASE::GetCoverageArea( int aTextMargin ) const
+{
+    // A dimension covers its whole drawing, not only the value text it inherits from
+    return BOARD_ITEM::GetCoverageArea( aTextMargin );
 }
 
 
@@ -2115,6 +2121,11 @@ static struct DIMENSION_DESC
                     .Map( DIM_VALUE_MODE::DRIVING,   _HKI( "Driving" ) )
                     .Map( DIM_VALUE_MODE::ARBITRARY, _HKI( "Arbitrary" ) );
 
+        ENUM_MAP<DIM_TEXT_POSITION>::Instance()
+                    .Map( DIM_TEXT_POSITION::OUTSIDE, _HKI( "Outside" ) )
+                    .Map( DIM_TEXT_POSITION::INLINE,  _HKI( "Inline" ) )
+                    .Map( DIM_TEXT_POSITION::MANUAL,  _HKI( "Manual" ) );
+
         PROPERTY_MANAGER& propMgr = PROPERTY_MANAGER::Instance();
         REGISTER_TYPE( PCB_DIMENSION_BASE );
         propMgr.AddTypeCast( new TYPE_CAST<PCB_DIMENSION_BASE, PCB_TEXT> );
@@ -2138,6 +2149,12 @@ static struct DIMENSION_DESC
                 []( INSPECTABLE* aItem ) -> bool
                 {
                     return dynamic_cast<PCB_DIM_LEADER*>( aItem ) == nullptr;
+                };
+
+        auto isNotCenter =
+                []( INSPECTABLE* aItem ) -> bool
+                {
+                    return dynamic_cast<PCB_DIM_CENTER*>( aItem ) == nullptr;
                 };
 
         auto isMultiArrowDirection =
@@ -2273,7 +2290,30 @@ static struct DIMENSION_DESC
                     groupDimension )
                 .SetAvailableFunc( isMultiArrowDirection ).SetIsCopyable();
 
+        propMgr.AddProperty( new PROPERTY<PCB_DIMENSION_BASE, int>( _HKI( "Line Thickness" ),
+                    &PCB_DIMENSION_BASE::ChangeLineThickness, &PCB_DIMENSION_BASE::GetLineThickness,
+                    PROPERTY_DISPLAY::PT_SIZE ),
+                    groupDimension )
+                .SetIsCopyable();
+
+        propMgr.AddProperty( new PROPERTY<PCB_DIMENSION_BASE, int>( _HKI( "Arrow Length" ),
+                    &PCB_DIMENSION_BASE::ChangeArrowLength, &PCB_DIMENSION_BASE::GetArrowLength,
+                    PROPERTY_DISPLAY::PT_SIZE ),
+                    groupDimension )
+                .SetAvailableFunc( isNotCenter ).SetIsCopyable();
+
+        propMgr.AddProperty( new PROPERTY<PCB_DIMENSION_BASE, int>( _HKI( "Extension Line Offset" ),
+                    &PCB_DIMENSION_BASE::ChangeExtensionOffset, &PCB_DIMENSION_BASE::GetExtensionOffset,
+                    PROPERTY_DISPLAY::PT_SIZE ),
+                    groupDimension )
+                .SetAvailableFunc( isNotCenter ).SetIsCopyable();
+
         const wxString groupText = _HKI( "Text Properties" );
+
+        propMgr.AddProperty( new PROPERTY_ENUM<PCB_DIMENSION_BASE, DIM_TEXT_POSITION>( _HKI( "Text Position" ),
+                    &PCB_DIMENSION_BASE::ChangeTextPositionMode, &PCB_DIMENSION_BASE::GetTextPositionMode ),
+                    groupText )
+                .SetAvailableFunc( isNotLeader ).SetIsCopyable();
 
         const auto isTextOrientationWriteable =
                 []( INSPECTABLE* aItem ) -> bool
@@ -2300,6 +2340,7 @@ ENUM_TO_WXANY( DIM_UNITS_FORMAT )
 ENUM_TO_WXANY( DIM_UNITS_MODE )
 ENUM_TO_WXANY( DIM_ARROW_DIRECTION )
 ENUM_TO_WXANY( DIM_VALUE_MODE )
+ENUM_TO_WXANY( DIM_TEXT_POSITION )
 
 
 static struct ALIGNED_DIMENSION_DESC

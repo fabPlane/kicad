@@ -158,11 +158,19 @@ wxImage renderSymbolToBitmap( SYMBOL_EDIT_FRAME& aFrame, LIB_SYMBOL& aSymbol, co
 
     for( SCH_ITEM& item : aSymbol.GetDrawItems() )
     {
-        if( aUnit && item.GetUnit() && item.GetUnit() != aUnit )
+        if( aUnit != ALL_UNITS
+                && item.GetUnit() != ALL_UNITS
+                && item.GetUnit() != aUnit )
+        {
             continue;
+        }
 
-        if( aBodyStyle && item.GetBodyStyle() && item.GetBodyStyle() != aBodyStyle )
+        if( aBodyStyle != ALL_BODY_STYLES
+                && item.GetBodyStyle() != ALL_BODY_STYLES
+                && item.GetBodyStyle() != aBodyStyle )
+        {
             continue;
+        }
 
         SCH_ITEM* clone = static_cast<SCH_ITEM*>( item.Clone() );
         clonedItems.emplace_back( clone );
@@ -364,7 +372,7 @@ bool SYMBOL_EDITOR_EDIT_TOOL::Init()
 
                     int coLocatedCount = 0;
 
-                    for( SCH_PIN* pin : symbol->GetPins() )
+                    for( SCH_PIN* pin : symbol->GetGraphicalPins( ALL_UNITS, ALL_BODY_STYLES ) )
                     {
                         if( pin->GetPosition() == pos )
                         {
@@ -701,7 +709,7 @@ int SYMBOL_EDITOR_EDIT_TOOL::DoDelete( const TOOL_EVENT& aEvent )
 
                 got_unit[curr_pin->GetUnit()] = true;
 
-                for( SCH_PIN* pin : symbol->GetPins() )
+                for( SCH_PIN* pin : symbol->GetGraphicalPins( ALL_UNITS, ALL_BODY_STYLES ) )
                 {
                     if( got_unit[pin->GetUnit()] )
                         continue;
@@ -1135,7 +1143,7 @@ int SYMBOL_EDITOR_EDIT_TOOL::ConvertStackedPins( const TOOL_EVENT& aEvent )
         SCH_PIN* selectedPin = static_cast<SCH_PIN*>( selection.Front() );
         VECTOR2I pos = selectedPin->GetPosition();
 
-        for( SCH_PIN* pin : symbol->GetPins() )
+        for( SCH_PIN* pin : symbol->GetGraphicalPins( ALL_UNITS, ALL_BODY_STYLES ) )
         {
             if( pin->GetPosition() == pos )
                 pinsToConvert.push_back( pin );
@@ -1696,8 +1704,8 @@ int SYMBOL_EDITOR_EDIT_TOOL::Paste( const TOOL_EVENT& aEvent )
         newItem->SetParent( symbol );
         newItem->SetFlags( IS_NEW | IS_PASTED | SELECTED );
 
-        newItem->SetUnit( newItem->GetUnit() ? m_frame->GetUnit() : 0 );
-        newItem->SetBodyStyle( newItem->GetBodyStyle() ? m_frame->GetBodyStyle() : 0 );
+        newItem->SetUnit( newItem->GetUnit() ? m_frame->GetUnit() : ALL_UNITS );
+        newItem->SetBodyStyle( newItem->GetBodyStyle() ? m_frame->GetBodyStyle() : ALL_BODY_STYLES );
 
         symbol->AddDrawItem( newItem );
         getView()->Add( newItem );

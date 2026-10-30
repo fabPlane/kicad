@@ -69,9 +69,11 @@
 #include <dialogs/dialog_migrate_3d_models.h>
 #include <dialog_board_setup.h>
 #include <dialogs/dialog_dimension_properties.h>
+#include <board_tables/generated_table_refresh.h>
 #include <pcb_drill_chart.h>
 #include <pcb_drill_map.h>
-#include <dialogs/dialog_drill_chart_properties.h>
+#include <dialogs/dialog_generated_table_properties.h>
+#include <dialogs/panel_drill_chart_options.h>
 #include <dialogs/dialog_table_properties.h>
 #include <gal/graphics_abstraction_layer.h>
 #include <pad.h>
@@ -148,6 +150,7 @@
 #include <widgets/wx_infobar.h>
 #include <widgets/panel_selection_filter.h>
 #include <widgets/pcb_properties_panel.h>
+#include <widgets/git_commit_pane.h>
 #include <widgets/pcb_net_inspector_panel.h>
 #include <widgets/wx_aui_utils.h>
 #include <kiplatform/app.h>
@@ -259,7 +262,7 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     // Create GAL canvas
     PCB_DRAW_PANEL_GAL* canvas = new PCB_DRAW_PANEL_GAL( this, -1, wxPoint( 0, 0 ), m_frameSize,
                                                          GetGalDisplayOptions(),
-                                                         EDA_DRAW_PANEL_GAL::GAL_FALLBACK );
+                                                         EDA_DRAW_PANEL_GAL::GAL_TYPE_MODERN );
 
     SetCanvas( canvas );
     SetBoard( new BOARD() );
@@ -316,6 +319,7 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     m_netInspectorPanel = new PCB_NET_INSPECTOR_PANEL( this, this );
     m_designBlocksPane = new PCB_DESIGN_BLOCK_PANE( this, nullptr, m_designBlockHistoryList );
     m_constraintsPanel = new PANEL_CONSTRAINTS( this );
+    m_gitCommitPane = new GIT_COMMIT_PANE( this );
 
     m_auimgr.SetManagedWindow( this );
 
@@ -426,7 +430,25 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
                       .CloseButton( true )
                       .Hide() );
 
+    m_auimgr.AddPane( m_gitCommitPane,
+                      EDA_PANE()
+                              .Name( GitCommitPaneName() )
+                              .Right()
+                              .Layer( 5 )
+                              .Caption( _( "Version Control" ) )
+                              .PaneBorder( false )
+                              .MinSize( wxSize( m_gitCommitPane->GetMinDockWidth(), FromDIP( 120 ) ) )
+                              .BestSize( wxSize( std::max( m_gitCommitPane->GetMinDockWidth(), FromDIP( 300 ) ),
+                                                 FromDIP( 300 ) ) )
+                              .FloatingSize( FromDIP( wxSize( 300, 400 ) ) )
+                              .DestroyOnClose( false )
+                              .CloseButton( true )
+                              .Hide() );
+
     RestoreAuiLayout();
+
+    // A saved layout brings its own minimum, so the one the panel needs is set again.
+    m_auimgr.GetPane( GitCommitPaneName() ).min_size.x = m_gitCommitPane->GetMinDockWidth();
 
     m_auimgr.GetPane( "LayersManager" ).Show( m_ShowLayerManagerTools );
     m_auimgr.GetPane( "SelectionFilter" ).Show( m_ShowLayerManagerTools );
@@ -434,9 +456,15 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     m_auimgr.GetPane( NetInspectorPanelName() ).Show( m_ShowNetInspector );
     m_auimgr.GetPane( SearchPaneName() ).Show( m_ShowSearch );
     m_auimgr.GetPane( DesignBlocksPaneName() ).Show( GetPcbNewSettings()->m_AuiPanels.design_blocks_show );
+    m_auimgr.GetPane( GitCommitPaneName() ).Show( GetPcbNewSettings()->m_AuiPanels.show_git_commit_pane );
+
+    wxAuiPaneInfo& selectionFilterPane = m_auimgr.GetPane( wxS( "SelectionFilter" ) );
 
     // The selection filter doesn't need to grow in the vertical direction when docked
-    m_auimgr.GetPane( "SelectionFilter" ).dock_proportion = 0;
+    selectionFilterPane.dock_proportion = 0;
+
+    // wx 3.3.3 turns a -1 min height into 1, and a legacy perspective restores one
+    selectionFilterPane.min_size.y = m_selectionFilterPanel->GetBestSize().y;
     FinishAUIInitialization();
 
     if( aui_cfg.right_panel_width > 0 )
@@ -499,10 +527,6 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
 
     GetToolManager()->PostAction( ACTIONS::zoomFitScreen );
 
-    // This is used temporarily to fix a client size issue on GTK that causes zoom to fit
-    // to calculate the wrong zoom size.  See PCB_EDIT_FRAME::onSize().
-    Bind( wxEVT_SIZE, &PCB_EDIT_FRAME::onSize, this );
-
     Bind( wxEVT_IDLE,
           [this]( wxIdleEvent& aEvent )
           {
@@ -512,6 +536,7 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
               {
                   redrawNetnames();
                   m_lastNetnamesViewport = viewport;
+                  m_lastNetnamesScale = GetCanvas()->GetView()->GetScale();
               }
 
               // Do not forget to pass the Idle event to other clients:
@@ -622,6 +647,9 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     m_acceptedExts.emplace( FILEEXT::LegacyPcbFileExtension, &PCB_ACTIONS::ddAppendBoard );
     m_acceptedExts.emplace( wxS( "dxf" ), &PCB_ACTIONS::ddImportGraphics );
     m_acceptedExts.emplace( FILEEXT::SVGFileExtension, &PCB_ACTIONS::ddImportGraphics );
+    m_acceptedExts.emplace( FILEEXT::PngFileExtension, &PCB_ACTIONS::ddPlaceReferenceImage );
+    m_acceptedExts.emplace( FILEEXT::JpegFileExtension, &PCB_ACTIONS::ddPlaceReferenceImage );
+    m_acceptedExts.emplace( wxS( "jpeg" ), &PCB_ACTIONS::ddPlaceReferenceImage );
     DragAcceptFiles( true );
 
     Bind( EDA_EVT_CLOSE_DIALOG_BOOK_REPORTER, &PCB_EDIT_FRAME::onCloseModelessBookReporterDialogs, this );
@@ -676,7 +704,8 @@ void PCB_EDIT_FRAME::StartCrossProbeFlash( const std::vector<BOARD_ITEM*>& aItem
     if( !m_crossProbeFlashTimer.GetOwner() )
         m_crossProbeFlashTimer.SetOwner( this );
 
-    bool started = m_crossProbeFlashTimer.Start( 500, wxTIMER_CONTINUOUS ); // 0.5s intervals -> 3s total for 6 phases
+    // 0.5s intervals -> 3s total for 6 phases
+    [[maybe_unused]] bool started = m_crossProbeFlashTimer.Start( 500, wxTIMER_CONTINUOUS );
     wxLogTrace( traceCrossProbeFlash, "StartCrossProbeFlash(PCB): timer start=%d id=%d",
                 (int) started, m_crossProbeFlashTimer.GetId() );
 }
@@ -911,6 +940,43 @@ void PCB_EDIT_FRAME::redrawNetnames()
 
     view->SyncLayerVisibilityCache();   // Required for ViewGetLOD() calls.
 
+    if( view->GetGAL()->HasRetainedScene() )
+    {
+        // Labels sit on the visible part of their track. A track wholly inside both the old and new
+        // view keeps its label, so only the others are repainted, and only on net name layers.
+        const BOX2I before = BOX2ISafe( m_lastNetnamesViewport );
+        const BOX2I now = BOX2ISafe( viewport );
+        BOX2D       reach = viewport;
+
+        view->RepaintLayers(
+                BOX2ISafe( reach.Inflate( pcbIUScale.mmToIU( 2.0 ) ) ),
+                []( int aLayer )
+                {
+                    return IsNetnameLayer( aLayer );
+                },
+                [&]( KIGFX::VIEW_ITEM* aItem, int aLayer )
+                {
+                    PCB_TRACK* track = dynamic_cast<PCB_TRACK*>( aItem );
+
+                    if( !track || track->Type() == PCB_VIA_T )
+                        return false;
+
+                    const double lod = track->ViewGetLOD( aLayer, view );
+
+                    const BOX2I  bbox = track->GetBoundingBox();
+
+                    if( lod < m_lastNetnamesScale && before.Contains( bbox ) && now.Contains( bbox ) )
+                        return false;
+
+                    return lod < view->GetScale();
+                } );
+
+        // Labels are laid out on idle after a zoom's last paint and would otherwise wait for
+        // whatever paints next
+        GetCanvas()->Refresh();
+        return;
+    }
+
     // Inflate to catch most of the track width
     BOX2I_MINMAX clipbox( BOX2ISafe( viewport.Inflate( pcbIUScale.mmToIU( 2.0 ) ) ) );
 
@@ -1011,7 +1077,15 @@ void PCB_EDIT_FRAME::SetPageSettings( const PAGE_INFO& aPageSettings )
                             }
 
                             if( aDep->IsBOARD_ITEM() )
-                                view->Update( aDep, KIGFX::REPAINT );
+                            {
+                                if( PCB_TEXT* text = dynamic_cast<PCB_TEXT*>( aDep ) )
+                                {
+                                    text->ClearRenderCache();
+                                    text->ClearBoundingBoxCache();
+                                }
+
+                                view->Update( aDep, KIGFX::GEOMETRY | KIGFX::REPAINT );
+                            }
                         } );
             }
         }
@@ -1258,6 +1332,12 @@ void PCB_EDIT_FRAME::setupUIConditions()
                 return m_auimgr.GetPane( DesignBlocksPaneName() ).IsShown();
             };
 
+    auto gitCommitPaneCond =
+            [this] ( const SELECTION& )
+            {
+                return IsGitCommitPaneShown();
+            };
+
     auto highContrastCond =
             [this] ( const SELECTION& )
             {
@@ -1315,6 +1395,7 @@ void PCB_EDIT_FRAME::setupUIConditions()
     mgr->SetConditions( PCB_ACTIONS::showSearch,           CHECK( searchPaneCond ) );
     mgr->SetConditions( PCB_ACTIONS::showConstraintsPanel, CHECK( constraintsPaneCond ) );
     mgr->SetConditions( PCB_ACTIONS::showDesignBlockPanel, CHECK( designBlockCond ) );
+    mgr->SetConditions( ACTIONS::showGitCommitPane,        CHECK( gitCommitPaneCond ) );
 
     mgr->SetConditions( PCB_ACTIONS::saveBoardAsDesignBlock,     ENABLE( hasElements ) );
     mgr->SetConditions( PCB_ACTIONS::saveSelectionAsDesignBlock, ENABLE( SELECTION_CONDITIONS::NotEmpty ) );
@@ -1483,6 +1564,7 @@ void PCB_EDIT_FRAME::setupUIConditions()
     CURRENT_EDIT_TOOL( PCB_ACTIONS::drawEllipse );
     CURRENT_EDIT_TOOL( PCB_ACTIONS::drawEllipseArc );
     CURRENT_EDIT_TOOL( PCB_ACTIONS::drawArc );
+    setArcModeConditions( PCB_ACTIONS::drawArc, isDRCIdle );
     CURRENT_EDIT_TOOL( PCB_ACTIONS::drawPolygon );
     CURRENT_EDIT_TOOL( PCB_ACTIONS::drawBezier );
     CURRENT_EDIT_TOOL( PCB_ACTIONS::placePoint );
@@ -1993,6 +2075,8 @@ void PCB_EDIT_FRAME::SaveSettings( APP_SETTINGS_BASE* aCfg )
         cfg->m_AuiPanels.search_panel_width = m_searchPane->GetSize().x;
         cfg->m_AuiPanels.search_panel_dock_direction = searchPaneInfo.dock_direction;
 
+        cfg->m_AuiPanels.show_git_commit_pane = m_auimgr.GetPane( GitCommitPaneName() ).IsShown();
+
         if( m_netInspectorPanel )
         {
             wxAuiPaneInfo& netInspectorhPaneInfo = m_auimgr.GetPane( NetInspectorPanelName() );
@@ -2061,7 +2145,11 @@ void PCB_EDIT_FRAME::SetActiveLayer( PCB_LAYER_ID aLayer, bool aForceRedraw )
 
     m_toolManager->PostAction( PCB_ACTIONS::layerChanged );  // notify other tools
     GetCanvas()->SetFocus();                                // allow capture of hotkeys
-    GetCanvas()->SetHighContrastLayer( aLayer );
+
+    if( aForceRedraw )
+        GetCanvas()->SetHighContrastLayer( aLayer );
+    else
+        GetCanvas()->ChangeHighContrastLayer( aLayer );
 
     /*
     * Only show pad, via and track clearances when a copper layer is active
@@ -2328,7 +2416,7 @@ void PCB_EDIT_FRAME::OnModify()
 
     // A chart reports the board, so an edit that moved a hole has already made it wrong.
     // Costs one integer comparison per chart when nothing drill related changed.
-    RefreshDrillCharts( *GetBoard() );
+    RefreshGeneratedTables( *GetBoard() );
 
     Update3DView( true, GetPcbNewSettings()->m_Display.m_Live3DRefresh );
 
@@ -2891,21 +2979,6 @@ bool PCB_EDIT_FRAME::NetInspectorShown()
 }
 
 
-void PCB_EDIT_FRAME::onSize( wxSizeEvent& aEvent )
-{
-    if( IsShownOnScreen() )
-    {
-        // We only need this until the frame is done resizing and the final client size is
-        // established.
-        Unbind( wxEVT_SIZE, &PCB_EDIT_FRAME::onSize, this );
-        GetToolManager()->RunAction( ACTIONS::zoomFitScreen );
-    }
-
-    // Skip() is called in the base class.
-    EDA_DRAW_FRAME::OnSize( aEvent );
-}
-
-
 DIALOG_BOOK_REPORTER* PCB_EDIT_FRAME::GetInspectDrcErrorDialog()
 {
     if( !m_inspectDrcErrorDlg )
@@ -3055,6 +3128,7 @@ void PCB_EDIT_FRAME::onPluginAvailabilityChanged( wxCommandEvent& aEvt )
 {
     wxLogTrace( traceApi, "PCB frame: EDA_EVT_PLUGIN_AVAILABILITY_CHANGED" );
     RecreateToolbars();
+    ReCreateMenuBar();
     aEvt.Skip();
 }
 
@@ -3120,13 +3194,17 @@ void PCB_EDIT_FRAME::OnEditItemRequest( BOARD_ITEM* aItem )
     {
         // Not the generic table dialog, which would offer copper layers and direct editing of
         // cells that the next rebuild discards
-        DIALOG_DRILL_CHART_PROPERTIES dlg( this, static_cast<PCB_DRILL_CHART*>( aItem ) );
+        DIALOG_GENERATED_TABLE_PROPERTIES dlg( this, static_cast<PCB_DRILL_CHART*>( aItem ),
+                                               []( wxWindow* aParent )
+                                               {
+                                                   return new PANEL_DRILL_CHART_OPTIONS( aParent );
+                                               } );
         dlg.ShowModal();
         break;
     }
 
     case PCB_PAD_T:
-        ShowPadPropertiesDialog( static_cast<PAD*>( aItem ) );
+        ShowPadPropertiesDialog( static_cast<PAD&>( *aItem ) );
         break;
 
     case PCB_FOOTPRINT_T:

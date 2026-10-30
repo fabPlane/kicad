@@ -64,6 +64,8 @@ void FOOTPRINT_EDIT_FRAME::LoadFootprintFromLibrary( LIB_ID aFPID )
         {
             m_tabsPanel->SelectTab( existing );
 
+            setFPWatcher( GetBoard()->GetFirstFootprint() );
+
             m_treePane->GetLibTree()->ExpandLibId( aFPID );
 
             m_centerItemOnIdle = aFPID;
@@ -278,7 +280,7 @@ void FOOTPRINT_EDIT_FRAME::OnEditItemRequest( BOARD_ITEM* aItem )
         break;
 
     case PCB_PAD_T:
-        ShowPadPropertiesDialog( static_cast<PAD*>( aItem ) );
+        ShowPadPropertiesDialog( static_cast<PAD&>( *aItem ) );
         break;
 
     case PCB_FOOTPRINT_T:
@@ -404,7 +406,7 @@ void FOOTPRINT_EDIT_FRAME::SetActiveLayer( PCB_LAYER_ID aLayer )
 
     m_toolManager->RunAction( PCB_ACTIONS::layerChanged );  // notify other tools
     GetCanvas()->SetFocus();                             // allow capture of hotkeys
-    GetCanvas()->SetHighContrastLayer( aLayer );
+    GetCanvas()->ChangeHighContrastLayer( aLayer );
     GetCanvas()->Refresh();
 }
 

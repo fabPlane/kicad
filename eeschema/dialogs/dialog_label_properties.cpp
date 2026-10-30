@@ -19,6 +19,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <bitmaps.h>
 #include <template_fieldnames.h>
 #include <widgets/bitmap_button.h>
 #include <widgets/font_choice.h>
@@ -46,14 +47,17 @@ DIALOG_LABEL_PROPERTIES::DIALOG_LABEL_PROPERTIES( SCH_EDIT_FRAME* aParent, SCH_L
         m_activeTextEntry( nullptr ),
         m_netNameValidator( true ),
         m_fields( nullptr ),
-        m_textSize( aParent, m_textSizeLabel, m_textSizeCtrl, m_textSizeUnits, false ),
+        m_textSize( aParent, m_textSizeLabel, m_textSizeCtrl, m_textSizeUnits ),
         m_helpWindow( nullptr ),
         m_labelList( nullptr )
 {
     COLOR_SETTINGS* colorSettings = m_Parent->GetColorSettings();
     COLOR4D         schematicBackground = colorSettings->GetColor( LAYER_SCHEMATIC_BACKGROUND );
 
-    m_fields = new FIELDS_GRID_TABLE( this, aParent, m_grid, m_currentLabel );
+    std::vector<EMBEDDED_FILES*> embeddedFilesStack;
+    embeddedFilesStack.push_back( m_currentLabel->Schematic() );
+
+    m_fields = new FIELDS_GRID_TABLE( this, aParent, m_grid, m_currentLabel, embeddedFilesStack );
     m_delayedFocusRow = -1;
     m_delayedFocusColumn = FDC_VALUE;
 
@@ -108,7 +112,7 @@ DIALOG_LABEL_PROPERTIES::DIALOG_LABEL_PROPERTIES( SCH_EDIT_FRAME* aParent, SCH_L
     }
 
     m_grid->SetTable( m_fields );
-    m_grid->PushEventHandler( new FIELDS_GRID_TRICKS( m_grid, this, {},
+    m_grid->PushEventHandler( new FIELDS_GRID_TRICKS( m_grid, this, embeddedFilesStack,
                                                       [&]( wxCommandEvent& aEvent )
                                                       {
                                                           OnAddField( aEvent );

@@ -33,21 +33,19 @@
 #include <ui_events.h>
 
 /*
- * common/database/database_connection.cpp and common/http_lib/http_lib_connection.cpp are not
- * built (no nanodbc, no libcurl), but eeschema's sch_io_database.cpp and sch_io_http_lib.cpp
- * are, and every wxLogTrace() call in them passes one of these masks.  wxLogTrace builds a
- * wxString from the pointer before it decides whether tracing is on, so a null here would crash
- * on the first call rather than on the first *traced* call.
+ * common/http_lib/http_lib_connection.cpp is not built (no libcurl), but eeschema's
+ * sch_io_http_lib.cpp is, and every wxLogTrace() call in it passes this mask.  wxLogTrace builds
+ * a wxString from the pointer before it decides whether tracing is on, so a null here would
+ * crash on the first call rather than on the first *traced* call.  (traceDatabase used to sit
+ * here too; upstream moved it into common/trace_helpers.cpp, which is built.)
  *
  * The `extern` is load-bearing: a `const` at namespace scope has INTERNAL linkage in C++, so
- * without it these compile to nothing and the link still fails.  The real definitions get away
- * with omitting it only because their own headers declare them extern first, and those headers
- * drag in nanodbc / libcurl.
+ * without it this compiles to nothing and the link still fails.  The real definition gets away
+ * with omitting it only because its own header declares it extern first, and that header
+ * drags in libcurl.
  */
-extern const char* const traceDatabase;
 extern const char* const traceHTTPLib;
 
-const char* const traceDatabase = "KICAD_DATABASE";
 const char* const traceHTTPLib = "KICAD_HTTP_LIB";
 
 /*

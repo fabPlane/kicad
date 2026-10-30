@@ -71,10 +71,7 @@ void PCB_DRILL_MAP::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aDirection )
 {
     // The offset is a displacement of every mark from its own hole, so there is nothing to
     // mirror. The side the map documents is still the side it belongs on
-    const BOARD* board = GetBoard();
-
-    SetLayer( board ? board->FlipLayer( GetLayer() ) : ::FlipLayer( GetLayer() ) );
-
+    SetLayer( GetFlippedLayer( GetLayer() ) );
 }
 
 
@@ -307,7 +304,7 @@ bool PCB_DRILL_MAP::Deserialize( const google::protobuf::Any& aContainer )
 
     // Copper, silkscreen, mask, paste, adhesive, Edge.Cuts, Margin and courtyard are all
     // manufacturing inputs that hole symbols would corrupt rather than document
-    if( !DrillDocumentationLayers().Contains( layer ) )
+    if( !DocumentationLayers().Contains( layer ) )
     {
         return false;
     }

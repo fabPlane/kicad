@@ -69,13 +69,22 @@ set( BMAPS_SMALL
     e_96
     e_192
     git_add
+    git_branches
     git_changed_ahead
+    git_changes
     git_conflict
     git_delete
+    git_fetch
     git_good_check
+    git_history
     git_modified
     git_out_of_date
-    icon_bitmap2component_16
+    git_pull
+    git_push
+    git_remotes
+    git_repository
+    git_stashes
+    git_tags
     icon_eeschema_16
     icon_gerbview_16
     icon_kicad_16
@@ -157,6 +166,11 @@ set( BMAPS_MID
     about
     add_aligned_dimension
     add_arc
+    add_arc_center
+    add_arc_start_end_mid
+    add_arc_start_end_center
+    add_arc_tangent
+    add_arc_start_dir_end
     add_barcode
     add_bezier
     add_board
@@ -272,7 +286,6 @@ set( BMAPS_MID
     edit_comp_ref
     edit_comp_value
     editor
-    edit_cmp_symb_links
     edit
     edge_to_copper_clearance
     enter_sheet
@@ -339,7 +352,6 @@ set( BMAPS_MID
     hole_to_hole_clearance
     hole_to_copper_clearance
     hv45mode
-    icon_bitmap2component_24
     icon_cvpcb_24
     icon_eeschema_24
     icon_footprint_browser
@@ -382,6 +394,7 @@ set( BMAPS_MID
     library_table
     lines_any
     lines90
+    link
     list_nets
     load_drill
     load_gerber
@@ -438,8 +451,12 @@ set( BMAPS_MID
     pad_sketch
     pad
     pad_enumerate
+    pad_npth
     pad_number
+    pad_paste_aperture
+    pad_smd
     pad_table
+    pad_tht
     pads_mask_layers
     pads_remove
     path
@@ -612,7 +629,6 @@ set( BMAPS_24
 
 # 32 x 32 for icon sets
 set( BMAPS_32
-    icon_bitmap2component_32
     icon_eeschema_32
     icon_gerbview_32
     icon_kicad_32
@@ -636,7 +652,6 @@ set( BMAPS_BIG
     icon_libedit
     icon_modedit
     icon_pcbnew
-    icon_bitmap2component
     icon_pagelayout_editor
     icon_pcbcalculator
     icon_pcm
@@ -663,7 +678,6 @@ set( BMAPS_64
     icon_modedit
     icon_pcbnew
     icon_pagelayout_editor
-    icon_bitmap2component
     icon_pcbcalculator
     icon_pcm
     )
@@ -679,7 +693,6 @@ set( BMAPS_128
     icon_modedit
     icon_pcbnew
     icon_pagelayout_editor
-    icon_bitmap2component
     icon_pcbcalculator
     icon_pcm
     )
@@ -695,7 +708,6 @@ set( BMAPS_256
     icon_modedit
     icon_pcbnew
     icon_pagelayout_editor
-    icon_bitmap2component
     icon_pcbcalculator
     icon_pcm
     )
@@ -759,7 +771,7 @@ set( BMAPS_CONSTRAINTS
     via-style
     vias-under-smd
     microvia-stack-depth
-    microvia-aspect-ratio
+    hole-aspect-ratio
     )
 
 set( BMAPS_CONSTRAINTS_GEOM
@@ -1037,6 +1049,13 @@ endfunction()
 
 
 include( FindUnixCommands )
+
+# Git's GNU tar on Windows treats "C:/..." as a remote host and needs a gzip that is not on PATH.
+# Prefer the System32 bsdtar unless a reproducible build needs the GNU archive flags below.
+
+if( MSVC AND NOT DEFINED ENV{SOURCE_DATE_EPOCH} AND EXISTS "C:\\Windows\\System32\\tar.exe" )
+    set( TAR "C:\\Windows\\System32\\tar.exe" )
+endif()
 
 if( TAR STREQUAL "TAR-NOTFOUND" )
     # CMake on Windows CI seems to struggle to find tar even though it's in PATH

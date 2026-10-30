@@ -41,6 +41,7 @@
 #include <pcb_track.h>
 #include <pcb_table.h>
 #include <pcb_tablecell.h>
+#include <pcb_3d_body.h>
 
 #include <layer_ids.h>
 #include <project.h>
@@ -84,6 +85,8 @@ API_HANDLER_BOARD::API_HANDLER_BOARD( std::shared_ptr<BOARD_CONTEXT> aContext,
     registerHandler<GetGraphicsDefaults, GraphicsDefaultsResponse>(
             &API_HANDLER_BOARD::handleGetGraphicsDefaults );
     registerHandler<GetBoundingBox, GetBoundingBoxResponse>( &API_HANDLER_BOARD::handleGetBoundingBox );
+    registerHandler<GetBoardBoundingBox, BoardBoundingBoxResponse>(
+            &API_HANDLER_BOARD::handleGetBoardBoundingBox );
     registerHandler<GetPadShapeAsPolygon, PadShapeAsPolygonResponse>(
             &API_HANDLER_BOARD::handleGetPadShapeAsPolygon );
     registerHandler<CheckPadstackPresenceOnLayers, PadstackPresenceResponse>(
@@ -199,7 +202,7 @@ HANDLER_RESULT<std::unique_ptr<BOARD_ITEM>> API_HANDLER_BOARD::createItemForType
             PCB_FIELD_T, PCB_BARCODE_T, PCB_TEXT_T, PCB_TEXTBOX_T, PCB_SHAPE_T,
             PCB_REFERENCE_IMAGE_T, PCB_TABLE_T, PCB_PAD_T, PCB_ZONE_T, PCB_GROUP_T,
             PCB_CONSTRAINT_T, PCB_POINT_T, PCB_DIM_ALIGNED_T, PCB_DIM_LEADER_T,
-            PCB_DIM_CENTER_T, PCB_DIM_RADIAL_T, PCB_DIM_ORTHOGONAL_T
+            PCB_DIM_CENTER_T, PCB_DIM_RADIAL_T, PCB_DIM_ORTHOGONAL_T, PCB_3D_BODY_T
         };
 
         if( !s_footprintItemTypes.contains( aType ) )
@@ -260,8 +263,8 @@ void API_HANDLER_BOARD::deleteItemsInternal( std::map<KIID, ItemDeletionStatus>&
         if( item->Type() == PCB_TABLECELL_T )
         {
             // Cells are owned by their table; the commit removal path doesn't handle them.
-            // Match the GUI delete: clear the cell contents (drill-chart cells have no user text).
-            if( item->GetParent() && item->GetParent()->Type() == PCB_DRILL_CHART_T )
+            // Match the GUI delete: clear the cell contents (generated-table cells have no user text).
+            if( IsGeneratedTableCell( item ) )
                 continue;
 
             commit->Modify( item );
@@ -401,6 +404,7 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_BOARD::handleCreateUpdateItemsInte
     }
 
     BOARD_COMMIT* commit = static_cast<BOARD_COMMIT*>( getCurrentCommit( aClientName ) );
+    int           commitCheckpoint = commit->Checkpoint();
 
     for( const google::protobuf::Any& anyItem : aItems )
     {
@@ -410,8 +414,7 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_BOARD::handleCreateUpdateItemsInte
         if( !type )
         {
             status.set_code( ItemStatusCode::ISC_INVALID_TYPE );
-            status.set_error_message( fmt::format( "Could not decode a valid type from {}",
-                                                   anyItem.type_url() ) );
+            status.set_error_message( fmt::format( "Could not decode a valid type from {}", anyItem.type_url() ) );
             aItemHandler( status, anyItem );
             continue;
         }
@@ -423,15 +426,14 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_BOARD::handleCreateUpdateItemsInte
 
             switch( dimension.dimension_style_case() )
             {
-            case board::types::Dimension::kAligned:    type = PCB_DIM_ALIGNED_T;    break;
-            case board::types::Dimension::kOrthogonal: type = PCB_DIM_ORTHOGONAL_T; break;
-            case board::types::Dimension::kRadial:     type = PCB_DIM_RADIAL_T;     break;
-            case board::types::Dimension::kLeader:     type = PCB_DIM_LEADER_T;     break;
-            case board::types::Dimension::kCenter:     type = PCB_DIM_CENTER_T;     break;
-            case board::types::Dimension::DIMENSION_STYLE_NOT_SET: break;
+            case board::types::Dimension::kAligned:                type = PCB_DIM_ALIGNED_T;    break;
+            case board::types::Dimension::kOrthogonal:             type = PCB_DIM_ORTHOGONAL_T; break;
+            case board::types::Dimension::kRadial:                 type = PCB_DIM_RADIAL_T;     break;
+            case board::types::Dimension::kLeader:                 type = PCB_DIM_LEADER_T;     break;
+            case board::types::Dimension::kCenter:                 type = PCB_DIM_CENTER_T;     break;
+            case board::types::Dimension::DIMENSION_STYLE_NOT_SET:                              break;
             }
         }
-
 
         if( *type == PCB_SHAPE_T )
         {
@@ -450,38 +452,38 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_BOARD::handleCreateUpdateItemsInte
 
         HANDLER_RESULT<std::unique_ptr<BOARD_ITEM>> creationResult =
                 [&]() -> HANDLER_RESULT<std::unique_ptr<BOARD_ITEM>>
-        {
-            if( *type == PCB_GENERATOR_T )
-            {
-                std::optional<wxString> generatorType = GeneratorTypeFromAny( anyItem );
-
-                if( !generatorType )
                 {
-                    ItemStatus genStatus;
-                    genStatus.set_code( ItemStatusCode::ISC_INVALID_TYPE );
-                    genStatus.set_error_message(
-                            fmt::format( "could not decode a generator from {}", anyItem.type_url() ) );
-                    aItemHandler( genStatus, anyItem );
-                    return HANDLER_RESULT<std::unique_ptr<BOARD_ITEM>>( std::unique_ptr<BOARD_ITEM>() );
-                }
+                    if( *type == PCB_GENERATOR_T )
+                    {
+                        std::optional<wxString> generatorType = GeneratorTypeFromAny( anyItem );
 
-                std::unique_ptr<BOARD_ITEM> genItem = CreateGeneratorForType( *generatorType, container );
+                        if( !generatorType )
+                        {
+                            ItemStatus genStatus;
+                            genStatus.set_code( ItemStatusCode::ISC_INVALID_TYPE );
+                            genStatus.set_error_message( fmt::format( "could not decode a generator from {}",
+                                                                      anyItem.type_url() ) );
+                            aItemHandler( genStatus, anyItem );
+                            return HANDLER_RESULT<std::unique_ptr<BOARD_ITEM>>( std::unique_ptr<BOARD_ITEM>() );
+                        }
 
-                if( !genItem )
-                {
-                    ItemStatus genStatus;
-                    genStatus.set_code( ItemStatusCode::ISC_INVALID_TYPE );
-                    genStatus.set_error_message( fmt::format( "generator type {} is not registered",
-                                                              generatorType->ToStdString() ) );
-                    aItemHandler( genStatus, anyItem );
-                    return HANDLER_RESULT<std::unique_ptr<BOARD_ITEM>>( std::unique_ptr<BOARD_ITEM>() );
-                }
+                        std::unique_ptr<BOARD_ITEM> genItem = CreateGeneratorForType( *generatorType, container );
 
-                return HANDLER_RESULT<std::unique_ptr<BOARD_ITEM>>( std::move( genItem ) );
-            }
+                        if( !genItem )
+                        {
+                            ItemStatus genStatus;
+                            genStatus.set_code( ItemStatusCode::ISC_INVALID_TYPE );
+                            genStatus.set_error_message( fmt::format( "generator type {} is not registered",
+                                                                      generatorType->ToStdString() ) );
+                            aItemHandler( genStatus, anyItem );
+                            return HANDLER_RESULT<std::unique_ptr<BOARD_ITEM>>( std::unique_ptr<BOARD_ITEM>() );
+                        }
 
-            return createItemForType( *type, container );
-        }();
+                        return HANDLER_RESULT<std::unique_ptr<BOARD_ITEM>>( std::move( genItem ) );
+                    }
+
+                    return createItemForType( *type, container );
+                }();
 
         if( !creationResult || !creationResult.value() )
         {
@@ -508,6 +510,8 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_BOARD::handleCreateUpdateItemsInte
 
         if( !unpacked )
         {
+            commit->RevertToCheckpoint( commitCheckpoint );
+
             e.set_status( ApiStatusCode::AS_BAD_REQUEST );
             e.set_error_message( fmt::format( "could not unpack {} from request",
                                               item->GetClass().ToStdString() ) );
@@ -517,10 +521,10 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_BOARD::handleCreateUpdateItemsInte
         if( std::vector<wxString> removed = item->RemoveConflictingCustomProperties(); !removed.empty() )
         {
             auto as_str =
-                []( const wxString& aIn )
-                {
-                    return std::string( aIn.ToUTF8() );
-                };
+                    []( const wxString& aIn )
+                    {
+                        return std::string( aIn.ToUTF8() );
+                    };
 
             status.set_code( ItemStatusCode::ISC_INVALID_DATA );
             status.set_error_message( fmt::format( "Invalid custom properties for item {}: property name(s) '{}' "
@@ -689,7 +693,6 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_BOARD::handleCreateUpdateItemsInte
                                                 : _( "Modified items via API" ) );
     }
 
-
     return ItemRequestStatus::IRS_OK;
 }
 
@@ -761,9 +764,6 @@ void API_HANDLER_BOARD::ensureHeadlessTools()
 HANDLER_RESULT<GetItemsResponse> API_HANDLER_BOARD::handleGetItemsById(
         const HANDLER_CONTEXT<GetItemsById>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     // validateItemHeaderDocument already answers AS_UNHANDLED for another editor's
     // document type; anything else it reports is a real error for this client
     if( HANDLER_RESULT<std::optional<KIID>> header = validateItemHeaderDocument( aCtx.Request.header() );
@@ -771,6 +771,9 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_BOARD::handleGetItemsById(
     {
         return tl::unexpected( header.error() );
     }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     GetItemsResponse response;
 
@@ -853,9 +856,6 @@ HANDLER_RESULT<Empty> API_HANDLER_BOARD::handleClearSelection(
     if( std::optional<ApiResponseStatus> headless = checkForHeadless( "ClearSelection" ) )
         return tl::unexpected( *headless );
 
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     // validateItemHeaderDocument already answers AS_UNHANDLED for another editor's
     // document type; anything else it reports is a real error for this client
     if( HANDLER_RESULT<std::optional<KIID>> header = validateItemHeaderDocument( aCtx.Request.header() );
@@ -863,6 +863,9 @@ HANDLER_RESULT<Empty> API_HANDLER_BOARD::handleClearSelection(
     {
         return tl::unexpected( header.error() );
     }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     TOOL_MANAGER* mgr = toolManager();
     mgr->RunAction( ACTIONS::selectionClear );
@@ -878,9 +881,6 @@ HANDLER_RESULT<SelectionResponse> API_HANDLER_BOARD::handleAddToSelection(
     if( std::optional<ApiResponseStatus> headless = checkForHeadless( "AddToSelection" ) )
         return tl::unexpected( *headless );
 
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     // validateItemHeaderDocument already answers AS_UNHANDLED for another editor's
     // document type; anything else it reports is a real error for this client
     if( HANDLER_RESULT<std::optional<KIID>> header = validateItemHeaderDocument( aCtx.Request.header() );
@@ -888,6 +888,9 @@ HANDLER_RESULT<SelectionResponse> API_HANDLER_BOARD::handleAddToSelection(
     {
         return tl::unexpected( header.error() );
     }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     TOOL_MANAGER* mgr = toolManager();
     PCB_SELECTION_TOOL* selectionTool = mgr->GetTool<PCB_SELECTION_TOOL>();
@@ -955,7 +958,11 @@ HANDLER_RESULT<Empty> API_HANDLER_BOARD::handleFocusOnItems( const HANDLER_CONTE
     if( aCtx.Request.has_margin() )
         bbox->Inflate( UnpackDistance( aCtx.Request.margin() ) );
 
+#ifndef KICAD_HEADLESS_API
+    // checkForHeadless() has already turned this request away without a frame; the guard only
+    // keeps COMMON_TOOLS' typeinfo, which the headless core does not build, out of the link.
     toolManager()->GetTool<COMMON_TOOLS>()->ZoomFitBox( *bbox );
+#endif
 
     return Empty();
 }
@@ -967,9 +974,6 @@ HANDLER_RESULT<SelectionResponse> API_HANDLER_BOARD::handleRemoveFromSelection(
     if( std::optional<ApiResponseStatus> headless = checkForHeadless( "RemoveFromSelection" ) )
         return tl::unexpected( *headless );
 
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     // validateItemHeaderDocument already answers AS_UNHANDLED for another editor's
     // document type; anything else it reports is a real error for this client
     if( HANDLER_RESULT<std::optional<KIID>> header = validateItemHeaderDocument( aCtx.Request.header() );
@@ -977,6 +981,9 @@ HANDLER_RESULT<SelectionResponse> API_HANDLER_BOARD::handleRemoveFromSelection(
     {
         return tl::unexpected( header.error() );
     }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     TOOL_MANAGER* mgr = toolManager();
     PCB_SELECTION_TOOL* selectionTool = mgr->GetTool<PCB_SELECTION_TOOL>();
@@ -1089,9 +1096,6 @@ HANDLER_RESULT<GraphicsDefaultsResponse> API_HANDLER_BOARD::handleGetGraphicsDef
 HANDLER_RESULT<GetBoundingBoxResponse> API_HANDLER_BOARD::handleGetBoundingBox(
         const HANDLER_CONTEXT<GetBoundingBox>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     // validateItemHeaderDocument already answers AS_UNHANDLED for another editor's
     // document type; anything else it reports is a real error for this client
     if( HANDLER_RESULT<std::optional<KIID>> header = validateItemHeaderDocument( aCtx.Request.header() );
@@ -1099,6 +1103,9 @@ HANDLER_RESULT<GetBoundingBoxResponse> API_HANDLER_BOARD::handleGetBoundingBox(
     {
         return tl::unexpected( header.error() );
     }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     GetBoundingBoxResponse response;
     bool includeText = aCtx.Request.mode() == BoundingBoxMode::BBM_ITEM_AND_CHILD_TEXT;
@@ -1122,6 +1129,33 @@ HANDLER_RESULT<GetBoundingBoxResponse> API_HANDLER_BOARD::handleGetBoundingBox(
         response.add_items()->set_value( idMsg.value() );
         PackBox2( *response.add_boxes(), bbox );
     }
+
+    return response;
+}
+
+
+HANDLER_RESULT<BoardBoundingBoxResponse>
+API_HANDLER_BOARD::handleGetBoardBoundingBox( const HANDLER_CONTEXT<GetBoardBoundingBox>& aCtx )
+{
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() ); !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    BoardBoundingBoxResponse response;
+    BOX2I                    bbox;
+
+    switch( aCtx.Request.mode() )
+    {
+    case BoardBoundingBoxMode::BBBM_ALL_ITEMS:            bbox = board()->ComputeBoundingBox( false, false ); break;
+    case BoardBoundingBoxMode::BBBM_PHYSICAL_LAYERS_ONLY: bbox = board()->ComputeBoundingBox( false, true );  break;
+    case BoardBoundingBoxMode::BBBM_BOARD_EDGES_ONLY:     bbox = board()->GetBoardEdgesBoundingBox();         break;
+    default:
+        return tl::unexpected( MakeResponseStatus( AS_BAD_REQUEST, "invalid bounding box mode requested" ) );
+    }
+
+    PackBox2( *response.mutable_box(), bbox );
 
     return response;
 }
@@ -1274,13 +1308,13 @@ HANDLER_RESULT<Empty> API_HANDLER_BOARD::handleInteractiveMoveItems(
     if( std::optional<ApiResponseStatus> headless = checkForHeadless( "InteractiveMoveItems" ) )
         return tl::unexpected( *headless );
 
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
 
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     TOOL_MANAGER* mgr = toolManager();
     std::vector<EDA_ITEM*> toSelect;
@@ -1316,9 +1350,6 @@ HANDLER_RESULT<Empty> API_HANDLER_BOARD::handleInteractiveMoveItems(
 HANDLER_RESULT<FlipItemsResponse> API_HANDLER_BOARD::handleFlipItems(
         const HANDLER_CONTEXT<FlipItems>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     auto containerResult = validateItemHeaderDocument( aCtx.Request.header() );
 
     if( !containerResult && containerResult.error().status() == ApiStatusCode::AS_UNHANDLED )
@@ -1332,6 +1363,9 @@ HANDLER_RESULT<FlipItemsResponse> API_HANDLER_BOARD::handleFlipItems(
     {
         return tl::unexpected( containerResult.error() );
     }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     FLIP_DIRECTION flipDirection = FromProtoEnum<FLIP_DIRECTION, BoardFlipDirection>(
             aCtx.Request.direction() );
@@ -1547,13 +1581,13 @@ void API_HANDLER_BOARD::focusOnItem( const SelectionSpec& aSpec, FocusOnItemResp
 HANDLER_RESULT<CreateItemsResponse> API_HANDLER_BOARD::handleParseAndCreateItemsFromString(
         const HANDLER_CONTEXT<ParseAndCreateItemsFromString>& aCtx )
 {
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() );
 
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     if( aCtx.Request.contents().empty() )
     {
@@ -1703,13 +1737,13 @@ HANDLER_RESULT<Empty> API_HANDLER_BOARD::handleSetVisibleLayers(
     if( std::optional<ApiResponseStatus> headless = checkForHeadless( "SetVisibleLayers" ) )
         return tl::unexpected( *headless );
 
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
 
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     LSET visible;
     LSET enabled = board()->GetEnabledLayers();
@@ -1760,13 +1794,13 @@ HANDLER_RESULT<Empty> API_HANDLER_BOARD::handleSetActiveLayer(
     if( std::optional<ApiResponseStatus> headless = checkForHeadless( "SetActiveLayer" ) )
         return tl::unexpected( *headless );
 
-    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
-        return tl::unexpected( *busy );
-
     HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
 
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
 
     PCB_LAYER_ID layer = FromProtoEnum<PCB_LAYER_ID>( aCtx.Request.layer() );
 
