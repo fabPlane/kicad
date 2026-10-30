@@ -87,6 +87,12 @@ namespace
 {
 double componentModelHeight( const FOOTPRINT* aFp )
 {
+#ifdef KICAD_HEADLESS_API
+    // The headless core has no 3D model cache or loaders (3d-viewer is not built), so a
+    // component's height is not known; 0 is what a footprint without a model gets.
+    return 0.0;
+#endif
+
     if( !ODB::HasShownModel( aFp ) )
         return 0.0;
 

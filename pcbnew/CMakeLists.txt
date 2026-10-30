@@ -800,6 +800,10 @@ if( KICAD_HEADLESS_API )
 
     list( APPEND PCBNEW_SRCS ${PCBNEW_HEADLESS_KEEP} )
 
+    # 3d-viewer is not built headless, but the IDF exporter outlines extruded 3D bodies with
+    # GetExtrusionOutline(), which is footprint geometry only.
+    list( APPEND PCBNEW_SRCS ${CMAKE_SOURCE_DIR}/3d-viewer/3d_rendering/3d_placeholder_utils.cpp )
+
     # The KIFACE itself.  In the dynamic build pcbnew.cpp is compiled separately into
     # the .kiface module; here it joins the object set, with its GUI half compiled out
     # by the KICAD_HEADLESS_API guards inside it.  The Kiface/KIFACE_GETTER renaming

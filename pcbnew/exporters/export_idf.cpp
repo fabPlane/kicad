@@ -704,7 +704,13 @@ IDF3_COMP_OUTLINE* IDF_EXPORTER::createOutlineFromExtrudedBody( const FOOTPRINT*
 int IDF_EXPORTER::getMaxModelHeight( FOOTPRINT* aFootprint ) const
 {
     PROJECT* project = m_board->GetProject();
+#ifndef KICAD_HEADLESS_API
     S3D_CACHE* cache = project ? PROJECT_PCB::Get3DCacheManager( project ) : nullptr;
+#else
+    // No 3D model cache or loaders headless (3d-viewer is not built): heights come out as 0,
+    // as for a footprint without a model.
+    S3D_CACHE* cache = nullptr;
+#endif
     wxString libraryName = aFootprint->GetFPID().GetLibNickname();
     wxString footprintBasePath = wxEmptyString;
 

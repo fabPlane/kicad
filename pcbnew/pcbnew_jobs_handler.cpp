@@ -3246,7 +3246,16 @@ int PCBNEW_JOBS_HANDLER::JobExportIdf( JOB* aJob )
         return CLI::EXIT_CODES::ERR_INVALID_OUTPUT_CONFLICT;
     }
 
+#ifndef KICAD_HEADLESS_API
     FILENAME_RESOLVER* resolver = PROJECT_PCB::Get3DFilenameResolver( brd->GetProject() );
+#else
+    // The project's resolver belongs to its 3D model cache, which the headless core does not
+    // build; the exporter only needs a resolver, so it gets its own.
+    FILENAME_RESOLVER headlessResolver;
+    headlessResolver.SetProgramBase( &Pgm() );
+    headlessResolver.SetProject( brd->GetProject() );
+    FILENAME_RESOLVER* resolver = &headlessResolver;
+#endif
 
     if( !resolver )
     {
