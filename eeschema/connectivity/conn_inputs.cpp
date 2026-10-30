@@ -25,7 +25,9 @@
 #include <schematic.h>
 #include <project.h>
 #include <sch_sheet_path.h>
+#ifndef KICAD_HEADLESS_API
 #include <git/project_git_utils.h>
+#endif
 #include <text_eval/text_eval_vcs.h>
 #include <stdexcept>
 #include <wx/thread.h>
@@ -161,7 +163,13 @@ bool INPUT_STORE::ExternalSourcesChanged( const SCH_SHEET_LIST& aPaths, bool aCo
         {
             const auto& current = TEXT_EVAL::ENVIRONMENT::Current()->GitHash( file, [&]
             {
+#ifndef KICAD_HEADLESS_API
                 return KIGIT::PROJECT_GIT_UTILS::GetCurrentHash( file, false );
+#else
+                // The headless core has no libgit2 (the VCS text variables resolve to nothing),
+                // so there is never a hash to compare against.
+                return wxString();
+#endif
             } );
 
             if( current != hash )

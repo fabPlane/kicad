@@ -1700,7 +1700,11 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleFocusOnItems( const HANDLER_CONTEXT
     if( aCtx.Request.has_margin() )
         bbox.Inflate( UnpackDistance( aCtx.Request.margin(), schIUScale ) );
 
+#ifndef KICAD_HEADLESS_API
+    // FocusOnItems is GUI_ONLY; the guard only keeps COMMON_TOOLS' typeinfo, which the headless
+    // core does not build, out of the link.
     m_context->GetToolManager()->GetTool<COMMON_TOOLS>()->ZoomFitBox( bbox );
+#endif
 
     return Empty();
 }

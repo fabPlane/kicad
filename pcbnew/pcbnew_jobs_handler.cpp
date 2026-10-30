@@ -498,8 +498,14 @@ PCBNEW_JOBS_HANDLER::PCBNEW_JOBS_HANDLER( KIWAY* aKiway ) :
 
                   wxCHECK( idfJob && editFrame, false );
 
+#ifndef KICAD_HEADLESS_API
                   DIALOG_EXPORT_IDF3 dlg( idfJob, editFrame, aParent );
                   return dlg.ShowModal() == wxID_OK;
+#else
+                  // There is never an editor frame headless, so the check above already
+                  // returned; this keeps the dialog's vtable out of the link.
+                  return false;
+#endif
               } );
 }
 

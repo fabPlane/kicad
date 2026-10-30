@@ -870,7 +870,7 @@ void IFACE::OnKifaceEnd()
 {
     CancelPreload( true );
 
-#if defined( KICAD_NATIVE_MODEL_PREVIEW ) && defined( __WXGTK3__ )
+#if defined( KICAD_NATIVE_MODEL_PREVIEW ) && defined( __WXGTK3__ ) && !defined( KICAD_HEADLESS_API )
     ShutdownNativeModelFilePickerGtk();
 #endif
 

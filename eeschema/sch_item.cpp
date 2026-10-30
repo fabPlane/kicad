@@ -629,7 +629,7 @@ static std::optional<SCH_CONNECTIVITY::ITEM_VIEW> publishedConnection( const SCH
 std::optional<wxString> SCH_ITEM::GetConnectionName( const SCH_SHEET_PATH* aSheet, bool aLocal,
                                                      bool aIgnoreSheet ) const
 {
-    if( ADVANCED_CFG::GetCfg().m_ConnectivityEngine && wxThread::IsMain() )
+    if( ADVANCED_CFG::GetCfg().m_ConnectivityEngine && wxIsMainThread() )
     {
         if( const auto connection = publishedConnection( *this, aSheet ) )
             return aLocal ? connection->LocalName() : connection->Name( aIgnoreSheet );
@@ -648,7 +648,7 @@ std::vector<wxString> SCH_ITEM::GetBusMemberNames( const SCH_SHEET_PATH* aSheet 
 {
     std::vector<wxString> names;
 
-    if( ADVANCED_CFG::GetCfg().m_ConnectivityEngine && wxThread::IsMain() )
+    if( ADVANCED_CFG::GetCfg().m_ConnectivityEngine && wxIsMainThread() )
     {
         const auto connection = publishedConnection( *this, aSheet );
 
@@ -675,7 +675,7 @@ std::vector<wxString> SCH_ITEM::GetBusMemberNames( const SCH_SHEET_PATH* aSheet 
 
 bool SCH_ITEM::MatchesNetName( const EDA_SEARCH_DATA& aSearchData, const SCH_SHEET_PATH* aSheet ) const
 {
-    if( ADVANCED_CFG::GetCfg().m_ConnectivityEngine && wxThread::IsMain() )
+    if( ADVANCED_CFG::GetCfg().m_ConnectivityEngine && wxIsMainThread() )
     {
         const std::optional<SCH_CONNECTIVITY::ITEM_VIEW> connection = publishedConnection( *this, aSheet );
 
@@ -721,7 +721,7 @@ bool SCH_ITEM::HasBusConnection( const SCH_SHEET_PATH* aSheet ) const
 {
     if( ADVANCED_CFG::GetCfg().m_ConnectivityEngine )
     {
-        const auto connection = wxThread::IsMain() ? publishedConnection( *this, aSheet ) : std::nullopt;
+        const auto connection = wxIsMainThread() ? publishedConnection( *this, aSheet ) : std::nullopt;
         return connection && connection->IsBus();
     }
 

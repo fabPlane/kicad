@@ -282,7 +282,7 @@ bool SCH_LABEL_BASE::IsType( const std::vector<KICAD_T>& aScanTypes ) const
     const std::vector<SCH_ITEM*>* connectedItems = &publishedItems;
 
     // The engine never fills legacy connected items; its published adjacency replaces them
-    if( ADVANCED_CFG::GetCfg().m_ConnectivityEngine && wxThread::IsMain() )
+    if( ADVANCED_CFG::GetCfg().m_ConnectivityEngine && wxIsMainThread() )
     {
         if( const auto connection = schematic->Connectivity().Connection( m_Uuid, schematic->CurrentSheet().Path() ) )
             publishedItems = connection->ConnectedItems();

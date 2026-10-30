@@ -958,7 +958,11 @@ HANDLER_RESULT<Empty> API_HANDLER_BOARD::handleFocusOnItems( const HANDLER_CONTE
     if( aCtx.Request.has_margin() )
         bbox->Inflate( UnpackDistance( aCtx.Request.margin() ) );
 
+#ifndef KICAD_HEADLESS_API
+    // checkForHeadless() has already turned this request away without a frame; the guard only
+    // keeps COMMON_TOOLS' typeinfo, which the headless core does not build, out of the link.
     toolManager()->GetTool<COMMON_TOOLS>()->ZoomFitBox( *bbox );
+#endif
 
     return Empty();
 }
