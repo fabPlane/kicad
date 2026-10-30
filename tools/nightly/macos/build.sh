@@ -12,6 +12,9 @@ BUILD_DIR="${BUILD_DIR:-$SRC/build/nightly}"
 BUILD_TYPE="${BUILD_TYPE:-Release}"
 JOBS="${JOBS:-$(sysctl -n hw.ncpu)}"
 BREW="$(brew --prefix)"
+# The nng 1.x that install-deps.sh builds (Homebrew only has nng 2 now).
+NNG_VERSION="${NNG_VERSION:-1.12.5}"
+NNG_PREFIX="${NNG_PREFIX:-$HOME/.cache/kicad-nightly/nng-$NNG_VERSION}"
 
 WX_CONFIG=""
 for c in "$BREW/opt/wxwidgets@3.2/bin/wx-config" "$BREW/bin/wx-config-3.2" "$BREW/opt/wxwidgets/bin/wx-config" "$BREW/bin/wx-config"; do
@@ -39,6 +42,8 @@ cmake -S "$SRC" -B "$BUILD_DIR" -G Ninja \
   -DOCC_INCLUDE_DIR="$BREW/opt/opencascade/include/opencascade" \
   -DOCC_LIBRARY_DIR="$BREW/opt/opencascade/lib" \
   -DSQLite3_ROOT="$BREW/opt/sqlite" \
+  -DNNG_INCLUDE_DIR="$NNG_PREFIX/include" \
+  -DNNG_LIBRARY="$NNG_PREFIX/lib/libnng.a" \
   -DKICAD_BUILD_QA_TESTS=OFF \
   -DKICAD_BUILD_I18N=OFF \
   -DKICAD_USE_SENTRY=OFF \

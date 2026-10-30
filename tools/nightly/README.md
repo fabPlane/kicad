@@ -156,7 +156,10 @@ configure without them). The Linux and macOS `install-deps.sh` install all three
 Windows they are vcpkg host ports in `vcpkg.json`, and `build.ps1` checks for them before
 the configure. macOS also needs a SQLite that is not the SDK's: the configure refuses the
 SDK copy, which cannot read WAL databases. `install-deps.sh` installs Homebrew's `sqlite`
-and `build.sh` passes `SQLite3_ROOT` for it.
+and `build.sh` passes `SQLite3_ROOT` for it. Homebrew's `nng` is 2.x now, which drops the 1.x API that
+`libs/kinng` uses, so the macOS `install-deps.sh` builds a pinned nng 1.x (static) and
+`build.sh` points the configure at it. Ubuntu's `libnng-dev` and the vcpkg baseline are
+still 1.x.
 
 To check a branch without publishing anything, dispatch the workflow with `publish`
 unticked, e.g.
