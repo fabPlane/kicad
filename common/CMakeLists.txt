@@ -1318,7 +1318,16 @@ set( COMMON_GUI_SRCS
     properties/pg_editors.cpp
     properties/pg_properties.cpp
 
+    # The database library backends.  Upstream split the ODBC connection into a backend
+    # layer with SQLite and ODBC implementations and a worker thread; the headless core drops
+    # all of it (nanodbc, SQLite), and SCH_IO_DATABASE's references are link stubs.
+    database/access_engine_mutex.cpp
+    database/database_backend.cpp
     database/database_connection.cpp
+    database/db_backend_support.cpp
+    database/db_worker_thread.cpp
+    database/odbc_backend.cpp
+    database/sqlite_backend.cpp
 
     http_lib/http_lib_connection.cpp
     http_lib/http_lib_settings.cpp
@@ -1353,6 +1362,12 @@ if( KICAD_HEADLESS_API )
     # plotter for) but reports that PNG output is not available and fails cleanly.
     list( REMOVE_ITEM COMMON_SRCS plotters/PNG_plotter.cpp )
     list( APPEND COMMON_SRCS plotters/PNG_plotter_stub.cpp )
+
+    # Upstream moved the IDF library from utils/idftools into common.  The IDF parser and
+    # writer are plain C++ and stay; VRML_LAYER triangulates with the GLU tessellator (glad),
+    # which the headless core does not link.  Its only user is the VRML exporter, whose
+    # references are covered by host/headless_link_stubs.cpp as they were before the move.
+    list( REMOVE_ITEM COMMON_SRCS io/idf/vrml_layer.cpp )
 endif()
 
 add_library( common STATIC

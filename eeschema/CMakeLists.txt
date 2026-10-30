@@ -618,9 +618,6 @@ set( EESCHEMA_GUI_SRCS
     ${EESCHEMA_WIDGETS}
     ${SYNC_SHEET_PIN_SRCS}
 
-    import_gfx/dialog_import_gfx_sch_base.cpp
-    import_gfx/dialog_import_gfx_sch.cpp
-
     diff_merge/sch_diff_canvas_context.cpp
     diff_merge/sym_diff_canvas_context.cpp
 

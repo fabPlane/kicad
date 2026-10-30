@@ -79,6 +79,7 @@ public:
             DeleteRows( 0, GetNumberRows() );
     }
 
+    virtual bool      HasRowLabelExpanders() const { return false; }
     virtual bool      IsExpanderColumn( int aCol ) const { return false; }
     virtual ROW_STATE GetRowState( int aRow ) const { return ROW_STATE::NON_EXPANDABLE; }
 

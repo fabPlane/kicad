@@ -897,12 +897,18 @@ else()
     unset( LIBGIT2_INCLUDE_DIRS CACHE )
 endif()
 
-# Find SQLite3, required by the database library backend
-find_package( SQLite3 REQUIRED )
+# Find SQLite3, required by the database library backend.  The headless core leaves the
+# database backends out (common/CMakeLists.txt), as it did the ODBC connection before them, so
+# neither the native headless build nor the wasm one (which has no SQLite) needs it.
+if( KICAD_HEADLESS_API )
+    find_package( SQLite3 QUIET )
+else()
+    find_package( SQLite3 REQUIRED )
+endif()
 
 # The SDK library of macOS fails to read a write-ahead log database that no program has open, and the only
 # workaround writes to the user's database, so a build must link Homebrew or vcpkg SQLite instead
-if( APPLE )
+if( APPLE AND SQLite3_FOUND )
     if( SQLite3_LIBRARY MATCHES "^/usr/lib/" OR SQLite3_LIBRARY MATCHES "\\.sdk/" OR SQLite3_LIBRARY MATCHES "/SDKs/" )
         message( FATAL_ERROR "SQLite3 was found in the macOS SDK (${SQLite3_LIBRARY}), which cannot read WAL "
                              "databases KiCad promises to read.  Set SQLite3_ROOT to a Homebrew or vcpkg SQLite, for "

@@ -39,6 +39,13 @@ bool KIPLATFORM::SECRETS::GetSecret( const wxString& aService, const wxString& a
 }
 
 
+bool KIPLATFORM::SECRETS::GetSecretNoPrompt( const wxString& aService, const wxString& aKey,
+                                             wxString& aSecret )
+{
+    return false;
+}
+
+
 bool KIPLATFORM::SECRETS::DeleteSecret( const wxString& aService, const wxString& aKey )
 {
     return false;

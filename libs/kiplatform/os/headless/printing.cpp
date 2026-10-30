@@ -20,7 +20,7 @@
 #include <printing.h>
 
 
-KIPLATFORM::PRINTING::PRINT_RESULT KIPLATFORM::PRINTING::PrintPDF( const std::string& aFile )
+KIPLATFORM::PRINTING::PRINT_RESULT KIPLATFORM::PRINTING::PrintPDF( const std::string& aFile, int aCurrentPage )
 {
     // There is no print spooler to hand the document to.
     return PRINT_RESULT::UNSUPPORTED;
