@@ -2,6 +2,10 @@
 # Build dependencies for the headless kicad-cli on Ubuntu 24.04 (the nightly runner).
 # The list mirrors packages/kicad-patches/docker/Dockerfile in fab_pcb (Debian trixie) and
 # install-deps.sh at the repository root, plus patchelf for the relocatable bundle.
+# glslang-tools, spirv-tools and spirv-cross compile the RHI shaders
+# (cmake/RHIShaderCompilation.cmake fails the configure without glslangValidator and
+# spirv-opt; spirv-cross is only read on Apple but is installed so every runner has the
+# same tool set).
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
@@ -19,4 +23,9 @@ apt-get install -y --no-install-recommends \
   nlohmann-json3-dev libglm-dev libzint-dev libpoppler-glib-dev \
   libgl-dev libglu1-mesa-dev libegl-dev libgles-dev libx11-dev \
   libwayland-dev wayland-protocols libspnav-dev \
-  libzstd-dev zlib1g-dev libbz2-dev libssl-dev python3-dev
+  libzstd-dev zlib1g-dev libbz2-dev libssl-dev python3-dev \
+  glslang-tools spirv-tools spirv-cross
+
+for tool in glslangValidator spirv-opt spirv-cross; do
+  echo "$tool: $(command -v "$tool")"
+done

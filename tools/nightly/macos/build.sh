@@ -38,6 +38,7 @@ cmake -S "$SRC" -B "$BUILD_DIR" -G Ninja \
   -DNGSPICE_ROOT_DIR="$BREW/opt/libngspice" \
   -DOCC_INCLUDE_DIR="$BREW/opt/opencascade/include/opencascade" \
   -DOCC_LIBRARY_DIR="$BREW/opt/opencascade/lib" \
+  -DSQLite3_ROOT="$BREW/opt/sqlite" \
   -DKICAD_BUILD_QA_TESTS=OFF \
   -DKICAD_BUILD_I18N=OFF \
   -DKICAD_USE_SENTRY=OFF \

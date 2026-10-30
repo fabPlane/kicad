@@ -35,14 +35,20 @@ on:
         description: "Comma-separated subset of linux-x86_64,macos-arm64,macos-x86_64,windows-x86_64 (empty = all)"
         type: string
         default: ""
+      publish:
+        description: "Publish the dated and rolling nightly releases (untick to only build and smoke-test a branch)"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
   actions: write
 
 # Never two nightlies at once (they would race on the rolling release); queue instead.
+# A run that does not publish has nothing to race on, so it gets a group of its own and
+# neither waits for nor holds up the published nightly.
 concurrency:
-  group: nightly-release
+  group: ${{ (github.event_name == 'workflow_dispatch' && !inputs.publish) && format('nightly-check-{0}', github.run_id) || 'nightly-release' }}
   cancel-in-progress: false
 
 env:
@@ -307,7 +313,8 @@ jobs:
           if-no-files-found: error
           # These only move build outputs between jobs. Published nightlies live in
           # GitHub Releases, so a short fallback retention is enough if publishing fails.
-          retention-days: 1
+          # An unpublished check run keeps them a little longer so they can be tried out.
+          retention-days: ${{ (github.event_name == 'workflow_dispatch' && !inputs.publish) && 7 || 1 }}
 
   # ------------------------------------------------------------------ publish
   release:
@@ -316,7 +323,10 @@ jobs:
     # Publish whatever built, even when one platform failed: the manifest says which
     # platforms are at which commit, and the rolling release keeps the previous asset for a
     # platform that did not build tonight.
-    if: always() && needs.prepare.outputs.skip != 'true' && needs.build.result != 'cancelled' && needs.build.result != 'skipped'
+    # A dispatch with `publish` unticked (a check of a branch such as an upstream sync) builds,
+    # smoke-tests and uploads the workflow artifacts but never touches the releases consumers
+    # pin.  The schedule has no inputs, so it always publishes.
+    if: always() && (github.event_name != 'workflow_dispatch' || inputs.publish) && needs.prepare.outputs.skip != 'true' && needs.build.result != 'cancelled' && needs.build.result != 'skipped'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
