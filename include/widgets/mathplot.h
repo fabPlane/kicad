@@ -78,6 +78,7 @@
 #include <wx/print.h>
 #include <wx/image.h>
 
+#include <cmath>
 #include <vector>
 #include <deque>
 #include <stack>
@@ -111,6 +112,34 @@ class WXDLLIMPEXP_MATHPLOT mpScaleX;
 class WXDLLIMPEXP_MATHPLOT mpScaleY;
 class WXDLLIMPEXP_MATHPLOT mpWindow;
 class WXDLLIMPEXP_MATHPLOT mpPrintout;
+
+
+/// @return true if [aMin, aMax] is non-finite, empty, or too narrow relative to the values to label.
+inline bool mpIsDegenerateRange( double aMin, double aMax )
+{
+    if( !std::isfinite( aMin ) || !std::isfinite( aMax ) )
+        return true;
+
+    double span = aMax - aMin;
+    double magnitude = std::max( std::abs( aMin ), std::abs( aMax ) );
+
+    return !( span > 0.0 ) || span <= magnitude * 1e-9;
+}
+
+
+/// Widen a degenerate range around its midpoint.  A constant zero is padded by +/-1.
+inline void mpPadDegenerateRange( double& aMin, double& aMax )
+{
+    double mid = ( aMin + aMax ) / 2.0;
+
+    if( !std::isfinite( mid ) )
+        mid = 0.0;
+
+    double pad = mid != 0.0 ? std::abs( mid ) * 1e-3 : 1.0;
+
+    aMin = mid - pad;
+    aMax = mid + pad;
+}
 
 /**
  * Find the smallest and largest finite value in \a aValues.
@@ -415,7 +444,7 @@ protected:
     wxRect  m_dim;          // !< The bounding rectangle of the box. It may be resized dynamically
                             //    by the Plot method.
     wxPoint m_reference;    // !< Holds the reference point for movements
-    wxBrush m_brush;        // !< The brush to be used for the background
+                            // The background brush is mpLayer::m_brush.
     int     m_winX;         // !< Holds the mpWindow size. Used to rescale position when window is
     int     m_winY;         //    resized.
 
@@ -686,21 +715,17 @@ public:
     {
         if( !m_rangeSet )
         {
-            m_minV  = minV;
-            m_maxV  = maxV;
+            m_dataMinV = minV;
+            m_dataMaxV = maxV;
             m_rangeSet = true;
         }
         else
         {
-            m_minV  = std::min( minV, m_minV );
-            m_maxV  = std::max( maxV, m_maxV );
+            m_dataMinV = std::min( minV, m_dataMinV );
+            m_dataMaxV = std::max( maxV, m_dataMaxV );
         }
 
-        if( m_minV == m_maxV )
-        {
-            m_minV = m_minV - 1.0;
-            m_maxV = m_maxV + 1.0;
-        }
+        updateDisplayRange();
     }
 
     /** Force this axis' data range to an explicit [minV, maxV], as if it had been computed by
@@ -709,21 +734,20 @@ public:
      */
     void SetDataRange( double minV, double maxV )
     {
-        m_minV = minV;
-        m_maxV = maxV;
+        m_dataMinV = minV;
+        m_dataMaxV = maxV;
         m_rangeSet = true;
 
-        if( m_minV == m_maxV )
-        {
-            m_minV = m_minV - 1.0;
-            m_maxV = m_maxV + 1.0;
-        }
+        updateDisplayRange();
     }
 
     virtual void ResetDataRange()
     {
         m_rangeSet = false;
     }
+
+    ///< True once ExtendDataRange()/SetDataRange() has established a real data range.
+    bool IsRangeSet() const { return m_rangeSet; }
 
     double AbsMaxValue() const
     {
@@ -734,6 +758,8 @@ public:
     {
         return m_absVisibleMaxV;
     }
+
+    int GetMaxLabelWidth() const { return m_maxLabelWidth; }
 
     void SetAxisMinMax( bool lock, double minV, double maxV )
     {
@@ -786,6 +812,16 @@ protected:
     virtual void formatLabels() {};
 
 protected:
+    /// Padding a running hull after every trace would make the result depend on trace order.
+    void updateDisplayRange()
+    {
+        m_minV = m_dataMinV;
+        m_maxV = m_dataMaxV;
+
+        if( mpIsDegenerateRange( m_minV, m_maxV ) )
+            mpPadDegenerateRange( m_minV, m_maxV );
+    }
+
     std::vector<double>     m_tickValues;
     std::vector<TICK_LABEL> m_tickLabels;
 
@@ -794,8 +830,10 @@ protected:
     int                     m_flags;            // !< Flag for axis alignment
     int                     m_nameFlags;
     bool                    m_ticks;            // !< Flag to toggle between ticks or grid
-    double                  m_minV, m_maxV;
+    double                  m_minV, m_maxV;     // !< Display range, padded when degenerate
     bool                    m_rangeSet;
+    double                  m_dataMinV = 0.0;   // !< Hull of the data, never padded
+    double                  m_dataMaxV = 0.0;
     bool                    m_axisLocked;
     double                  m_axisMin;
     double                  m_axisMax;
@@ -1323,9 +1361,6 @@ public:
         m_enableLimitedView = aEnable;
     }
 
-    void LockY( bool aLock ) { m_yLocked = aLock; }
-    bool GetYLocked() const { return m_yLocked; }
-
     void ZoomUndo();
     void ZoomRedo();
     int UndoZoomStackSize() const { return m_undoZoomStack.size(); }
@@ -1343,6 +1378,10 @@ protected:
     void pushZoomUndo( const std::array<double, 4>& aZoom );
 
     void OnPaint( wxPaintEvent& event );             // !< Paint handler, will plot all attached layers
+
+    /// Called at the end of OnPaint(), once the scales have measured their labels.
+    virtual void onPaintFinished() {}
+
     void OnSize( wxSizeEvent& event );               // !< Size handler, will update scroll bar sizes
 
     void OnShowPopupMenu( wxMouseEvent& event );     // !< Mouse handler, will show context menu
@@ -1407,8 +1446,6 @@ protected:
     int m_scrY;             // !< Current view's Y dimension
     int m_clickedX;         // !< Last mouse click X position, for centering and zooming the view
     int m_clickedY;         // !< Last mouse click Y position, for centering and zooming the view
-
-    bool m_yLocked;
 
     /** These are updated in Fit, ZoomIn, ZoomOut, ZoomRect, SetXView, SetYView and may be different
      *  from the real borders (layer coordinates) only if lock aspect ratio is true.

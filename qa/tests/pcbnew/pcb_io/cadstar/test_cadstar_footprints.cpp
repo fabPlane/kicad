@@ -152,6 +152,37 @@ BOOST_AUTO_TEST_CASE( CadstarRevision7FormatImport )
 }
 
 
+// Bottom technical layers listed before bottom copper in the LAYERSTACK stay on the back
+BOOST_AUTO_TEST_CASE( BottomLayersListedBeforeBottomCopper )
+{
+    wxString filePath = KI_TEST::GetPcbnewTestDataDir() + "plugins/cadstar/issue26027/test2_layer_side.cpa";
+
+    std::unique_ptr<BOARD> board;
+
+    BOOST_REQUIRE_NO_THROW( board = cstarPlugin.LoadBoard( filePath ) );
+    BOOST_REQUIRE( board != nullptr );
+
+    auto countOnLayer =
+            [&]( PCB_LAYER_ID aLayer )
+            {
+                int count = 0;
+
+                for( BOARD_ITEM* item : board->Drawings() )
+                {
+                    if( item->GetLayer() == aLayer )
+                        ++count;
+                }
+
+                return count;
+            };
+
+    BOOST_CHECK_EQUAL( countOnLayer( F_SilkS ), 1 );
+    BOOST_CHECK_EQUAL( countOnLayer( B_SilkS ), 1 );
+    BOOST_CHECK_EQUAL( countOnLayer( F_Mask ), 1 );
+    BOOST_CHECK_EQUAL( countOnLayer( B_Mask ), 1 );
+}
+
+
 /**
  * A PADREASSIGN/VIAREASSIGN whose shape node is unknown (e.g. from a newer CADSTAR version)
  * must warn and continue rather than throwing, and must not report a (default-circle) shape so
@@ -186,6 +217,28 @@ BOOST_AUTO_TEST_CASE( UnknownReassignShapeIsSkipped )
 
     BOOST_CHECK_NO_THROW( emptyParser.Parse( &emptyReassign, &ctx ) );
     BOOST_CHECK( !emptyParser.HasShape );
+}
+
+
+/**
+ * A part with more pins than its footprint has pads must still have its pads named after the pins.
+ */
+BOOST_AUTO_TEST_CASE( CadstarPartPinsExceedPads )
+{
+    wxString filePath = KI_TEST::GetPcbnewTestDataDir() + "plugins/cadstar/pin_names/test3_pinname_pads.cpa";
+
+    std::unique_ptr<BOARD> board = cstarPlugin.LoadBoard( filePath );
+    BOOST_REQUIRE( board != nullptr );
+
+    FOOTPRINT* j1 = board->FindFootprintByReference( wxT( "J1" ) );
+    BOOST_REQUIRE( j1 != nullptr );
+
+    const std::vector<wxString> expected{ wxT( "N" ), wxT( "E" ), wxT( "L" ), wxT( "E2" ) };
+
+    BOOST_REQUIRE_EQUAL( j1->Pads().size(), expected.size() );
+
+    for( size_t i = 0; i < expected.size(); ++i )
+        BOOST_CHECK_EQUAL( j1->Pads()[i]->GetNumber(), expected[i] );
 }
 
 

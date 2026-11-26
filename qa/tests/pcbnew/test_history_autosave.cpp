@@ -23,6 +23,7 @@
 #include <board.h>
 #include <board_design_settings.h>
 #include <local_history.h>
+#include <pcbnew_utils/board_file_utils.h>
 #include <pgm_base.h>
 #include <project.h>
 #include <project/project_file.h>
@@ -163,7 +164,7 @@ void addViaStackPreset( BOARD_DESIGN_SETTINGS& aSettings, const wxString& aName 
 std::string snapshotProjectBytes( PROJECT& aProject )
 {
     std::vector<HISTORY_FILE_DATA> fileData;
-    aProject.SaveToHistory( aProject.GetProjectFullName(), fileData );
+    aProject.SaveToHistory( aProject.GetProjectPath(), fileData );
 
     auto it = std::find_if( fileData.begin(), fileData.end(),
                             []( const HISTORY_FILE_DATA& aEntry )
@@ -892,6 +893,50 @@ BOOST_AUTO_TEST_CASE( DivergentAutosaveStillFlaggedStale )
 }
 
 
+// Revert discards the edits an autosave holds, so a reload must not offer it for recovery (WIN-49).
+BOOST_AUTO_TEST_CASE( RevertDiscardsTheReloadedDocumentsAutosave )
+{
+    SCOPED_PGM_BACKUP_SETTINGS restorePgmBackup;
+    Pgm().GetCommonSettings()->m_Backup.location = BACKUP_LOCATION::PROJECT_DIR;
+
+    KI_TEST::SCOPED_TEMP_DIR project( wxS( "kicad_qa_revert_autosave" ) );
+    const wxString& path = project.PathStr();
+    const wxString  sep = wxFileName::GetPathSeparator();
+
+    writeTextFile( path + sep + wxS( "p.kicad_pro" ), wxS( "{}\n" ) );
+
+    SETTINGS_MANAGER&   mgr = Pgm().GetSettingsManager();
+    SCOPED_PROJECT_LOAD loadedProject( mgr, path + sep + wxS( "p.kicad_pro" ) );
+
+    const wxString sourcePath = path + sep + wxS( "p.kicad_pcb" );
+    const wxString autosavePath = path + sep + wxS( "_autosave-p.kicad_pcb" );
+    const wxString schAutosave = path + sep + wxS( "_autosave-p.kicad_sch" );
+    const wxString board =
+            wxString::FromUTF8( readTextFile( KI_TEST::GetPcbnewTestDataDir() + "api_kitchen_sink.kicad_pcb" ) );
+
+    writeTextFile( sourcePath, board );
+    writeTextFile( autosavePath, board + wxS( "\n" ) );
+    writeTextFile( path + sep + wxS( "p.kicad_sch" ), wxS( "(kicad_sch)\n" ) );
+    writeTextFile( schAutosave, wxS( "(kicad_sch (edited yes))\n" ) );
+
+    wxDateTime newerMtime = wxFileName( sourcePath ).GetModificationTime() + wxTimeSpan::Seconds( 60 );
+    BOOST_REQUIRE( wxFileName( autosavePath ).SetTimes( &newerMtime, &newerMtime, nullptr ) );
+    BOOST_REQUIRE( wxFileName( schAutosave ).SetTimes( &newerMtime, &newerMtime, nullptr ) );
+
+    LOCAL_HISTORY         history;
+    std::vector<wxString> exts{ wxS( "kicad_pcb" ) };
+
+    auto offered = history.ResolveAutosavesForLoad( path, exts, false );
+    BOOST_CHECK_EQUAL( offered.size(), 1u );
+    BOOST_REQUIRE( wxFileExists( autosavePath ) );
+
+    offered = history.ResolveAutosavesForLoad( path, exts, true );
+    BOOST_CHECK( offered.empty() );
+    BOOST_CHECK( !wxFileExists( autosavePath ) );
+    BOOST_CHECK_MESSAGE( wxFileExists( schAutosave ), "revert of a board must not drop the schematic autosave" );
+}
+
+
 BOOST_AUTO_TEST_CASE( EnforceSizeLimitKeepsUnstagedFilesInNextSnapshot )
 {
     LIBGIT2_SCOPE libgit;
@@ -999,6 +1044,54 @@ BOOST_AUTO_TEST_CASE( ProjectSnapshotDoesNotDirtyACleanProject )
     BOOST_CHECK_MESSAGE( !projectFile.SaveToFile( tc.m_tempDir.PathStr() ),
                          "an unchanged project must not be rewritten after a snapshot" );
     BOOST_CHECK_EQUAL( before, readTextFile( tc.m_proPath ) );
+}
+
+
+// History compares read the rules and library tables from the snapshot, so it must track them
+BOOST_AUTO_TEST_CASE( ProjectSnapshotTracksRulesAndLibTables )
+{
+    LIBGIT2_SCOPE              libgit;
+    SCOPED_PGM_BACKUP_SETTINGS restorePgmBackup;
+
+    SNAPSHOT_PROJECT tc( wxS( "kicad_qa_pro_snapshot_files" ), wxS( "files.kicad_pro" ) );
+    const wxString   rules = tc.m_tempDir.ChildPathStr( wxS( "files.kicad_dru" ) );
+    const wxString   path = tc.Project().GetProjectPath();
+
+    writeTextFile( rules, wxS( "(version 1)\n" ) );
+    writeTextFile( tc.m_tempDir.ChildPathStr( wxS( "fp-lib-table" ) ), wxS( "(fp_lib_table)\n" ) );
+
+    LOCAL_HISTORY history;
+    history.RegisterProjectSaver( &tc.Project() );
+
+    auto headHas = [&]( const char* aName )
+    {
+        git_repository* repo = nullptr;
+        BOOST_REQUIRE( git_repository_open( &repo, ( path + wxS( ".history" ) ).mb_str().data() ) == 0 );
+
+        git_oid     headOid;
+        git_commit* head = nullptr;
+        git_tree*   tree = nullptr;
+        BOOST_REQUIRE( git_reference_name_to_id( &headOid, repo, "HEAD" ) == 0 );
+        BOOST_REQUIRE( git_commit_lookup( &head, repo, &headOid ) == 0 );
+        BOOST_REQUIRE( git_commit_tree( &tree, head ) == 0 );
+
+        const bool found = git_tree_entry_byname( tree, aName ) != nullptr;
+
+        git_tree_free( tree );
+        git_commit_free( head );
+        git_repository_free( repo );
+        return found;
+    };
+
+    BOOST_REQUIRE( history.RunRegisteredSaversAndCommit( path, wxS( "Save" ), wxS( "pcb" ) ) );
+    BOOST_CHECK( headHas( "files.kicad_dru" ) );
+    BOOST_CHECK( headHas( "fp-lib-table" ) );
+
+    BOOST_REQUIRE( wxRemoveFile( rules ) );
+    BOOST_REQUIRE( history.RunRegisteredSaversAndCommit( path, wxS( "Save" ), wxS( "pcb" ) ) );
+    BOOST_CHECK( !headHas( "files.kicad_dru" ) );
+
+    history.UnregisterSaver( &tc.Project() );
 }
 
 

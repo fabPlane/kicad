@@ -35,6 +35,7 @@
 #include <font/font.h>
 #include <properties/property.h>
 #include <properties/property_mgr.h>
+#include <view/view.h>
 
 
 bool BOARD_ITEM::FitsEnabledLayers( const LSET& aEnabledLayers, int aCopperLayerCount ) const
@@ -56,6 +57,7 @@ bool BOARD_ITEM::IsGroupableType() const
     case PCB_TEXTBOX_T:
     case PCB_TABLE_T:
     case PCB_DRILL_CHART_T:
+    case PCB_STACKUP_TABLE_T:
     case PCB_DRILL_MAP_T:
     case PCB_GROUP_T:
     case PCB_GENERATOR_T:
@@ -377,18 +379,25 @@ BOARD_ITEM* BOARD_ITEM::Duplicate( bool addToParentGroup, BOARD_COMMIT* aCommit 
     BOARD_ITEM* dupe = static_cast<BOARD_ITEM*>( Clone() );
     dupe->ResetUuid();
 
-    if( addToParentGroup )
-    {
-        wxCHECK_MSG( aCommit, dupe, "Must supply a commit to update parent group" );
-
-        if( EDA_GROUP* group = dupe->GetParentGroup() )
-        {
-            aCommit->Modify( group->AsEdaItem(), nullptr, RECURSE_MODE::NO_RECURSE );
-            group->AddItem( dupe );
-        }
-    }
+    SetDuplicateGroup( dupe, addToParentGroup, aCommit );
 
     return dupe;
+}
+
+
+void BOARD_ITEM::SetDuplicateGroup( BOARD_ITEM* aDupe, bool addToParentGroup, BOARD_COMMIT* aCommit ) const
+{
+    aDupe->SetParentGroup( nullptr );
+
+    EDA_GROUP* group = GetParentGroup();
+
+    if( !addToParentGroup || !group )
+        return;
+
+    wxCHECK_RET( aCommit, "Must supply a commit to update parent group" );
+
+    aCommit->Modify( group->AsEdaItem(), nullptr, RECURSE_MODE::NO_RECURSE );
+    group->AddItem( aDupe );
 }
 
 
@@ -406,6 +415,21 @@ double BOARD_ITEM::GetCoverageArea( int aTextMargin ) const
     SHAPE_POLY_SET poly;
     TransformShapeToPolygon( poly, UNDEFINED_LAYER, 0, ARC_LOW_DEF, ERROR_OUTSIDE );
     return polygonArea( poly );
+}
+
+
+LSET BOARD_ITEM::viewVisibleLayers( const KIGFX::VIEW* aView ) const
+{
+    const BOARD* board = GetBoard();
+    LSET         visible;
+
+    for( PCB_LAYER_ID layer : board ? board->GetEnabledLayers() : LSET::AllLayersMask() )
+    {
+        if( aView->IsLayerVisibleCached( layer ) )
+            visible.set( layer );
+    }
+
+    return visible;
 }
 
 
@@ -494,6 +518,12 @@ void BOARD_ITEM::Mirror( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection 
 }
 
 
+void BOARD_ITEM::Mirror( const SEG& aAxis )
+{
+    wxMessageBox( wxT( "virtual BOARD_ITEM::Mirror used, should not occur" ), GetClass() );
+}
+
+
 wxString BOARD_ITEM::GetParentAsString() const
 {
     if( FOOTPRINT* fp = dynamic_cast<FOOTPRINT*>( m_parent ) )
@@ -549,7 +579,8 @@ static struct BOARD_ITEM_DESC
                     &BOARD_ITEM::SetY, &BOARD_ITEM::GetY, PROPERTY_DISPLAY::PT_COORD,
                     ORIGIN_TRANSFORMS::ABS_Y_COORD ) );
         propMgr.AddProperty( new PROPERTY_ENUM<BOARD_ITEM, PCB_LAYER_ID>( _HKI( "Layer" ),
-                    &BOARD_ITEM::SetLayer, &BOARD_ITEM::GetLayer ) ).SetIsCopyable();
+                    &BOARD_ITEM::SetLayer, &BOARD_ITEM::GetLayer ) )
+                .SetIsCopyable();
         propMgr.AddProperty( new PROPERTY<BOARD_ITEM, bool>( _HKI( "Locked" ),
                     &BOARD_ITEM::SetLocked, &BOARD_ITEM::IsLocked ) )
                .SetAvailableFunc( isNotFootprintHolder );

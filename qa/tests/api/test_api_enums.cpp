@@ -308,6 +308,7 @@ BOOST_AUTO_TEST_CASE( DesignRuleType )
                                 DRCE_MICROVIA_STACK_DEPTH,
                                 DRCE_HOLE_ASPECT_RATIO,
                                 DRCE_MICROVIA_CROSSES_CORE,
+                                DRCE_MICROVIA_SPANS_DIELECTRICS,
                                 DRCE_COPPER_OUTSIDE_BOARD,
                                 DRCE_OVERLAPPING_FOOTPRINTS,
                                 DRCE_MISSING_COURTYARD,
@@ -335,7 +336,7 @@ BOOST_AUTO_TEST_CASE( DesignRuleType )
                                 DRCE_SILK_EDGE_CLEARANCE,
                                 DRCE_SOLDERMASK_BRIDGE,
                                 DRCE_TEXT_HEIGHT,
-                                DRCE_TEXT_THICKNESS,
+                                DRCE_LINE_WIDTH,
                                 DRCE_LENGTH_OUT_OF_RANGE,
                                 DRCE_SKEW_OUT_OF_RANGE,
                                 DRCE_VIA_COUNT_OUT_OF_RANGE,
@@ -639,6 +640,11 @@ BOOST_AUTO_TEST_CASE( LibraryTableScope )
 BOOST_AUTO_TEST_CASE( LibraryLoadStatus )
 {
     testEnums<LOAD_STATUS, types::LibraryLoadStatus>();
+}
+
+BOOST_AUTO_TEST_CASE( MarkerType )
+{
+    testEnums<MARKER_BASE::MARKER_T, types::MarkerType>( false, MARKER_BASE::MARKER_T::MARKER_UNSPEC );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

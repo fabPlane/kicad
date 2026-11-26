@@ -26,6 +26,7 @@
 #include <git/kicad_git_common.h>
 #include <git/kigit_ssh_keys.h>
 #include <git/git_repo_mixin.h>
+#include <git/kigit_transport.h>
 #include <gestfich.h>
 
 #include <cerrno>
@@ -62,6 +63,9 @@ DIALOG_GIT_REPOSITORY::DIALOG_GIT_REPOSITORY( wxWindow* aParent, git_repository*
         options.flags = GIT_REPOSITORY_INIT_MKPATH | GIT_REPOSITORY_INIT_NO_REINIT;
         git_repository_init_ext( &m_repository, m_tempPath.ToStdString().c_str(), &options );
     }
+
+    // Otherwise the picker opens wherever the last file dialog was, far from any key
+    m_fpSSHKey->SetInitialDirectory( KIGIT::SSHKeyFolder() );
 
     SetupStandardButtons( { { wxID_HELP, _( "Test Connection" ) } } );
     Layout();
@@ -119,7 +123,8 @@ bool DIALOG_GIT_REPOSITORY::extractClipboardData()
 
 void DIALOG_GIT_REPOSITORY::setDefaultSSHKey( const wxString& aHost )
 {
-    std::vector<wxString> keys = KIGIT::DefaultSSHKeyCandidates( KIGIT::HomeDir(), aHost );
+    std::vector<wxString> keys =
+            KIGIT::DefaultSSHKeyCandidates( KIGIT::HomeDir(), aHost, KIGIT::ConfiguredSSHCommand( m_repository ) );
 
     if( keys.empty() )
         return;
@@ -234,16 +239,10 @@ void DIALOG_GIT_REPOSITORY::OnTestClick( wxCommandEvent& event )
     if( wxString( url ).Trim().Trim( false ).IsEmpty() || reportUnusableKey() )
         return;
 
-    wxString error;
-    wxString details;
-    bool success = false;
+    wxString    error;
+    wxString    details;
+    bool        success = false;
     git_remote* remote = nullptr;
-    git_remote_callbacks callbacks;
-    git_remote_init_callbacks( &callbacks, GIT_REMOTE_CALLBACKS_VERSION );
-
-    // We track if we have already tried to connect.
-    // If we have, the server may come back to offer another connection
-    // type, so we need to keep track of how many times we have tried.
 
     KIGIT_COMMON common( m_repository );
     common.SetRemote( url );
@@ -255,14 +254,6 @@ void DIALOG_GIT_REPOSITORY::OnTestClick( wxCommandEvent& event )
     common.SetSSHKey( GetRepoSSHPath() );
 
     KIGIT_REPO_MIXIN repoMixin( &common );
-    callbacks.payload = &repoMixin;
-    callbacks.credentials = credentials_cb;
-    callbacks.certificate_check = certificate_check_cb;
-
-    git_proxy_options proxyOpts;
-    git_proxy_init_options( &proxyOpts, GIT_PROXY_OPTIONS_VERSION );
-    proxyOpts.type = GIT_PROXY_AUTO;
-    proxyOpts.url = "";
 
     int                 result = git_remote_create_anonymous( &remote, m_repository, url.utf8_str() );
     KIGIT::GitRemotePtr remotePtr( remote );
@@ -273,23 +264,19 @@ void DIALOG_GIT_REPOSITORY::OnTestClick( wxCommandEvent& event )
         if( const char* remoteUrl = git_remote_url( remote ) )
             common.FollowRewrittenUrl( wxString::FromUTF8( remoteUrl ) );
 
-        bool retriedAfterTrust = false;
+        KIGIT::REMOTE_TRANSPORT transport( &repoMixin, remote );
+        bool                    retriedAfterTrust = false;
 
         while( true )
         {
-            repoMixin.ResetTransferState();
-            result = git_remote_connect( remote, GIT_DIRECTION_FETCH, &callbacks, &proxyOpts, nullptr );
-
-            if( result == GIT_OK )
+            if( transport.Check() == GIT_OK )
             {
-                git_remote_disconnect( remote );
                 success = true;
                 break;
             }
 
-            KIGIT_FAILURE_REPORT report = repoMixin.ReportTransferFailure( KIGIT_COMMON::GetLastGitErrorInfo( result ),
-                                                                           KIGIT_OPERATION::CONNECT, wxEmptyString );
-            git_remote_disconnect( remote );
+            KIGIT_FAILURE_REPORT report = repoMixin.ReportTransferFailure( transport.Error(), KIGIT_OPERATION::CONNECT,
+                                                                           wxEmptyString );
             error = report.summary;
             details = report.details;
 
@@ -299,7 +286,7 @@ void DIALOG_GIT_REPOSITORY::OnTestClick( wxCommandEvent& event )
                 break;
 
             // The prompt has told the user why, so a declined key ends the test here
-            if( !KIGIT::PromptToTrustHost( this, *hostKey, retriedAfterTrust ) )
+            if( KIGIT::PromptToTrustHost( this, *hostKey, retriedAfterTrust ) != KIGIT::PROMPT_ANSWER::ACCEPTED )
                 return;
 
             retriedAfterTrust = true;
@@ -312,7 +299,7 @@ void DIALOG_GIT_REPOSITORY::OnTestClick( wxCommandEvent& event )
         context.url = url;
 
         KIGIT_FAILURE_REPORT report =
-                KIGIT::DescribeGitFailure( KIGIT_COMMON::GetLastGitErrorInfo( result ), {}, context );
+                KIGIT::DescribeGitFailure( KIGIT::GetLastGitErrorInfo( result ), {}, context );
         error = report.summary;
         details = report.details;
     }
@@ -354,12 +341,10 @@ static bool checkSSHKey( wxString aPath, wxString& aError, wxString& aDetails, b
         return false;
     }
 
-    std::ifstream pubIfs( ( aPath + wxS( ".pub" ) ).fn_str() );
-
-    if( !pubIfs.good() || !pubIfs.is_open() )
+    if( KIGIT::EnsurePublicKeyFile( aPath ).IsEmpty() )
     {
         aError = wxString::Format( _( "Could not open public key '%s'" ), aPath + wxS( ".pub" ) );
-        aDetails = wxString::Format( "%s: %d", std::strerror( errno ), errno );
+        aDetails = _( "Put the key's .pub file beside it, or pick a key in OpenSSH format" );
         return false;
     }
 

@@ -43,8 +43,11 @@ class SCHEMATIC;
 
 std::unique_ptr<EDA_ITEM> CreateItemForType( KICAD_T aType, EDA_ITEM* aContainer );
 
+/**
+ * @param aSchematic stands in for the symbol's own schematic while a created symbol is only staged.
+ */
 bool PackSymbol( kiapi::schematic::types::SchematicSymbolInstance* aOutput, const SCH_SYMBOL* aInput,
-                 const SCH_SHEET_PATH& aPath );
+                 const SCH_SHEET_PATH& aPath, const SCHEMATIC* aSchematic = nullptr );
 
 /**
  * Pack a library symbol definition, including its pins, into a SchematicSymbol message.  This is
@@ -85,6 +88,15 @@ bool ReuseUnchangedLibSymbol( SCH_SYMBOL* aTarget, SCH_SYMBOL* aExisting,
                               const SCH_SHEET_PATH& aPath );
 
 /**
+ * Check what #ApplySymbolInstance would refuse, so a caller can reject a request before it
+ * changes anything.  The reference must not carry another instance's sheet suffix, and no
+ * variant may override the reference.
+ */
+bool ValidateSymbolInstance( kiapi::common::commands::ItemStatus* aStatus, const SCH_SYMBOL* aSymbol,
+                             const kiapi::schematic::types::SchematicSymbolInstance& aInput,
+                             const SCH_SHEET_PATH& aPath, const SCHEMATIC* aSchematic );
+
+/**
  * Apply placement-specific data to an @a aSymbol at @a aPath: reference, unit, and
  * the per-placement attribute and field differentials.
  *
@@ -109,6 +121,10 @@ bool PackSheet( kiapi::schematic::types::SheetSymbol* aOutput, const SCH_SHEET* 
  */
 tl::expected<bool, kiapi::common::ApiResponseStatus> UnpackSheet( SCH_SHEET* aOutput,
                                                                   const kiapi::schematic::types::SheetSymbol& aInput );
+
+/// Validate sheet variant overrides before adding or modifying a live sheet.
+bool ValidateSheetInstance( kiapi::common::commands::ItemStatus* aStatus, const SCH_SHEET* aSheet,
+                            const kiapi::schematic::types::SheetSymbol& aInput );
 
 /**
  * Apply the placement data in a sheet message to @a aSheet: page number and the variants the

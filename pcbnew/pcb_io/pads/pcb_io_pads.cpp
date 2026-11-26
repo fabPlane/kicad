@@ -26,6 +26,7 @@
 #include <cmath>
 #include <fstream>
 #include <functional>
+#include <tuple>
 
 #include <board.h>
 #include <pcb_track.h>
@@ -850,32 +851,44 @@ void PCB_IO_PADS::loadFootprints()
                         if( layer_def.sizeA <= 0 )
                             continue;
 
-                        // RT/ST are thermal relief spoke patterns for plane layers.
-                        // RA/SA are anti-pad (clearance) shapes for plane layers.
-                        // KiCad computes thermal reliefs from zone settings, so skip
-                        // these to avoid overwriting the actual pad shape.  However,
-                        // the presence of RT/ST indicates this pad should have thermal
-                        // relief rather than a solid connection to copper pours.
+                        // RT/ST are thermal relief spoke patterns for plane layers.  RA/SA are anti-pad
+                        // (clearance) shapes for plane layers.  KiCad computes thermal reliefs from zone settings,
+                        // so skip these to avoid overwriting the actual pad shape.  However, the presence of RT/ST
+                        // indicates this pad should have thermal relief rather than a solid connection to copper
+                        // pours.
                         if( PADS_IO::IsThermalReliefPadRow( layer_def ) )
                         {
-                            pad->SetLocalZoneConnection( ZONE_CONNECTION::THERMAL );
+                            // Note that neither the Kicad GUI nor the PADS importer currently supports these being
+                            // different on different layers.
 
-                            if( layer_def.thermal_spoke_width > 0 )
-                                pad->SetLocalThermalSpokeWidthOverride( decalScaler( layer_def.thermal_spoke_width ) );
+                            pad->Padstack().ForEachUniqueLayer(
+                                    [&]( PCB_LAYER_ID layer )
+                                    {
+                                        pad->Padstack().ZoneConnection( layer ) = ZONE_CONNECTION::THERMAL;
 
-                            if( layer_def.thermal_outer_diameter > layer_def.sizeA )
-                            {
-                                double gap = ( layer_def.thermal_outer_diameter - layer_def.sizeA ) / 2.0;
-                                int    scaledGap = decalScaler( gap );
+                                        if( layer_def.thermal_spoke_width > 0 )
+                                        {
+                                            int scaledWidth = decalScaler( layer_def.thermal_spoke_width );
+                                            pad->Padstack().ThermalSpokeWidth( layer ) = scaledWidth;
+                                        }
 
-                                // An override of 0 reads as "inherit the zone gap", so only
-                                // apply it when the relief gap survives rounding to nm.
-                                if( scaledGap > 0 )
-                                    pad->SetLocalThermalGapOverride( scaledGap );
-                            }
+                                        if( layer_def.thermal_outer_diameter > layer_def.sizeA )
+                                        {
+                                            double gap = ( layer_def.thermal_outer_diameter - layer_def.sizeA ) / 2.0;
+                                            int    scaledGap = decalScaler( gap );
 
-                            if( layer_def.thermal_spoke_orientation != 0.0 )
-                                pad->SetThermalSpokeAngleDegrees( layer_def.thermal_spoke_orientation );
+                                            // An override of 0 reads as "inherit the zone gap", so only
+                                            // apply it when the relief gap survives rounding to nm.
+                                            if( scaledGap > 0 )
+                                                pad->Padstack().ThermalGap( layer ) = scaledGap;
+                                        }
+
+                                        if( layer_def.thermal_spoke_orientation != 0.0 )
+                                        {
+                                            EDA_ANGLE orientation( layer_def.thermal_spoke_orientation, DEGREES_T );
+                                            pad->Padstack().ThermalSpokeAngle( layer ) = orientation;
+                                        }
+                                    } );
 
                             continue;
                         }
@@ -1269,6 +1282,31 @@ void PCB_IO_PADS::loadReuseBlockGroups()
 }
 
 
+// A test point via with copper on both outer layers is an ordinary via, not an in-circuit pad
+static bool isPlainViaTestPoint( const PADS_IO::TEST_POINT& aTestPoint, const PADS_IO::PARSER& aParser )
+{
+    auto it = aParser.GetViaDefs().find( aTestPoint.symbol_name );
+
+    if( aTestPoint.type != "VIA" || it == aParser.GetViaDefs().end() )
+        return false;
+
+    int  layerCount = aParser.GetParameters().layer_count;
+    bool hasTop = false;
+    bool hasBottom = false;
+
+    for( const PADS_IO::PAD_STACK_LAYER& row : it->second.stack )
+    {
+        if( row.sizeA <= 0.0 || !PADS_IO::IsCopperPadRow( row ) )
+            continue;
+
+        hasTop |= row.layer == PADS_LAYER_MAPPER::LAYER_PAD_STACK_TOP || row.layer == 1;
+        hasBottom |= row.layer == PADS_LAYER_MAPPER::LAYER_PAD_STACK_BOTTOM || row.layer == layerCount;
+    }
+
+    return hasTop && hasBottom;
+}
+
+
 void PCB_IO_PADS::loadTestPoints()
 {
     const std::vector<PADS_IO::TEST_POINT>&        test_points = m_parser->GetTestPoints();
@@ -1276,6 +1314,9 @@ void PCB_IO_PADS::loadTestPoints()
 
     for( const PADS_IO::TEST_POINT& tp : test_points )
     {
+        if( isPlainViaTestPoint( tp, *m_parser ) )
+            continue;
+
         FOOTPRINT* footprint = new FOOTPRINT( m_loadBoard );
 
         wxString refDes = wxString::Format( wxT( "TP%d" ), m_testPointIndex++ );
@@ -1384,13 +1425,16 @@ void PCB_IO_PADS::loadTracksAndVias()
     const std::vector<PADS_IO::ROUTE>& routes = m_parser->GetRoutes();
     std::set<std::pair<int, int>>      placedThroughVias;
 
+    // Each pin pair of a signal restates the trunk it shares with the others
+    std::set<std::tuple<int, PCB_LAYER_ID, int, VECTOR2I, VECTOR2I>> placedTracks;
+
     // Build a position set for test-point vias so we don't also place a bare
     // PCB_VIA at those locations; loadTestPoints() already creates footprints.
     std::set<std::pair<int, int>> testPointPositions;
 
     for( const PADS_IO::TEST_POINT& tp : m_parser->GetTestPoints() )
     {
-        if( tp.type == "VIA" )
+        if( tp.type == "VIA" && !isPlainViaTestPoint( tp, *m_parser ) )
             testPointPositions.emplace( scaleCoord( tp.x, true ), scaleCoord( tp.y, false ) );
     }
 
@@ -1448,6 +1492,11 @@ void PCB_IO_PADS::loadTracksAndVias()
                 }
                 else
                 {
+                    auto [lo, hi] = std::minmax( start, end );
+
+                    if( !placedTracks.emplace( net->GetNetCode(), track_layer, track_width, lo, hi ).second )
+                        continue;
+
                     PCB_TRACK* track = new PCB_TRACK( m_loadBoard );
                     track->SetNet( net );
                     track->SetWidth( track_width );
@@ -2231,33 +2280,65 @@ void PCB_IO_PADS::loadBoardSetup()
     const PADS_IO::DESIGN_RULES& designRules = m_parser->GetDesignRules();
     BOARD_DESIGN_SETTINGS& bds = m_loadBoard->GetDesignSettings();
 
-    bds.m_MinClearance = scaleSize( designRules.min_clearance );
-    bds.m_TrackMinWidth = scaleSize( designRules.min_track_width );
-    bds.m_ViasMinSize = scaleSize( designRules.min_via_size );
-    bds.m_MinThroughDrill = scaleSize( designRules.min_via_drill );
-    bds.m_HoleToHoleMin = scaleSize( designRules.hole_to_hole );
-    bds.m_SilkClearance = scaleSize( designRules.silk_clearance );
-    bds.m_SolderMaskExpansion = scaleSize( designRules.mask_clearance );
-    bds.m_CopperEdgeClearance = scaleSize( designRules.copper_edge_clearance );
+    // Without these flags BOARD::SetProject replaces the imported rules with project defaults
+    m_loadBoard->m_LegacyDesignSettingsLoaded = true;
+    m_loadBoard->m_LegacyNetclassesLoaded = true;
+
+    using FIELD = PADS_IO::DESIGN_RULE_FIELD;
+
+    auto apply = [&]( FIELD aField, double aValue, auto&& aSetter )
+    {
+        if( designRules.IsSpecified( aField ) )
+            aSetter( scaleSize( aValue ) );
+    };
+
+    apply( FIELD::MIN_CLEARANCE, designRules.min_clearance, [&]( int v ) { bds.m_MinClearance = v; } );
+    apply( FIELD::MIN_TRACK_WIDTH, designRules.min_track_width, [&]( int v ) { bds.m_TrackMinWidth = v; } );
+    apply( FIELD::MIN_VIA_SIZE, designRules.min_via_size, [&]( int v ) { bds.m_ViasMinSize = v; } );
+    apply( FIELD::MIN_VIA_DRILL, designRules.min_via_drill, [&]( int v ) { bds.m_MinThroughDrill = v; } );
+    apply( FIELD::HOLE_TO_HOLE, designRules.hole_to_hole, [&]( int v ) { bds.m_HoleToHoleMin = v; } );
+    apply( FIELD::SILK_CLEARANCE, designRules.silk_clearance, [&]( int v ) { bds.m_SilkClearance = v; } );
+    apply( FIELD::MASK_CLEARANCE, designRules.mask_clearance, [&]( int v ) { bds.m_SolderMaskExpansion = v; } );
+    apply( FIELD::COPPER_EDGE_CLEARANCE, designRules.copper_edge_clearance,
+           [&]( int v ) { bds.m_CopperEdgeClearance = v; } );
 
     // Do not set the default zone clearance from the PADS design rules.  In PADS,
     // zone (copper pour) clearance is resolved through the net/netclass clearance
     // rules rather than a board-level zone clearance setting.  The default netclass
     // clearance set below is the correct mapping for PADS' DEFAULTCLEAR value.
 
-    bds.SetCustomTrackWidth( scaleSize( designRules.default_track_width ) );
-    bds.SetCustomViaSize( scaleSize( designRules.default_via_size ) );
-    bds.SetCustomViaDrill( scaleSize( designRules.default_via_drill ) );
-
     std::shared_ptr<NETCLASS> defaultNetclass = bds.m_NetSettings->GetDefaultNetclass();
 
-    if( defaultNetclass )
-    {
-        defaultNetclass->SetClearance( scaleSize( designRules.default_clearance ) );
-        defaultNetclass->SetTrackWidth( scaleSize( designRules.default_track_width ) );
-        defaultNetclass->SetViaDiameter( scaleSize( designRules.default_via_size ) );
-        defaultNetclass->SetViaDrill( scaleSize( designRules.default_via_drill ) );
-    }
+    apply( FIELD::DEFAULT_TRACK_WIDTH, designRules.default_track_width,
+           [&]( int v )
+           {
+               bds.SetCustomTrackWidth( v );
+
+               if( defaultNetclass )
+                   defaultNetclass->SetTrackWidth( v );
+           } );
+    apply( FIELD::DEFAULT_VIA_SIZE, designRules.default_via_size,
+           [&]( int v )
+           {
+               bds.SetCustomViaSize( v );
+
+               if( defaultNetclass )
+                   defaultNetclass->SetViaDiameter( v );
+           } );
+    apply( FIELD::DEFAULT_VIA_DRILL, designRules.default_via_drill,
+           [&]( int v )
+           {
+               bds.SetCustomViaDrill( v );
+
+               if( defaultNetclass )
+                   defaultNetclass->SetViaDrill( v );
+           } );
+    apply( FIELD::DEFAULT_CLEARANCE, designRules.default_clearance,
+           [&]( int v )
+           {
+               if( defaultNetclass )
+                   defaultNetclass->SetClearance( v );
+           } );
 
     const std::map<std::string, PADS_IO::VIA_DEF>& viaDefs = m_parser->GetViaDefs();
 

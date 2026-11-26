@@ -80,7 +80,9 @@ public:
 
     void Rotate( const VECTOR2I& aRotCentre, const EDA_ANGLE& aAngle ) override;
 
-    virtual void Mirror( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection ) override;
+    void Mirror( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection ) override;
+
+    void Mirror( const SEG& aAxis ) override;
 
     void Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection ) override;
 
@@ -293,6 +295,8 @@ public:
     void Rotate( const VECTOR2I& aRotCentre, const EDA_ANGLE& aAngle ) override;
 
     void Mirror( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection ) override;
+
+    void Mirror( const SEG& aAxis ) override;
 
     void Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection ) override;
 
@@ -532,24 +536,32 @@ public:
 
     void         SetFrontTentingMode( TENTING_MODE aMode );
     TENTING_MODE GetFrontTentingMode() const;
+    TENTING_MODE ResolveFrontTentingMode() const;
     void         SetBackTentingMode( TENTING_MODE aMode );
     TENTING_MODE GetBackTentingMode() const;
+    TENTING_MODE ResolveBackTentingMode() const;
 
     void          SetFrontCoveringMode( COVERING_MODE aMode );
     COVERING_MODE GetFrontCoveringMode() const;
+    COVERING_MODE ResolveFrontCoveringMode() const;
     void          SetBackCoveringMode( COVERING_MODE aMode );
     COVERING_MODE GetBackCoveringMode() const;
+    COVERING_MODE ResolveBackCoveringMode() const;
 
     void          SetFrontPluggingMode( PLUGGING_MODE aMode );
     PLUGGING_MODE GetFrontPluggingMode() const;
+    PLUGGING_MODE ResolveFrontPluggingMode() const;
     void          SetBackPluggingMode( PLUGGING_MODE aMode );
     PLUGGING_MODE GetBackPluggingMode() const;
+    PLUGGING_MODE ResolveBackPluggingMode() const;
 
     void         SetCappingMode( CAPPING_MODE aMode );
     CAPPING_MODE GetCappingMode() const;
+    CAPPING_MODE ResolveCappingMode() const;
 
     void         SetFillingMode( FILLING_MODE aMode );
     FILLING_MODE GetFillingMode() const;
+    FILLING_MODE ResolveFillingMode() const;
 
     bool IsTented( PCB_LAYER_ID aLayer ) const override;
     int GetSolderMaskExpansion() const;
@@ -787,6 +799,24 @@ public:
      * @return the diameter to knockout on this layer, or 0 if layer is not affected
      */
     int GetPostMachiningKnockout( PCB_LAYER_ID aLayer ) const;
+
+    /**
+     * @see PADSTACK::MachiningKnockout
+     *
+     * A result of zero is equivalent to IsBackdrilledOrPostMachined() returning false.
+     */
+    int GetBackdrillOrPostMachiningKnockout( PCB_LAYER_ID aLayer ) const;
+
+    /**
+     * Check whether backdrilling or post-machining left no copper at all on a layer.
+     *
+     * A narrower operation only hollows the barrel and leaves an annular ring, which still
+     * conducts and whose outer edge is unmoved, so this is stricter than
+     * IsBackdrilledOrPostMachined().
+     *
+     * @param aLayer the copper layer to check
+     */
+    bool HasCopperRemoved( PCB_LAYER_ID aLayer ) const;
 
     void SetPrimaryDrillFilled( const std::optional<bool>& aFilled );
     void SetPrimaryDrillFilledFlag( bool aFilled );

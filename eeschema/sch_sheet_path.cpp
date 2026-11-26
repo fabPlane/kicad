@@ -19,7 +19,9 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <optional>
 #include <set>
+#include <tuple>
 
 #include <refdes_utils.h>
 #include <hash.h>
@@ -27,6 +29,7 @@
 #include <sch_marker.h>
 #include <sch_label.h>
 #include <sch_shape.h>
+#include <sch_rule_area.h>
 #include <sch_sheet_path.h>
 #include <sch_symbol.h>
 #include <sch_sheet.h>
@@ -140,6 +143,19 @@ namespace std
     {
         return path.GetCurrentHash();
     }
+}
+
+
+static bool stripRefSuffix( wxString& aRef, const wxString& aSuffix )
+{
+    if( aSuffix.IsEmpty() || aRef.length() <= aSuffix.length() || !aRef.EndsWith( aSuffix )
+        || aRef.EndsWith( wxS( "?" ) ) )
+    {
+        return false;
+    }
+
+    aRef.RemoveLast( aSuffix.length() );
+    return true;
 }
 
 
@@ -359,7 +375,7 @@ bool SCH_SHEET_PATH::GetExcludedFromSim() const
 {
     for( SCH_SHEET* sheet : m_sheets )
     {
-        if( sheet->GetExcludedFromSim() )
+        if( sheet->ResolveExcludedFromSim() )
             return true;
     }
 
@@ -379,7 +395,7 @@ bool SCH_SHEET_PATH::GetExcludedFromSim( const wxString& aVariantName ) const
         SCH_SHEET* sheet = copy.Last();
         copy.pop_back();
 
-        if( sheet->GetExcludedFromSim( &copy, aVariantName ) )
+        if( sheet->ResolveExcludedFromSim( &copy, aVariantName ) )
             return true;
     }
 
@@ -391,7 +407,7 @@ bool SCH_SHEET_PATH::GetExcludedFromBOM() const
 {
     for( SCH_SHEET* sheet : m_sheets )
     {
-        if( sheet->GetExcludedFromBOM() )
+        if( sheet->ResolveExcludedFromBOM() )
             return true;
     }
 
@@ -411,7 +427,7 @@ bool SCH_SHEET_PATH::GetExcludedFromBOM( const wxString& aVariantName ) const
         SCH_SHEET* sheet = copy.Last();
         copy.pop_back();
 
-        if( sheet->GetExcludedFromBOM( &copy, aVariantName ) )
+        if( sheet->ResolveExcludedFromBOM( &copy, aVariantName ) )
             return true;
     }
 
@@ -423,7 +439,7 @@ bool SCH_SHEET_PATH::GetExcludedFromBoard() const
 {
     for( SCH_SHEET* sheet : m_sheets )
     {
-        if( sheet->GetExcludedFromBoard() )
+        if( sheet->ResolveExcludedFromBoard() )
             return true;
     }
 
@@ -443,7 +459,7 @@ bool SCH_SHEET_PATH::GetExcludedFromBoard( const wxString& aVariantName ) const
         SCH_SHEET* sheet = copy.Last();
         copy.pop_back();
 
-        if( sheet->GetExcludedFromBoard( &copy, aVariantName ) )
+        if( sheet->ResolveExcludedFromBoard( &copy, aVariantName ) )
             return true;
     }
 
@@ -455,7 +471,7 @@ bool SCH_SHEET_PATH::GetDNP() const
 {
     for( SCH_SHEET* sheet : m_sheets )
     {
-        if( sheet->GetDNP() )
+        if( sheet->ResolveDNP() )
             return true;
     }
 
@@ -475,7 +491,7 @@ bool SCH_SHEET_PATH::GetDNP( const wxString& aVariantName ) const
         SCH_SHEET* sheet = copy.Last();
         copy.pop_back();
 
-        if( sheet->GetDNP( &copy, aVariantName ) )
+        if( sheet->ResolveDNP( &copy, aVariantName ) )
             return true;
     }
 
@@ -501,6 +517,23 @@ wxString SCH_SHEET_PATH::PathAsString() const
 KIID_PATH SCH_SHEET_PATH::Path() const
 {
     return m_path;
+}
+
+
+wxString SCH_SHEET_PATH::ComposeRefSuffix() const
+{
+    wxString       suffix;
+    SCH_SHEET_PATH parentPath;
+
+    for( SCH_SHEET* sheet : m_sheets )
+    {
+        if( !sheet->IsVirtualRootSheet() )
+            suffix << sheet->GetRefSuffix( parentPath );
+
+        parentPath.push_back( sheet );
+    }
+
+    return suffix;
 }
 
 
@@ -589,10 +622,10 @@ void SCH_SHEET_PATH::UpdateAllScreenReferences() const
         {
             SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
 
-            // GetRef() and GetUnitSelection() are O(1) via the symbol's instance path index.
+            // GetBaseRef() and GetUnitSelection() are O(1) via the symbol's instance path index.
             // Bypass SCH_FIELD::SetText so a display refresh does not invalidate connectivity
             SCH_FIELD* reference = symbol->GetField( FIELD_T::REFERENCE );
-            reference->EDA_TEXT::SetText( symbol->GetRef( this ).Strip( wxString::both ) );
+            reference->EDA_TEXT::SetText( symbol->GetBaseRef( this ).Strip( wxString::both ) );
             symbol->SetUnit( symbol->GetUnitSelection( this ) );
             LastScreen()->UpdateDisplayBounds( item );
         }
@@ -622,22 +655,16 @@ void SCH_SHEET_PATH::UpdateAllScreenReferences() const
 }
 
 
-static bool matchesSymbolFilter( const wxString& aReference, SYMBOL_FILTER aSymbolFilter )
+static bool matchesSymbolFilter( SCH_SYMBOL* aSymbol, const SCH_SHEET_PATH& aSheetPath, SYMBOL_FILTER aSymbolFilter )
 {
-    bool isPowerSymbol = !aReference.IsEmpty() && aReference[0] == wxT( '#' );
-
-    switch( aSymbolFilter )
-    {
-    case SYMBOL_FILTER_POWER:
-        return isPowerSymbol;
-
-    case SYMBOL_FILTER_ALL:
+    if( aSymbolFilter == SYMBOL_FILTER_ALL )
         return true;
 
-    case SYMBOL_FILTER_NON_POWER:
-    default:
-        return !isPowerSymbol;
-    }
+    // A # reference still marks virtual symbols that lack the power flag, as in legacy libraries
+    const wxString ref = aSymbol->GetRef( &aSheetPath );
+    const bool     isPseudoSymbol = aSymbol->IsPower() || ( !ref.IsEmpty() && ref[0] == wxT( '#' ) );
+
+    return aSymbolFilter == SYMBOL_FILTER_POWER ? isPseudoSymbol : !isPseudoSymbol;
 }
 
 
@@ -657,7 +684,7 @@ void SCH_SHEET_PATH::AppendSymbol( SCH_REFERENCE_LIST& aReferences, SCH_SYMBOL* 
 {
     // Skip pseudo-symbols, which have a reference starting with #.  This mainly
     // affects power symbols.
-    if( matchesSymbolFilter( aSymbol->GetRef( this ), aSymbolFilter ) )
+    if( matchesSymbolFilter( aSymbol, *this, aSymbolFilter ) )
     {
         if( aSymbol->GetLibSymbolRef() || aForceIncludeOrphanSymbols )
         {
@@ -683,9 +710,7 @@ void SCH_SHEET_PATH::GetMultiUnitSymbols( SCH_MULTI_UNIT_REFERENCE_MAP& aRefList
 void SCH_SHEET_PATH::AppendMultiUnitSymbol( SCH_MULTI_UNIT_REFERENCE_MAP& aRefList, SCH_SYMBOL* aSymbol,
                                             SYMBOL_FILTER aSymbolFilter ) const
 {
-    // Skip pseudo-symbols, which have a reference starting with #.  This mainly
-    // affects power symbols.
-    if( !matchesSymbolFilter( aSymbol->GetRef( this ), aSymbolFilter ) )
+    if( !matchesSymbolFilter( aSymbol, *this, aSymbolFilter ) )
         return;
 
     LIB_SYMBOL* symbol = aSymbol->GetLibSymbolRef().get();
@@ -700,7 +725,8 @@ void SCH_SHEET_PATH::AppendMultiUnitSymbol( SCH_MULTI_UNIT_REFERENCE_MAP& aRefLi
         if( reference_str[reference_str.Len() - 1] == '?' )
             return;
 
-        aRefList[reference_str].AddItem( schReference );
+        // Each channel of a reused sheet is its own package
+        aRefList[schReference.GetComposedRef()].AddItem( schReference );
     }
 }
 
@@ -841,8 +867,8 @@ void SCH_SHEET_PATH::SetPageNumber( const wxString& aPageNumber )
 }
 
 
-void SCH_SHEET_PATH::AddNewSymbolInstances( const SCH_SHEET_PATH& aPrefixSheetPath,
-                                            const wxString& aProjectName )
+void SCH_SHEET_PATH::AddNewSymbolInstances( const SCH_SHEET_PATH& aPrefixSheetPath, const wxString& aProjectName,
+                                            const SCH_SHEET_LIST* aSourceSheets )
 {
     wxCHECK( !aProjectName.IsEmpty(), /* void */ );
 
@@ -852,6 +878,12 @@ void SCH_SHEET_PATH::AddNewSymbolInstances( const SCH_SHEET_PATH& aPrefixSheetPa
     // Prefix the new hierarchical path.
     newSheetPath = newSheetPath + currentSheetPath;
 
+    // A loaded root takes the new sheet's UUID, so only the path below it can name a source instance
+    KIID_PATH below = Path();
+
+    if( !below.empty() )
+        below.erase( below.begin() );
+
     for( SCH_ITEM* item : LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
     {
         SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
@@ -860,9 +892,14 @@ void SCH_SHEET_PATH::AddNewSymbolInstances( const SCH_SHEET_PATH& aPrefixSheetPa
 
         SCH_SYMBOL_INSTANCE newSymbolInstance;
 
-        if( symbol->GetInstance( newSymbolInstance, Path(), true ) )
+        if( symbol->GetInstance( newSymbolInstance, Path(), true )
+                || ( !below.empty() && symbol->GetInstance( newSymbolInstance, below, true ) ) )
         {
             newSymbolInstance.m_ProjectName = aProjectName;
+
+            if( aSourceSheets )
+                stripRefSuffix( newSymbolInstance.m_Reference,
+                                aSourceSheets->SourceRefSuffix( *symbol, newSymbolInstance.m_Path ) );
 
             // Use an existing symbol instance for this path if it exists.
             newSymbolInstance.m_Path = newSheetPath.Path();
@@ -874,6 +911,11 @@ void SCH_SHEET_PATH::AddNewSymbolInstances( const SCH_SHEET_PATH& aPrefixSheetPa
 
             // Use the first symbol instance if any symbol instance data exists.
             newSymbolInstance = symbol->GetInstances()[0];
+
+            if( aSourceSheets )
+                stripRefSuffix( newSymbolInstance.m_Reference,
+                                aSourceSheets->SourceRefSuffix( *symbol, newSymbolInstance.m_Path ) );
+
             newSymbolInstance.m_Path = newSheetPath.Path();
             symbol->AddHierarchicalReference( newSymbolInstance );
         }
@@ -887,6 +929,27 @@ void SCH_SHEET_PATH::AddNewSymbolInstances( const SCH_SHEET_PATH& aPrefixSheetPa
             newSymbolInstance.m_Reference = symbol->GetField( FIELD_T::REFERENCE )->GetText();
             newSymbolInstance.m_Unit = symbol->GetUnit();
             symbol->AddHierarchicalReference( newSymbolInstance );
+        }
+    }
+
+    // Rule area instances exist only where a variant does, so an unmatched path gets none rather than another's
+    for( SCH_ITEM* item : LastScreen()->Items().OfType( SCH_RULE_AREA_T ) )
+    {
+        SCH_RULE_AREA* ruleArea = static_cast<SCH_RULE_AREA*>( item );
+
+        for( const SCH_RULE_AREA_INSTANCE& instance : ruleArea->GetInstances() )
+        {
+            bool matches = below.empty() ? instance.m_Path.size() == 1 || instance.m_Path.EndsWith( Path() )
+                                         : instance.m_Path.EndsWith( below );
+
+            if( matches )
+            {
+                SCH_RULE_AREA_INSTANCE newInstance = instance;
+                newInstance.m_Path = newSheetPath.Path();
+                newInstance.m_ProjectName = aProjectName;
+                ruleArea->AddInstance( newInstance );
+                break;
+            }
         }
     }
 }
@@ -940,7 +1003,7 @@ void SCH_SHEET_PATH::CheckForMissingSymbolInstances( const wxString& aProjectNam
             if( !IsSharedPath() && ( LastScreen()->GetFileFormatVersionAtLoad() <= 20200310 ) )
             {
                 SCH_FIELD* refField = symbol->GetField( FIELD_T::REFERENCE );
-                symbolInstance.m_Reference = refField->GetShownText( this, INTERNAL );
+                symbolInstance.m_Reference = refField->GetText();
                 symbolInstance.m_Unit = symbol->GetUnit();
 
                 wxLogTrace( traceSchSheetPaths, "  Legacy format: Using reference '%s' from field, unit %d",
@@ -1746,11 +1809,11 @@ bool SCH_SHEET_LIST::RepairPageNumbers()
 }
 
 
-void SCH_SHEET_LIST::AddNewSymbolInstances( const SCH_SHEET_PATH& aPrefixSheetPath,
-                                            const wxString& aProjectName )
+void SCH_SHEET_LIST::AddNewSymbolInstances( const SCH_SHEET_PATH& aPrefixSheetPath, const wxString& aProjectName,
+                                            bool aStripRefSuffixes )
 {
     for( SCH_SHEET_PATH& sheetPath : *this )
-        sheetPath.AddNewSymbolInstances( aPrefixSheetPath, aProjectName );
+        sheetPath.AddNewSymbolInstances( aPrefixSheetPath, aProjectName, aStripRefSuffixes ? this : nullptr );
 }
 
 
@@ -1828,6 +1891,223 @@ void SCH_SHEET_LIST::AddNewSheetInstances( const SCH_SHEET_PATH& aPrefixSheetPat
         newSheetPath.SetPageNumber( instance.m_PageNumber );
         usedPageNumbers.push_back( instance.m_PageNumber );
     }
+}
+
+
+// Units of each package by base, library id and the suffix of the sheet owning it
+using PACKAGE_UNITS = std::map<std::tuple<wxString, wxString, wxString>, std::set<int>>;
+
+
+// Older versions store a package's lowest suffix on every unit, so only a lower suffix can own it
+static std::optional<wxString> claimPackageUnit( PACKAGE_UNITS& aPackages, const std::set<wxString>& aSuffixes,
+                                                 const wxString& aStored, const wxString& aLibId, int aUnit,
+                                                 const wxString& aOwnSuffix )
+{
+    for( const wxString& suffix : aSuffixes )
+    {
+        if( suffix >= aOwnSuffix )
+            break;
+
+        wxString base = aStored;
+
+        if( !suffix.IsEmpty() && !stripRefSuffix( base, suffix ) )
+            continue;
+
+        auto it = aPackages.find( { base, aLibId, suffix } );
+
+        if( it != aPackages.end() && it->second.insert( aUnit ).second )
+            return base;
+    }
+
+    return std::nullopt;
+}
+
+
+void SCH_SHEET_LIST::StripRefSuffixes()
+{
+    struct MULTI_UNIT
+    {
+        SCH_SYMBOL*             symbol;
+        const SCH_SHEET_PATH*   path;
+        wxString                stored;
+        wxString                suffix;
+        int                     unit;
+        std::optional<wxString> ownBase;
+    };
+
+    std::vector<MULTI_UNIT> multiUnits;
+    PACKAGE_UNITS           packages;
+    std::set<wxString>      suffixes;
+
+    for( SCH_SHEET_PATH& path : *this )
+    {
+        const wxString suffix = path.ComposeRefSuffix();
+
+        suffixes.insert( suffix );
+
+        for( SCH_ITEM* item : path.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL*         symbol = static_cast<SCH_SYMBOL*>( item );
+            SCH_SYMBOL_INSTANCE instance;
+
+            if( !symbol->GetInstance( instance, path.PathRef() ) )
+                continue;
+
+            wxString ref = instance.m_Reference;
+
+            if( symbol->GetUnitCount() > 1 )
+            {
+                std::optional<wxString> ownBase;
+
+                if( suffix.IsEmpty() || stripRefSuffix( ref, suffix ) )
+                {
+                    ownBase = ref;
+                    packages[{ ref, symbol->GetLibId().Format(), suffix }].insert( instance.m_Unit );
+                }
+
+                if( !suffix.IsEmpty() )
+                {
+                    multiUnits.push_back( { symbol, &path, instance.m_Reference, suffix, instance.m_Unit,
+                                            ownBase } );
+                }
+            }
+            else if( stripRefSuffix( ref, suffix ) )
+            {
+                symbol->SetRef( &path, ref );
+            }
+            else if( !suffix.IsEmpty() && !ref.EndsWith( wxS( "?" ) ) )
+            {
+                symbol->SetRefLacksSuffix( path.PathRef() );
+            }
+        }
+    }
+
+    // A package's own strip is only a guess, since U7 on _H2_V stores U7_H2_V on a _V unit too
+    for( const MULTI_UNIT& entry : multiUnits )
+    {
+        if( std::optional<wxString> base = claimPackageUnit( packages, suffixes, entry.stored,
+                                                             entry.symbol->GetLibId().Format(), entry.unit,
+                                                             entry.suffix ) )
+        {
+            entry.symbol->SetRef( entry.path, *base );
+        }
+        else if( entry.ownBase )
+        {
+            entry.symbol->SetRef( entry.path, *entry.ownBase );
+        }
+        else if( !entry.stored.EndsWith( wxS( "?" ) ) )
+        {
+            entry.symbol->SetRefLacksSuffix( entry.path->Path() );
+        }
+    }
+}
+
+
+void SCH_SHEET_LIST::RecoverPackageRefs()
+{
+    struct PENDING
+    {
+        SCH_SYMBOL*           symbol;
+        const SCH_SHEET_PATH* path;
+        wxString              stored;
+        wxString              suffix;
+        int                   unit;
+    };
+
+    std::vector<PENDING> pending;
+    PACKAGE_UNITS        packages;
+    std::set<wxString>   suffixes;
+
+    for( const SCH_SHEET_PATH& path : *this )
+    {
+        const wxString suffix = path.ComposeRefSuffix();
+
+        suffixes.insert( suffix );
+
+        for( SCH_ITEM* item : path.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL*         symbol = static_cast<SCH_SYMBOL*>( item );
+            SCH_SYMBOL_INSTANCE instance;
+
+            if( symbol->GetUnitCount() < 2 || !symbol->GetInstance( instance, path.PathRef() )
+                || instance.m_Reference.EndsWith( wxS( "?" ) ) )
+            {
+                continue;
+            }
+
+            if( !instance.m_RefLacksSuffix )
+                packages[{ instance.m_Reference, symbol->GetLibId().Format(), suffix }].insert( instance.m_Unit );
+
+            // A stripped unit's own suffix may only end the suffix of a package in another top level sheet
+            if( !suffix.IsEmpty() )
+            {
+                const wxString stored = instance.m_RefLacksSuffix ? instance.m_Reference
+                                                                  : instance.m_Reference + suffix;
+
+                pending.push_back( { symbol, &path, stored, suffix, instance.m_Unit } );
+            }
+        }
+    }
+
+    for( const PENDING& entry : pending )
+    {
+        if( std::optional<wxString> base = claimPackageUnit( packages, suffixes, entry.stored,
+                                                             entry.symbol->GetLibId().Format(), entry.unit,
+                                                             entry.suffix ) )
+        {
+            // A package on an unsuffixed sheet keeps the stored reference, which SetRef() sees as no change
+            entry.symbol->SetRef( entry.path, *base );
+            entry.symbol->SetRefLacksSuffix( entry.path->Path(), false );
+        }
+    }
+}
+
+
+int SCH_SHEET_LIST::ShareReusedSheetRef( SCH_SYMBOL* aSymbol, const SCH_SHEET_PATH& aSource ) const
+{
+    const wxString base = aSymbol->GetBaseRef( &aSource );
+    const int      unit = aSymbol->GetUnitSelection( &aSource );
+    int            count = 0;
+
+    for( const SCH_SHEET_PATH& path : *this )
+    {
+        if( path.LastScreen() != aSource.LastScreen() || path == aSource )
+            continue;
+
+        aSymbol->SetRef( &path, base );
+        aSymbol->SetUnitSelection( &path, unit );
+        count++;
+    }
+
+    return count;
+}
+
+
+wxString SCH_SHEET_LIST::SourceRefSuffix( const SCH_SYMBOL& aSymbol, const KIID_PATH& aInstancePath ) const
+{
+    // This project's references were stripped when it loaded
+    if( !aSymbol.Schematic() || aSymbol.Schematic()->IsInstancePathInProject( aInstancePath ) )
+        return wxEmptyString;
+
+    const SCH_SHEET_PATH* source = nullptr;
+    size_t                depth = 0;
+
+    // The loaded root takes the new sheet's UUID, so only the path below it can match the source
+    for( const SCH_SHEET_PATH& path : *this )
+    {
+        KIID_PATH below = path.Path();
+
+        if( !below.empty() )
+            below.erase( below.begin() );
+
+        if( ( !source || below.size() > depth ) && aInstancePath.EndsWith( below ) )
+        {
+            source = &path;
+            depth = below.size();
+        }
+    }
+
+    return source ? source->ComposeRefSuffix() : wxString();
 }
 
 

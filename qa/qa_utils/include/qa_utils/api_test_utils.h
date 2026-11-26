@@ -93,6 +93,9 @@ void testEnums( bool aPartiallyMapped = false, std::optional<KiCadEnum> aNullMap
                 try
                 {
                     result = ToProtoEnum<KiCadEnum, ProtoEnum>( value );
+
+                    // wx builds with asserts compiled out return unknown instead of throwing
+                    unmapped = result == static_cast<ProtoEnum>( 0 ) && !( aNullMapping && *aNullMapping == value );
                 }
                 catch( KI_TEST::WX_ASSERT_ERROR )
                 {

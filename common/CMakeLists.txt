@@ -106,28 +106,16 @@ set( KICOMMON_SRCS
     # Git
     git/git_branch_handler.cpp
     git/git_clone_handler.cpp
-    git/git_commit_handler.cpp
     git/git_config_handler.cpp
     git/git_compare_handler.cpp
     git/kigit_driver_registry.cpp
     git/kigit_merge_blob_utils.cpp
+    git/kigit_platform_install.cpp
     git/git_init_handler.cpp
-    git/project_git_utils.cpp
-    git/git_pull_handler.cpp
-    git/git_push_handler.cpp
+    git/project_git_hash.cpp
     git/git_remove_vcs_handler.cpp
-    git/git_repo_mixin.cpp
-    git/git_status_handler.cpp
     git/git_switch_branch_handler.cpp
-    git/kicad_git_common.cpp
-    git/kicad_git_errors.cpp
     git/text_diff.cpp
-    git/git_backend.cpp
-    git/kigit_orphan_registry.cpp
-    git/kigit_failure.cpp
-    git/kigit_known_hosts.cpp
-    git/kigit_ssh_keys.cpp
-    git/libgit_backend.cpp
 
     # Diff/merge engine
     diff_merge/auto_resolution.cpp
@@ -160,6 +148,7 @@ set( KICOMMON_SRCS
     jobs/job_export_pcb_gerber.cpp
     jobs/job_export_pcb_gerbers.cpp
     jobs/job_export_pcb_hpgl.cpp
+    jobs/job_export_pcb_hyperlynx.cpp
     jobs/job_export_pcb_ipc2581.cpp
     jobs/job_export_pcb_fab.cpp
     jobs/job_export_pcb_ipcd356.cpp
@@ -186,6 +175,7 @@ set( KICOMMON_SRCS
     jobs/jobset.cpp
     jobs/job_fp_export_svg.cpp
     jobs/job_fp_upgrade.cpp
+    jobs/job_fp_downgrade.cpp
     jobs/job_gerber_diff.cpp
     jobs/job_gerber_export_png.cpp
     jobs/job_gerber_info.cpp
@@ -204,6 +194,7 @@ set( KICOMMON_SRCS
     jobs/job_sch_erc.cpp
     jobs/job_sym_export_svg.cpp
     jobs/job_sym_upgrade.cpp
+    jobs/job_sym_downgrade.cpp
     jobs/job_pcb_upgrade.cpp
     jobs/job_pcb_downgrade.cpp
     jobs/job_sch_upgrade.cpp
@@ -278,6 +269,7 @@ set( KICOMMON_SRCS
     widgets/html_window.cpp
     widgets/indicator_icon.cpp
     widgets/kistatusbar.cpp
+    widgets/kistatusbar_popup.cpp
     widgets/number_badge.cpp
     widgets/progress_reporter_base.cpp
     widgets/report_severity.cpp
@@ -320,6 +312,7 @@ set( KICOMMON_SRCS
     dpi_scaling.cpp
     dpi_scaling_common.cpp
     dsnlexer.cpp
+    eda_cursor_broadcaster.cpp
     eda_doc.cpp
     eda_pattern_match.cpp
     eda_units.cpp
@@ -389,6 +382,7 @@ set( KICOMMON_SRCS
     api/api_plugin_manager.cpp
     api/api_job_registry.cpp
     api/api_server.cpp
+    api/api_task_scheduler.cpp
     api/api_utils.cpp
     api/cross_probe_client.cpp
     api/python_manager.cpp
@@ -419,6 +413,63 @@ endif()
 list( APPEND KICOMMON_SRCS
     navlib_safe_init.cpp
 )
+
+# Git plumbing the Version Control pane shares with the kicad-mdw-git backend. It links neither
+# kicommon nor KIPLATFORM::SECRETS, so the backend can link it without reaching the vault. kicommon
+# compiles the same sources rather than linking the archive, so its exports stay its own
+set( KIGIT_SRCS
+    git/git_backend.cpp
+    git/git_commit_handler.cpp
+    git/git_pull_handler.cpp
+    git/git_push_handler.cpp
+    git/git_repo_mixin.cpp
+    git/git_status_handler.cpp
+    git/git_transfer_busy.cpp
+    git/kicad_git_common.cpp
+    git/kicad_git_errors.cpp
+    git/kigit_author.cpp
+    git/kigit_failure.cpp
+    git/kigit_ignore.cpp
+    git/kigit_known_hosts.cpp
+    git/kigit_lock_retry.cpp
+    git/kigit_orphan_registry.cpp
+    git/kigit_platform.cpp
+    git/kigit_remote_url.cpp
+    git/kigit_ssh_keys.cpp
+    git/kigit_transport.cpp
+    git/libgit_backend.cpp
+    git/libgit_backend_history.cpp
+    git/libgit_backend_refs.cpp
+    git/project_git_utils.cpp
+    )
+
+list( APPEND KICOMMON_SRCS ${KIGIT_SRCS} )
+
+# The headless API core has no libgit2 (see KICOMMON_VCS_SRCS below), so it has no git archive
+if( NOT KICAD_HEADLESS_API )
+    # The git core reports transfers through UTIL::OBSERVABLE, whose core library would bring wx's GUI libraries along
+    add_library( kigit STATIC
+        ${KIGIT_SRCS}
+        ${CMAKE_SOURCE_DIR}/libs/core/observable.cpp
+        )
+
+    # It needs wxBase alone, which each executable that links it finds for itself
+    target_link_libraries( kigit
+        PUBLIC
+            ${LIBGIT2_LIBRARIES}
+            Boost::headers
+        PRIVATE
+            nlohmann_json
+            picosha2
+        )
+
+    target_include_directories( kigit
+        PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${CMAKE_SOURCE_DIR}/include
+            ${CMAKE_SOURCE_DIR}/libs/core/include
+        )
+endif()
 
 #
 # Headless split.
@@ -524,28 +575,19 @@ set( KICOMMON_NET_SRCS
 set( KICOMMON_VCS_SRCS
     git/git_branch_handler.cpp
     git/git_clone_handler.cpp
-    git/git_commit_handler.cpp
     git/git_config_handler.cpp
     git/git_compare_handler.cpp
     git/kigit_driver_registry.cpp
     git/kigit_merge_blob_utils.cpp
+    git/kigit_platform_install.cpp
     git/git_init_handler.cpp
-    git/project_git_utils.cpp
-    git/git_pull_handler.cpp
-    git/git_push_handler.cpp
+    git/project_git_hash.cpp
     git/git_remove_vcs_handler.cpp
-    git/git_repo_mixin.cpp
-    git/git_status_handler.cpp
     git/git_switch_branch_handler.cpp
-    git/kicad_git_common.cpp
-    git/kicad_git_errors.cpp
     git/text_diff.cpp
-    git/git_backend.cpp
-    git/kigit_orphan_registry.cpp
-    git/kigit_failure.cpp
-    git/kigit_known_hosts.cpp
-    git/kigit_ssh_keys.cpp
-    git/libgit_backend.cpp
+
+    # The libgit2 core upstream groups for the kigit archive
+    ${KIGIT_SRCS}
 
     local_history.cpp
     history_lock.cpp
@@ -832,6 +874,10 @@ set( COMMON_DLG_SRCS
     dialogs/dialog_plugin_options.cpp
     dialogs/dialog_plugin_options_base.cpp
     dialogs/dialog_text_entry_base.cpp
+    dialogs/dialog_downgrade_report.cpp
+    dialogs/dialog_downgrade_report_base.cpp
+    dialogs/dialog_export_older_version.cpp
+    dialogs/dialog_export_older_version_base.cpp
     dialogs/dialog_page_settings.cpp
     dialogs/dialog_print_generic.cpp
     dialogs/dialog_print_generic_base.cpp
@@ -884,8 +930,6 @@ set( COMMON_DLG_SRCS
     dialogs/panel_text_variables_base.cpp
     dialogs/panel_toolbar_customization.cpp
     dialogs/panel_toolbar_customization_base.cpp
-
-    dialogs/rule_editor_dialog_base.cpp
 
     libraries/lib_table_grid_data_model.cpp
     )
@@ -1103,6 +1147,7 @@ set( COMMON_SRCS
     ${COMMON_TRANSLINE_CALCULATION_SRCS}
     track_width_calculations.cpp
     pth_hole_size.cpp
+    r_divider_solver.cpp
     base_screen.cpp
     bin_mod.cpp
     bitmap_base.cpp
@@ -1168,6 +1213,7 @@ set( COMMON_SRCS
     diff_merge/diff_renderer_gal.cpp
     diff_merge/diff_renderer_plotter.cpp
     diff_merge/diff_job_output.cpp
+    diff_merge/lib_element_diff.cpp
 
     origin_viewitem.cpp
 
@@ -1254,6 +1300,7 @@ list( APPEND COMMON_SRCS
     api/api_server_host.cpp
     project_template.cpp
     api/api_handler_libraries.cpp
+    api/api_task_gui_reporter.cpp
 )
 
 #
@@ -1504,6 +1551,7 @@ set( PCB_COMMON_SRCS
     ${CMAKE_SOURCE_DIR}/pcbnew/router/pns_meander.cpp               #needed by board_design_settings.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/board_tables/generated_table_refresh.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/board_tables/generated_table_schema.cpp
+    ${CMAKE_SOURCE_DIR}/pcbnew/board_tables/stackup_table_model.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/drill/drill_enumerator.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/exporters/fab_model/fab_pin.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/exporters/fab_model/fab_drill.cpp
@@ -1554,6 +1602,7 @@ set( PCB_COMMON_SRCS
     ${CMAKE_SOURCE_DIR}/pcbnew/pcb_reference_image.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/pcb_field.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/pcb_drill_chart.cpp
+    ${CMAKE_SOURCE_DIR}/pcbnew/pcb_stackup_table.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/pcb_generated_table.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/pcb_drill_map.cpp
     ${CMAKE_SOURCE_DIR}/pcbnew/pcb_table.cpp

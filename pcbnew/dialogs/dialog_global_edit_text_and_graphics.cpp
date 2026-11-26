@@ -154,7 +154,7 @@ DIALOG_GLOBAL_EDIT_TEXT_AND_GRAPHICS::DIALOG_GLOBAL_EDIT_TEXT_AND_GRAPHICS( PCB_
 
     m_LayerCtrl->SetBoardFrame( m_parent );
     m_LayerCtrl->SetLayersHotkeys( false );
-    m_LayerCtrl->SetUndefinedLayerName( INDETERMINATE_ACTION );
+    m_LayerCtrl->SetAllowsIndeterminateState( INDETERMINATE_ACTION );
     m_LayerCtrl->Resync();
 
     m_grid->SetCellHighlightPenWidth( 0 );
@@ -368,8 +368,8 @@ void DIALOG_GLOBAL_EDIT_TEXT_AND_GRAPHICS::processItem( BOARD_COMMIT& aCommit, B
 
     if( m_setToSpecifiedValues->GetValue() )
     {
-        if( m_LayerCtrl->GetLayerSelection() != UNDEFINED_LAYER )
-            aItem->SetLayer( ToLAYER_ID( m_LayerCtrl->GetLayerSelection() ) );
+        if( !m_LayerCtrl->IsIndeterminate() )
+            aItem->SetLayer( m_LayerCtrl->GetLayerIDSelection() );
 
         if( text )
         {
@@ -477,7 +477,7 @@ void DIALOG_GLOBAL_EDIT_TEXT_AND_GRAPHICS::visitItem( BOARD_COMMIT& aCommit, BOA
 
     if( m_layerFilterOpt->GetValue() && m_layerFilter->GetLayerSelection() != UNDEFINED_LAYER )
     {
-        if( aItem->GetLayer() != m_layerFilter->GetLayerSelection() )
+        if( aItem->GetLayer() != m_layerFilter->GetLayerIDSelection() )
             return;
     }
 

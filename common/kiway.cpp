@@ -21,12 +21,14 @@
 #include <cstring>
 
 #include <app_monitor.h>
+#include <cli/exit_codes.h>
 #include <core/ignore.h>
 #include <macros.h>
 #include <kiway.h>
 #include <kiway_player.h>
 #include <kiway_mail.h>
 #include <paths.h>
+#include <reporter.h>
 #include <pgm_base.h>
 #include <config.h>
 #include <id.h>
@@ -287,17 +289,20 @@ KIFACE* KIWAY::KiFACE( FACE_T aFaceId, bool doLoad )
     // merely unused here, it does not exist.
     (void) doLoad;
 #else
+    // A missing or broken DSO stays that way, so report it once per session
+    if( m_kifaceLoadFailed[aFaceId] )
+        return nullptr;
+
     // DSO with KIFACE has not been loaded yet, does caller want to load it?
     if( doLoad )
     {
         wxString dname = dso_search_path( aFaceId );
 
         // Insert DLL search path for kicad_3dsg from build dir
-        const wxString& buildRoot = PATHS::GetBuildRoot();
-
         if( PATHS::RunningFromBuildDir() )
         {
-            wxFileName myPath;
+            const wxString& buildRoot = PATHS::GetBuildRoot();
+            wxFileName      myPath;
 
             if( !buildRoot.IsEmpty() )
                 myPath.AssignDir( buildRoot );
@@ -318,7 +323,11 @@ KIFACE* KIWAY::KiFACE( FACE_T aFaceId, bool doLoad )
         bool codeSignOk = KIPLATFORM::ENV::VerifyFileSignature( dname );
 
         if( !codeSignOk )
-            THROW_IO_ERRORF( _( "Failed to verify kiface library '%s' signature." ), dname );
+        {
+            wxLogError( _( "Failed to verify kiface library '%s' signature." ), dname );
+            m_kifaceLoadFailed[aFaceId] = true;
+            return nullptr;
+        }
 #endif
 
         wxDynamicLibrary dso;
@@ -338,28 +347,27 @@ KIFACE* KIWAY::KiFACE( FACE_T aFaceId, bool doLoad )
 
         APP_MONITOR::AddNavigationBreadcrumb( wxString::Format( "Loading kiface %d", aFaceId ), "kiway.kiface" );
 
+        // Return null instead of throwing, since an exception escaping an event handler or startup ends the program
         if( !success )
         {
-            // Failure: error reporting UI was done via wxLogSysError().
-            // No further reporting required here.  Apparently this is not true on all
-            // platforms and/or wxWidgets builds and KiCad will crash.  Throwing the exception
-            // here and catching it in the KiCad launcher resolves the crash issue.  See bug
-            // report https://bugs.launchpad.net/kicad/+bug/1577786.
-
-            THROW_IO_ERRORF( _( "Failed to load kiface library '%s'." ), dname );
+            wxLogError( _( "Failed to load kiface library '%s'." ), dname );
+            m_kifaceLoadFailed[aFaceId] = true;
+            return nullptr;
         }
         else if( ( addr = dso.GetSymbol( wxT( KIFACE_INSTANCE_NAME_AND_VERSION ) ) ) == nullptr )
         {
-            // Failure: error reporting UI was done via wxLogSysError().
-            // No further reporting required here.  Assume the same thing applies here as
-            // above with the Load() call.  This has not been tested.
-            THROW_IO_ERRORF( _( "Could not read instance name and version from kiface library '%s'." ), dname );
+            wxLogError( _( "Could not read instance name and version from kiface library '%s'." ), dname );
+            m_kifaceLoadFailed[aFaceId] = true;
+            return nullptr;
         }
         else
         {
             KIFACE_GETTER_FUNC* ki_getter = (KIFACE_GETTER_FUNC*) addr;
 
             KIFACE* kiface = ki_getter( &m_kiface_version[aFaceId], KIFACE_VERSION, &Pgm() );
+
+            // KIFACE_GETTER_FUNC function comment (API) says the non-NULL is unconditional.
+            wxCHECK_MSG( kiface, nullptr, wxT( "attempted DSO has a bug, failed to return a KIFACE*" ) );
 
             wxDllType dsoHandle = dso.Detach();
 
@@ -465,7 +473,13 @@ KIWAY_PLAYER* KIWAY::Player( FRAME_T aFrameType, bool doCreate, wxTopLevelWindow
             KIFACE* kiface = KiFACE( face_type );
 
             if( !kiface )
+            {
+                // KiFACE() reports a broken DSO only once, but every explicit open needs an answer
+                if( (unsigned) face_type < KIWAY_FACE_COUNT && m_kifaceLoadFailed[face_type] )
+                    wxLogError( _( "Application cannot start." ) );
+
                 return nullptr;
+            }
 
             frame = (KIWAY_PLAYER*) kiface->CreateKiWindow(
                                             aParent,    // Parent window of frame in modal mode,
@@ -509,13 +523,8 @@ bool KIWAY::PlayerClose( FRAME_T aFrameType, bool doForce )
     wxString msg = wxString::Format( "Closing window type %d", aFrameType );
     APP_MONITOR::AddNavigationBreadcrumb( msg, "kiway.playerclose" );
 
-    if( frame->NonUserClose( doForce ) )
-    {
-        m_playerFrameId[aFrameType] = wxID_NONE;
-        return true;
-    }
-
-    return false;
+    // A forced close that a blocking dialog refused still reports success, so ask whether the entry was cleared
+    return frame->NonUserClose( doForce ) && !GetPlayerFrame( aFrameType );
 }
 
 
@@ -794,6 +803,17 @@ int KIWAY::ProcessJob( KIWAY::FACE_T aFace, JOB* job, REPORTER* aReporter, PROGR
 {
     KIFACE* kiface = KiFACE( aFace );
 
+    if( !kiface )
+    {
+        if( aReporter )
+        {
+            aReporter->Report( wxString::Format( _( "Failed to load kiface library '%s'." ), dso_search_path( aFace ) ),
+                               RPT_SEVERITY_ERROR );
+        }
+
+        return CLI::EXIT_CODES::ERR_UNKNOWN;
+    }
+
     return kiface->HandleJob( job, aReporter, aProgressReporter );
 }
 
@@ -802,7 +822,7 @@ bool KIWAY::ProcessJobConfigDialog( KIWAY::FACE_T aFace, JOB* aJob, wxWindow* aW
 {
     KIFACE* kiface = KiFACE( aFace );
 
-    return kiface->HandleJobConfig( aJob, aWindow );
+    return kiface && kiface->HandleJobConfig( aJob, aWindow );
 }
 
 

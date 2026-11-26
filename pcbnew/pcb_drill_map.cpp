@@ -237,6 +237,16 @@ void PCB_DRILL_MAP::swapData( BOARD_ITEM* aImage )
 }
 
 
+void PCB_DRILL_MAP::CopyFrom( const BOARD_ITEM* aOther )
+{
+    wxCHECK( aOther && aOther->Type() == Type(), /* void */ );
+
+    // BOARD_ITEM's copy stops at the base. swapData covers every member of the map
+    std::unique_ptr<BOARD_ITEM> copy( static_cast<BOARD_ITEM*>( aOther->Clone() ) );
+    SwapItemData( copy.get() );
+}
+
+
 double PCB_DRILL_MAP::Similarity( const BOARD_ITEM& aOther ) const
 {
     if( aOther.Type() != Type() )
@@ -286,7 +296,8 @@ void PCB_DRILL_MAP::Serialize( google::protobuf::Any& aContainer ) const
     map.set_guide_cross( m_guideCross );
     kiapi::common::PackDistance( *map.mutable_symbol_size(), m_symbolSize );
 
-    aContainer.PackFrom( map );
+    if( !aContainer.PackFrom( map ) )
+        wxFAIL_MSG( wxT( "Failed to pack PCB_DRILL_MAP" ) );
 }
 
 

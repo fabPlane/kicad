@@ -21,11 +21,15 @@
 #ifndef KIPLATFORM_UI_H_
 #define KIPLATFORM_UI_H_
 
+#include <functional>
+
 #include <wx/cursor.h>
 
 class wxChoice;
+class wxDataViewColumn;
 class wxDataViewCtrl;
 class wxDialog;
+class wxKeyEvent;
 class wxNonOwnedWindow;
 class wxTopLevelWindow;
 class wxWindow;
@@ -46,7 +50,8 @@ namespace KIPLATFORM
         /**
          * Pass the current focus to the window. On OSX this will forcefully give the focus to
          * the desired window, while on MSW and GTK it will simply call the wxWidgets SetFocus()
-         * function.
+         * function.  On GTK under Wayland it asks for activation of a shown top-level window
+         * and passes the focus as SetFocusWhenActive() does.
          *
          * @param aWindow is the window to pass focus to
          */
@@ -59,6 +64,39 @@ namespace KIPLATFORM
          * @param aWindow is the window to check
          */
         bool IsWindowActive( wxWindow* aWindow );
+
+        /**
+         * Run a function that may change the focus inside a window's top-level window.
+         *
+         * On Wayland, wxWidgets presents an inactive top-level window when one of its children
+         * is focused.  Presenting a window that is already mapped can make GTK commit a released
+         * buffer, which unmaps the window for good.  So on GTK under Wayland, when the top-level
+         * window is shown but not active, or still has functions waiting, the function runs from
+         * the event loop after its next activation, after the ones already waiting.  It is dropped
+         * if the window is destroyed first.  Otherwise it runs now.
+         *
+         * @param aWindow is the window, or a child of the top-level window, the function focuses
+         * @param aFunction is the function to run
+         */
+        void RunWhenActive( wxWindow* aWindow, std::function<void()> aFunction );
+
+        /**
+         * Give the focus to a window through RunWhenActive().  A later request in the same
+         * top-level window replaces one that is still waiting.
+         *
+         * @param aWindow is the window to pass focus to
+         */
+        void SetFocusWhenActive( wxWindow* aWindow );
+
+        /**
+         * Raise a shown top-level window without presenting it where presenting is unsafe.
+         *
+         * On GTK under Wayland this asks the compositor to activate the shown top-level window
+         * of \a aWindow instead of calling gtk_window_present() (see RunWhenActive()).
+         *
+         * @return true if the request was handled, false if the caller should Raise() the window.
+         */
+        bool ActivateWithoutPresenting( wxWindow* aWindow );
 
         /**
          * Move a window's parent to be the top-level window and force the window to be on top.
@@ -171,6 +209,10 @@ namespace KIPLATFORM
          */
         bool SupportsKeyState();
 
+        wxKeyEvent GetNativePopupDismissalEvent();
+
+        bool PrepareChoicePopup( wxWindow* aControl );
+
         /**
          * Returns the mouse position in screen coordinates.
          * If we've just warped the cursor, returns the new coordinates.
@@ -212,14 +254,6 @@ namespace KIPLATFORM
         void InfiniteDragReleaseWindow();
 
         /**
-         * Ensure that a window is visible on the screen.  On MacOS, this will make it visible
-         * in all Spaces.  Other platforms are nops.
-         *
-         * @param aWindow window to make visible
-         */
-        void EnsureVisible( wxWindow* aWindow );
-
-        /**
          * Prepare a top-level window for reliable position round-tripping.
          *
          * On GTK/X11, default window gravity lets window-manager decorations affect the
@@ -230,6 +264,18 @@ namespace KIPLATFORM
          * @param aWindow window to prepare
          */
         void StabilizeWindowPosition( wxWindow* aWindow );
+
+        /**
+         * Return the point that wxWindow::Move() needs to put a stabilized window back where it is.
+         *
+         * Static gravity makes GTK place a window by its client origin, while GetPosition() reports
+         * the origin of the decorations.  On GTK the point is pulled down and right as needed to put
+         * the decorations back inside the work area.  Other platforms, and hidden windows, return
+         * GetPosition().
+         *
+         * @param aWindow window previously prepared by StabilizeWindowPosition()
+         */
+        wxPoint GetRestorablePosition( wxWindow* aWindow );
 
         /**
          * Intended to set the floating window level in macOS on a window
@@ -292,6 +338,15 @@ namespace KIPLATFORM
         void CancelPendingScroll( wxDataViewCtrl* aCtrl );
 
         /**
+         * The width last asked of aColumn, by SetWidth or by the user dragging its border.
+         *
+         * wxGTK reports the width GTK last laid out, which lags a SetWidth until the next
+         * layout, so reading it back right after setting it returns the old width.  The
+         * generic control used on MSW also reports the stretch it gives its last column.
+         */
+        int GetColumnWidth( const wxDataViewColumn* aColumn );
+
+        /**
          * Tag a top-level window with the freedesktop application id of its installed
          * launcher, setting the X11 WM_CLASS and, on Wayland, the surface application id.
          *
@@ -335,6 +390,16 @@ namespace KIPLATFORM
          * This makes the realized child's window native so the present is clipped around it.
          */
         void KeepAboveExternalRendering( wxWindow* aChild );
+
+        /**
+         * Make wx rebind \a aWindow to its native window every time the toolkit recreates it.
+         *
+         * Before wxWidgets 3.3.3, wxGTK only does this for a window created inside an unrealized
+         * parent.  A window created inside a realized one, such as a wxNotebook page added after
+         * the dialog is shown, loses its native window when it is reparented, and an EGL canvas
+         * keeps presenting to the destroyed one.  Wayland and other platforms need nothing.
+         */
+        void RebindOnRealize( wxWindow* aWindow );
     }
 }
 

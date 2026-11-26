@@ -520,7 +520,7 @@ wxString BOARD_INSPECTION_TOOL::InspectDRCErrorMenuText( const std::shared_ptr<R
         return m_frame->GetRunMenuCommandDescription( PCB_ACTIONS::inspectClearance );
     }
     else if( aDRCItem->GetErrorCode() == DRCE_TEXT_HEIGHT
-            || aDRCItem->GetErrorCode() == DRCE_TEXT_THICKNESS
+            || aDRCItem->GetErrorCode() == DRCE_LINE_WIDTH
             || aDRCItem->GetErrorCode() == DRCE_DP_UNCOUPLED_LENGTH_TOO_LONG
             || aDRCItem->GetErrorCode() == DRCE_TRACK_WIDTH
             || aDRCItem->GetErrorCode() == DRCE_TRACK_ANGLE
@@ -648,19 +648,18 @@ void BOARD_INSPECTION_TOOL::InspectDRCError( const std::shared_ptr<RC_ITEM>& aDR
                                      reportMax( m_frame, constraint ) ) );
         break;
 
-    case DRCE_TEXT_THICKNESS:
-        r = dialog->AddHTMLPage( _( "Text Thickness" ) );
-        reportHeader( _( "Text thickness resolution for:" ), a, r );
+    case DRCE_LINE_WIDTH:
+        r = dialog->AddHTMLPage( _( "Line width" ) );
+        reportHeader( _( "Line width resolution for:" ), a, r );
 
         if( compileError )
             reportCompileError( r );
 
-        constraint = drcEngine->EvalRules( TEXT_THICKNESS_CONSTRAINT, a, b, layer, r );
+        constraint = drcEngine->EvalRules( LINE_WIDTH_CONSTRAINT, a, b, layer, r );
 
         r->Report( "" );
-        r->Report( wxString::Format( _( "Resolved thickness constraints: min %s; max %s." ),
-                                     reportMin( m_frame, constraint ),
-                                     reportMax( m_frame, constraint ) ) );
+        r->Report( wxString::Format( _( "Resolved line width constraints: min %s; max %s." ),
+                                     reportMin( m_frame, constraint ), reportMax( m_frame, constraint ) ) );
         break;
 
     case DRCE_TRACK_WIDTH:
@@ -1862,7 +1861,7 @@ int BOARD_INSPECTION_TOOL::InspectConstraints( const TOOL_EVENT& aEvent )
         r->Report( "" );
         reportHeader( _( "Text thickness resolution for:" ), item, r );
 
-        constraint = EVAL_RULES( TEXT_THICKNESS_CONSTRAINT, item, nullptr, UNDEFINED_LAYER, r );
+        constraint = EVAL_RULES( LINE_WIDTH_CONSTRAINT, item, nullptr, UNDEFINED_LAYER, r );
 
         if( compileError )
             reportCompileError( r );
@@ -2002,8 +2001,45 @@ namespace
 struct PCB_DIFF_VIEW
 {
     KICAD_DIFF::DOCUMENT_DIFF                result;
+    KICAD_DIFF::DOCUMENT_GEOMETRY            referenceGeometry;
+    KICAD_DIFF::DOCUMENT_GEOMETRY            comparisonGeometry;
     std::vector<std::unique_ptr<BOARD_ITEM>> clones;
     DIALOG_KICAD_DIFF::SHEET_SWITCHER        switcher;
+};
+
+
+/// One loaded history snapshot. Freeing it unloads its project and removes its extracted files.
+struct HISTORY_REVISION
+{
+    explicit HISTORY_REVISION( SETTINGS_MANAGER* aMgr ) :
+            mgr( aMgr )
+    {
+    }
+
+    ~HISTORY_REVISION()
+    {
+        // The view's clones and switcher may reference the board
+        view = PCB_DIFF_VIEW();
+
+        if( board )
+        {
+            board->ClearProject();
+            board.reset();
+        }
+
+        // Skip a project the manager already evicted
+        if( prj && mgr->IsProjectLoaded( prj ) )
+            mgr->UnloadProject( prj, false );
+
+        if( !tempDir.IsEmpty() )
+            wxFileName::Rmdir( tempDir, wxPATH_RMDIR_RECURSIVE );
+    }
+
+    SETTINGS_MANAGER*      mgr;
+    std::unique_ptr<BOARD> board;
+    PROJECT*               prj = nullptr;
+    wxString               tempDir;
+    PCB_DIFF_VIEW          view;
 };
 
 
@@ -2015,6 +2051,10 @@ PCB_DIFF_VIEW buildPcbDiffView( BOARD* aLive, BOARD* aOther, const wxString& aOt
     view.result = differ.Diff();
 
     const KICAD_DIFF::DIFF_COLOR_THEME theme;
+
+    // The layer checkboxes come from the geometry
+    view.referenceGeometry = KICAD_DIFF::ExtractBoardGeometry( *aLive, theme.reference );
+    view.comparisonGeometry = KICAD_DIFF::ExtractBoardGeometry( *aOther, theme.comparison );
 
     std::map<KIID, KIGFX::COLOR4D>       refOverrides;
     std::map<KIID, KIGFX::COLOR4D>       compOverrides;
@@ -2159,8 +2199,8 @@ int BOARD_INSPECTION_TOOL::showBoardComparison( const wxString& aOtherPath, cons
     PCB_DIFF_VIEW view = buildPcbDiffView( board, otherBoard.get(), aOtherPath );
 
     auto dlgDiff = std::make_unique<DIALOG_KICAD_DIFF>( m_frame, board->GetFileName(), aComparisonLabel, view.result,
-                                                        KICAD_DIFF::DOCUMENT_GEOMETRY{},
-                                                        KICAD_DIFF::DOCUMENT_GEOMETRY{}, view.switcher );
+                                                        view.referenceGeometry, view.comparisonGeometry,
+                                                        view.switcher );
     dlgDiff->ShowModal();
 
     // Destroy the dialog (its canvas drops its references to the board's items)
@@ -2243,33 +2283,6 @@ int BOARD_INSPECTION_TOOL::CompareBoardWithHistory( const TOOL_EVENT& aEvent )
         labels.push_back( wxString::Format( wxS( "%s (%s)" ), summary, s.hash.Left( 8 ) ) );
     }
 
-    // State for the revision currently shown. Swapped on each dropdown change.
-    std::unique_ptr<BOARD> curBoard;
-    PROJECT*               curPrj = nullptr;
-    wxString               curTempDir;
-
-    auto cleanupCurrent =
-            [&]()
-            {
-                if( curBoard )
-                {
-                    curBoard->ClearProject();
-                    curBoard.reset();
-                }
-
-                // Skip if the project was already evicted from the manager.
-                if( curPrj && mgr->IsProjectLoaded( curPrj ) )
-                    mgr->UnloadProject( curPrj, false );
-
-                curPrj = nullptr;
-
-                if( !curTempDir.IsEmpty() )
-                {
-                    wxFileName::Rmdir( curTempDir, wxPATH_RMDIR_RECURSIVE );
-                    curTempDir.Clear();
-                }
-            };
-
     // Extract + load snapshot aIndex into the out-params. Cleans up its own temp
     // on any failure.
     auto loadRevision =
@@ -2278,13 +2291,17 @@ int BOARD_INSPECTION_TOOL::CompareBoardWithHistory( const TOOL_EVENT& aEvent )
                 const wxString hash = snapshots[aIndex].hash;
                 wxFileName     dirFn;
                 dirFn.AssignDir( wxFileName::GetTempDir() );
-                dirFn.AppendDir( wxS( "kicad-history-" ) + hash.Left( 8 ) );
+                // Unique per load, another process or a kept revision may hold the same snapshot
+                dirFn.AppendDir( wxS( "kicad-history-" ) + KIID().AsString() );
                 const wxString tempDir = dirFn.GetPath();
 
-                // Extract just the board and project file (its real net classes and
-                // design settings), skipping the schematic, 3D models, gerbers, etc.
+                // Extract just the board, the project file (its real net classes and
+                // design settings) and the rules and library tables the board differ
+                // compares, skipping the schematic, 3D models, gerbers, etc.
                 if( !history.ExtractAllFilesAtCommit( projectPath, hash, tempDir,
-                                                      { wxS( ".kicad_pcb" ), wxS( ".kicad_pro" ) } ) )
+                                                      { wxS( ".kicad_pcb" ), wxS( ".kicad_pro" ),
+                                                        wxS( ".kicad_dru" ), wxS( "fp-lib-table" ),
+                                                        wxS( "sym-lib-table" ) } ) )
                 {
                     wxFileName::Rmdir( tempDir, wxPATH_RMDIR_RECURSIVE );
                     return false;
@@ -2338,34 +2355,32 @@ int BOARD_INSPECTION_TOOL::CompareBoardWithHistory( const TOOL_EVENT& aEvent )
     // Load a revision and build its diff view, guarding both the parse and the
     // diff so a bad snapshot is skipped instead of crashing.
     auto loadView =
-            [&]( int aIndex, std::unique_ptr<BOARD>& aBoard, PROJECT*& aPrj, wxString& aTempDir,
-                 PCB_DIFF_VIEW& aView ) -> bool
+            [&]( int aIndex ) -> std::unique_ptr<HISTORY_REVISION>
             {
-                if( !loadRevision( aIndex, aBoard, aPrj, aTempDir ) )
-                    return false;
+                auto revision = std::make_unique<HISTORY_REVISION>( mgr );
+
+                if( !loadRevision( aIndex, revision->board, revision->prj, revision->tempDir ) )
+                    return nullptr;
 
                 try
                 {
-                    aView = buildPcbDiffView( liveBoard, aBoard.get(), aTempDir + wxS( "/" ) + relPath );
+                    // A load that skips initialisation leaves the board without its net classes and settings
+                    revision->board->SetProject( revision->prj );
+                    revision->view = buildPcbDiffView( liveBoard, revision->board.get(),
+                                                       revision->tempDir + wxS( "/" ) + relPath );
                 }
                 catch( ... )
                 {
-                    aBoard->ClearProject();
-                    aBoard.reset();
-                    mgr->UnloadProject( aPrj, false );
-                    aPrj = nullptr;
-                    wxFileName::Rmdir( aTempDir, wxPATH_RMDIR_RECURSIVE );
-                    aTempDir.Clear();
-                    return false;
+                    return nullptr;
                 }
 
-                return true;
+                return revision;
             };
 
-    PCB_DIFF_VIEW view;
-    int           startIndex = 0;
+    std::unique_ptr<HISTORY_REVISION> shown = loadView( 0 );
+    int                               startIndex = 0;
 
-    if( !loadView( 0, curBoard, curPrj, curTempDir, view ) )
+    if( !shown )
     {
         m_frame->ShowInfoBarError( _( "Could not compare against the selected snapshot." ) );
         return 0;
@@ -2373,29 +2388,27 @@ int BOARD_INSPECTION_TOOL::CompareBoardWithHistory( const TOOL_EVENT& aEvent )
 
     // Default to the first commit back from HEAD that actually differs from the
     // current board, so opening lands on real changes rather than an in-sync HEAD.
-    while( view.result.Empty() && startIndex + 1 < static_cast<int>( snapshots.size() ) )
+    while( shown->view.result.Empty() && startIndex + 1 < static_cast<int>( snapshots.size() ) )
     {
-        std::unique_ptr<BOARD> nextBoard;
-        PROJECT*               nextPrj = nullptr;
-        wxString               nextTempDir;
-        PCB_DIFF_VIEW          nextView;
+        std::unique_ptr<HISTORY_REVISION> next = loadView( startIndex + 1 );
 
-        if( !loadView( startIndex + 1, nextBoard, nextPrj, nextTempDir, nextView ) )
+        if( !next )
             break;
 
-        cleanupCurrent();
-        view = std::move( nextView );
-        curBoard = std::move( nextBoard );
-        curPrj = nextPrj;
-        curTempDir = nextTempDir;
+        shown = std::move( next );
         startIndex++;
     }
 
-    int shownIndex = startIndex;
+    // Every revision the canvas may reference, declared first so it outlives the dialog
+    std::vector<std::unique_ptr<HISTORY_REVISION>> revisions;
+    revisions.push_back( std::move( shown ) );
+
+    int                  shownIndex = startIndex;
+    const PCB_DIFF_VIEW& view = revisions.back()->view;
 
     auto dlgDiff = std::make_unique<DIALOG_KICAD_DIFF>( m_frame, liveBoard->GetFileName(), labels[startIndex],
-                                                        view.result, KICAD_DIFF::DOCUMENT_GEOMETRY{},
-                                                        KICAD_DIFF::DOCUMENT_GEOMETRY{}, view.switcher );
+                                                        view.result, view.referenceGeometry,
+                                                        view.comparisonGeometry, view.switcher );
 
     dlgDiff->SetRevisionChooser(
             labels, startIndex,
@@ -2404,35 +2417,40 @@ int BOARD_INSPECTION_TOOL::CompareBoardWithHistory( const TOOL_EVENT& aEvent )
                 if( aIndex == shownIndex )
                     return;
 
-                std::unique_ptr<BOARD> newBoard;
-                PROJECT*               newPrj = nullptr;
-                wxString               newTempDir;
-                PCB_DIFF_VIEW          newView;
+                std::unique_ptr<HISTORY_REVISION> next = loadView( aIndex );
 
-                if( !loadView( aIndex, newBoard, newPrj, newTempDir, newView ) )
+                if( !next )
                 {
                     m_frame->ShowInfoBarError( _( "Could not compare against the selected snapshot." ) );
                     return;
                 }
 
-                dlgDiff->Reload( liveBoard->GetFileName(), labels[aIndex], newView.result,
-                                 /*aReferenceGeometry=*/{}, /*aComparisonGeometry=*/{}, newView.switcher, {} );
+                // A reload that throws can leave the canvas on either revision, so keep both
+                revisions.push_back( std::move( next ) );
+                const PCB_DIFF_VIEW& nextView = revisions.back()->view;
 
-                // The canvas now references newBoard, so the previous one can go.
-                cleanupCurrent();
-                view = std::move( newView );
-                curBoard = std::move( newBoard );
-                curPrj = newPrj;
-                curTempDir = newTempDir;
+                try
+                {
+                    dlgDiff->Reload( liveBoard->GetFileName(), labels[aIndex], nextView.result,
+                                     nextView.referenceGeometry, nextView.comparisonGeometry, nextView.switcher,
+                                     {} );
+                }
+                catch( ... )
+                {
+                    m_frame->ShowInfoBarError( _( "Could not compare against the selected snapshot." ) );
+                    dlgDiff->EndModal( wxID_CANCEL );
+                    return;
+                }
+
+                // The canvas now references only the new revision
+                revisions.erase( revisions.begin(), revisions.end() - 1 );
                 shownIndex = aIndex;
             } );
 
     dlgDiff->ShowModal();
 
-    // Destroy the dialog before the board it references is freed.
+    // Destroy the dialog before the boards it references are freed.
     dlgDiff.reset();
-
-    cleanupCurrent();
     return 0;
 }
 
@@ -2719,7 +2737,10 @@ int BOARD_INSPECTION_TOOL::HighlightItem( const TOOL_EVENT& aEvent )
                         settings->SetHighlight( sigCodes, true );
                         m_toolMgr->GetView()->UpdateAllLayersColor();
                         m_currentlyHighlighted = sigCodes;
-                        m_HighlightedNetChain  = sig;
+                        m_highlightedNetChain  = sig;
+
+                        if( auto pcbSettings = dynamic_cast<KIGFX::PCB_RENDER_SETTINGS*>( settings ) )
+                            pcbSettings->SetHighlightedNetChain( sig );
 
                         board2->ResetNetHighLight();
 
@@ -2727,9 +2748,6 @@ int BOARD_INSPECTION_TOOL::HighlightItem( const TOOL_EVENT& aEvent )
                             board2->SetHighLightNet( c, true );
 
                         board2->HighLightON();
-
-                        if( auto pcbSettings = dynamic_cast<KIGFX::PCB_RENDER_SETTINGS*>( settings ) )
-                            pcbSettings->SetHighlightedNetChain( sig );
 
                         return true;
                     }
@@ -2790,10 +2808,14 @@ int BOARD_INSPECTION_TOOL::HighlightItem( const TOOL_EVENT& aEvent )
         }
     }
 
+    m_highlightedNetChain.clear();
+
+    if( auto pcbSettings = dynamic_cast<KIGFX::PCB_RENDER_SETTINGS*>( settings ) )
+        pcbSettings->SetHighlightedNetChain( wxEmptyString );
+
     // Store the highlighted netcode in the current board (for dialogs for instance)
     if( enableHighlight && net >= 0 )
     {
-        m_HighlightedNetChain.clear();
         m_currentlyHighlighted = netcodes;
         board->SetHighLightNet( net );
         board->HighLightON();
@@ -2810,7 +2832,6 @@ int BOARD_INSPECTION_TOOL::HighlightItem( const TOOL_EVENT& aEvent )
     }
     else
     {
-        m_HighlightedNetChain.clear();
         m_currentlyHighlighted.clear();
         board->ResetNetHighLight();
         m_frame->SetMsgPanel( board );
@@ -2850,7 +2871,7 @@ int BOARD_INSPECTION_TOOL::HighlightNet( const TOOL_EVENT& aEvent )
                     bool alreadyHighlighted = highlighted.count( netcode );
                     if( count > 1 && alreadyHighlighted )
                     {
-                        if( m_HighlightedNetChain != sig )
+                        if( m_highlightedNetChain != sig )
                         {
                             TOOL_EVENT sigEvt = PCB_ACTIONS::highlightNetChain.MakeEvent();
                             HighlightNetChain( sigEvt );
@@ -2923,9 +2944,13 @@ int BOARD_INSPECTION_TOOL::HighlightNetChain( const TOOL_EVENT& aEvent )
     KIGFX::RENDER_SETTINGS* settings = m_toolMgr->GetView()->GetPainter()->GetSettings();
 
     // If no chain under cursor and a chain is currently highlighted, toggle off
-    if( sig.IsEmpty() && !m_HighlightedNetChain.IsEmpty() )
+    if( sig.IsEmpty() && !m_highlightedNetChain.IsEmpty() )
     {
-        m_HighlightedNetChain.clear();
+        m_highlightedNetChain.clear();
+
+        if( auto pcbSettings = dynamic_cast<KIGFX::PCB_RENDER_SETTINGS*>( settings ) )
+            pcbSettings->SetHighlightedNetChain( wxEmptyString );
+
         settings->SetHighlight( false );
         m_currentlyHighlighted.clear();
         m_toolMgr->GetView()->UpdateAllLayersColor();
@@ -2938,9 +2963,13 @@ int BOARD_INSPECTION_TOOL::HighlightNetChain( const TOOL_EVENT& aEvent )
 
 
     // If same chain already highlighted, clear highlight
-    if( !sig.IsEmpty() && sig == m_HighlightedNetChain )
+    if( !sig.IsEmpty() && sig == m_highlightedNetChain )
     {
-        m_HighlightedNetChain.clear();
+        m_highlightedNetChain.clear();
+
+        if( auto pcbSettings = dynamic_cast<KIGFX::PCB_RENDER_SETTINGS*>( settings ) )
+            pcbSettings->SetHighlightedNetChain( wxEmptyString );
+
         settings->SetHighlight( false );
         m_currentlyHighlighted.clear();
         m_toolMgr->GetView()->UpdateAllLayersColor();
@@ -2952,7 +2981,7 @@ int BOARD_INSPECTION_TOOL::HighlightNetChain( const TOOL_EVENT& aEvent )
     }
 
     // If we have a net highlight active but no chain highlight, convert to chain highlight
-    if( !sig.IsEmpty() && m_HighlightedNetChain.IsEmpty() && !m_currentlyHighlighted.empty() )
+    if( !sig.IsEmpty() && m_highlightedNetChain.IsEmpty() && !m_currentlyHighlighted.empty() )
     {
         // Determine chain from first highlighted net if cursor item had no chain
         if( sig.IsEmpty() )
@@ -2964,7 +2993,7 @@ int BOARD_INSPECTION_TOOL::HighlightNetChain( const TOOL_EVENT& aEvent )
         }
     }
 
-    m_HighlightedNetChain = sig;
+    m_highlightedNetChain = sig;
 
     if( KIGFX::PCB_RENDER_SETTINGS* pcbSettings = dynamic_cast<KIGFX::PCB_RENDER_SETTINGS*>( settings ) )
         pcbSettings->SetHighlightedNetChain( sig );
@@ -2990,14 +3019,14 @@ int BOARD_INSPECTION_TOOL::HighlightNetChain( const TOOL_EVENT& aEvent )
 
 int BOARD_INSPECTION_TOOL::ReplaceTerminalPad( const TOOL_EVENT& aEvent )
 {
-    if( m_HighlightedNetChain.IsEmpty() )
+    if( m_highlightedNetChain.IsEmpty() )
         return 0;
 
     // Parameters are passed as a single pair<old,new>
     std::pair<wxString, wxString> ids = aEvent.Parameter<std::pair<wxString, wxString>>();
     KIID oldId( ids.first );
     KIID newId( ids.second );
-    m_frame->GetBoard()->ReplaceNetChainTerminalPad( m_HighlightedNetChain, oldId, newId );
+    m_frame->GetBoard()->ReplaceNetChainTerminalPad( m_highlightedNetChain, oldId, newId );
     return 0;
 }
 

@@ -199,7 +199,8 @@ void PCB_REFERENCE_IMAGE::Serialize( google::protobuf::Any& aContainer ) const
     refImage.mutable_orientation()->set_value_degrees( m_referenceImage.GetOrientation().AsDegrees() );
     refImage.set_opacity( m_referenceImage.GetOpacity() );
 
-    aContainer.PackFrom( refImage );
+    if( !aContainer.PackFrom( refImage ) )
+        wxFAIL_MSG( wxT( "Failed to pack PCB_REFERENCE_IMAGE" ) );
 }
 
 
@@ -253,6 +254,13 @@ void PCB_REFERENCE_IMAGE::Mirror( const VECTOR2I& aMirrorRef, FLIP_DIRECTION aFl
 {
     // Mirror the content about the axis through aMirrorRef without changing layers.
     m_referenceImage.Flip( aMirrorRef, aFlipDirection );
+}
+
+
+void PCB_REFERENCE_IMAGE::Mirror( const SEG& aAxis )
+{
+    // Mirror the content about aAxis without changing layers.
+    m_referenceImage.Mirror( aAxis );
 }
 
 
@@ -455,7 +463,8 @@ static struct PCB_REFERENCE_IMAGE_DESC
 
         propMgr.ReplaceProperty( TYPE_HASH( BOARD_ITEM ), _HKI( "Layer" ),
                     new PROPERTY_ENUM<PCB_REFERENCE_IMAGE, PCB_LAYER_ID, BOARD_ITEM>( _HKI( "Associated Layer" ),
-                                &PCB_REFERENCE_IMAGE::SetLayer, &PCB_REFERENCE_IMAGE::GetLayer ) ).SetIsCopyable();
+                                &PCB_REFERENCE_IMAGE::SetLayer, &PCB_REFERENCE_IMAGE::GetLayer ) )
+                .SetIsCopyable();
 
         const wxString groupImage = _HKI( "Image Properties" );
 
@@ -493,6 +502,6 @@ static struct PCB_REFERENCE_IMAGE_DESC
         // clang-format on
 
         // For future use
-        const wxString greyscale = _HKI( "Greyscale" );
+        [[maybe_unused]] const wxString greyscale = _HKI( "Greyscale" );
     }
 } _PCB_REFERENCE_IMAGE_DESC;

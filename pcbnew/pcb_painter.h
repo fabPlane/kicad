@@ -172,6 +172,8 @@ public:
     bool IsGroupEditModeActive() const { return m_groupEditModeActive; }
     void SetGroupEditModeActive( bool aActive ) { m_groupEditModeActive = aActive; }
 
+    double GetOutsideGroupOpacity() const { return m_outsideGroupOpacity; }
+
     std::map<int, KIGFX::COLOR4D>& GetNetColorMap() { return m_netColors; }
 
     std::set<int>& GetHiddenNets() { return m_hiddenNets; }
@@ -265,6 +267,15 @@ public:
 
     virtual bool HasUniformColor( const VIEW_ITEM* aItem, int aLayer ) const override;
 
+    /**
+     * True when changing the board's visible layers from \p aBefore to \p aAfter changes what
+     * Draw() produces for \p aItem.
+     *
+     * The view hides and shows whole layers by itself, so this only covers drawing that reads the
+     * board's visible layers. Keep it in step with those reads.
+     */
+    static bool VisibleLayersChangeDrawing( const BOARD_ITEM* aItem, const LSET& aBefore, const LSET& aAfter );
+
 protected:
     PCB_VIEWERS_SETTINGS_BASE* viewer_settings();
 
@@ -341,13 +352,12 @@ protected:
      *
      * @param aItem the board item (for color lookup)
      * @param aCenter center point of the indicator
-     * @param aDrillSize diameter of the backdrill
-     * @param aStartLayer layer where backdrill starts
-     * @param aEndLayer layer where backdrill ends
+     * @param aBackdrillSize diameter of the backdrill
+     * @param aMustCutLayer layer the backdrill must cut
+     * @param aOffset dash offset (so that top and bottom backdrills at the same radius will alternate colors)
      */
-    void drawBackdrillIndicator( const BOARD_ITEM* aItem, const VECTOR2D& aCenter,
-                                 int aDrillSize, PCB_LAYER_ID aStartLayer,
-                                 PCB_LAYER_ID aEndLayer );
+    void drawBackdrillIndicator( const BOARD_ITEM* aItem, const VECTOR2D& aCenter, int aBackdrillSize,
+                                 PCB_LAYER_ID aMustCutLayer, int aOffset );
 
     /**
      * Draw post-machining indicator (dashed circle) at the given center point.

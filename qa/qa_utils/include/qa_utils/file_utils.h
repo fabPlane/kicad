@@ -21,6 +21,9 @@
 
 #include <filesystem>
 
+#include <boost/test/detail/global_typedef.hpp>
+#include <boost/test/tools/assertion_result.hpp>
+
 #include <wx/string.h>
 
 #include <wx_filename.h>
@@ -31,6 +34,14 @@ class SETTINGS_MANAGER;
 
 namespace KI_TEST
 {
+/**
+ * Convert between wx and std::filesystem paths.  On Windows a narrow std::filesystem path uses the ANSI
+ * codepage, not UTF-8, so both directions go through wide strings there.
+ */
+std::filesystem::path ToFsPath( const wxString& aPath );
+wxString              ToWxPath( const std::filesystem::path& aPath );
+
+
 /*
  * A uniquely-named temporary directory removed on destruction.
  */
@@ -61,7 +72,7 @@ public:
     const std::filesystem::path& Path() const { return m_path; }
 
     /// Get the path to the temporary directory as a wxString.
-    wxString PathStr() const { return wxString::FromUTF8( m_path.string() ); }
+    wxString PathStr() const { return ToWxPath( m_path ); }
 
     /**
      * Get the path to a direct child of the temporary directory as a wxString,
@@ -82,6 +93,8 @@ public:
     /**
      * Create and return the path to a direct child directory.
      *
+     * @param aName Name of the child directory, must be a single path component
+     * @throws std::invalid_argument if aName is not a single path component
      * @throws std::runtime_error if the directory cannot be created
      */
     std::filesystem::path CreateChildDir( const wxString& aName ) const;
@@ -89,6 +102,8 @@ public:
     /**
      * Create and return the path to a direct child directory as a wxString.
      *
+     * @param aName Name of the child directory, must be a single path component
+     * @throws std::invalid_argument if aName is not a single path component
      * @throws std::runtime_error if the directory cannot be created
      */
     wxString CreateChildDirStr( const wxString& aName ) const;
@@ -96,6 +111,8 @@ public:
     /**
      * Create and return the path to a direct child file.
      *
+     * @param aName Name of the child file, must be a single path component
+     * @throws std::invalid_argument if aName is not a single path component
      * @throws std::runtime_error if the file cannot be created
      */
     std::filesystem::path CreateChildFile( const wxString& aName ) const;
@@ -103,6 +120,8 @@ public:
     /**
      * Create and return the path to a direct child file as a wxString.
      *
+     * @param aName Name of the child file, must be a single path component
+     * @throws std::invalid_argument if aName is not a single path component
      * @throws std::runtime_error if the file cannot be created
      */
     wxString CreateChildFileStr( const wxString& aName ) const;
@@ -190,5 +209,10 @@ public:
 private:
     SCOPED_TEMP_DIR m_dir;
 };
+
+/**
+ * A Boost precondition for a test that makes a save fail by clearing a file's write bits, which the superuser ignores.
+ */
+boost::test_tools::assertion_result WriteBitsBind( boost::unit_test::test_unit_id );
 
 } // namespace KI_TEST

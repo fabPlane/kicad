@@ -189,8 +189,9 @@ LIB_TREE_MODEL_ADAPTER::ResetTreeView::ResetTreeView( LIB_TREE_MODEL_ADAPTER& aA
 
 LIB_TREE_MODEL_ADAPTER::ResetTreeView::~ResetTreeView()
 {
-    m_adapter.AfterReset();
+    // AfterReset rebuilds the view from GetParent(), which reports no parents while frozen
     m_adapter.Thaw();
+    m_adapter.AfterReset();
 }
 
 
@@ -259,8 +260,13 @@ void LIB_TREE_MODEL_ADAPTER::SaveSettings()
 
         for( const std::pair<const wxString, wxDataViewColumn*>& pair : m_colNameMap )
         {
-            if( pair.second && IsValidColumnWidth( pair.second->GetWidth() ) )
-                m_cfg.column_widths[pair.first] = pair.second->GetWidth();
+            if( !pair.second )
+                continue;
+
+            int width = KIPLATFORM::UI::GetColumnWidth( pair.second ) - redrawNudge( pair.first );
+
+            if( IsValidColumnWidth( width ) )
+                m_cfg.column_widths[pair.first] = width;
         }
 
         m_cfg.open_libs = GetOpenLibs();
@@ -375,8 +381,10 @@ void LIB_TREE_MODEL_ADAPTER::UpdateSearchString( const wxString& aSearch, bool a
         m_tree.UpdateScore( termMatchers, m_filter );
 
         m_tree.SortNodes( m_sort_mode == BEST_MATCH );
-        AfterReset();
+
+        // AfterReset rebuilds the view from GetParent(), which reports no parents while frozen
         Thaw();
+        AfterReset();
 
         // Move showResults inside the update locker to ensure all tree manipulation
         // (including ExpandAncestors) happens while the window is frozen. This prevents
@@ -431,6 +439,7 @@ void LIB_TREE_MODEL_ADAPTER::recreateColumns()
     m_columns.clear();
     m_colIdxMap.clear();
     m_colNameMap.clear();
+    m_redrawNudge.clear();
 
     // The Item column is always shown
     doAddColumn( wxT( "Item" ) );
@@ -701,7 +710,7 @@ void LIB_TREE_MODEL_ADAPTER::RefreshTree()
             if( !colPtr )
                 continue;
 
-            int width = colPtr->GetWidth();
+            int width = KIPLATFORM::UI::GetColumnWidth( colPtr ) - redrawNudge( colName );
 
             // Keep the prior sane width if a DPI change handed back a corrupt one.
             if( IsValidColumnWidth( width ) )
@@ -709,13 +718,11 @@ void LIB_TREE_MODEL_ADAPTER::RefreshTree()
         }
     }
 
-    auto colIt = m_colWidths.begin();
+    // The nudge only forces the redraw; the widths read back and saved leave it out
+    auto first = m_colWidths.begin();
+    auto second = std::next( first );
 
-    colIt->second += walk;
-    colIt++;
-
-    if( colIt != m_colWidths.end() )
-        colIt->second -= walk;
+    m_redrawNudge.clear();
 
     for( const auto& [ colName, colPtr ] : m_colNameMap )
     {
@@ -723,10 +730,23 @@ void LIB_TREE_MODEL_ADAPTER::RefreshTree()
             continue;
 
         wxASSERT( m_colWidths.count( colName ) );
-        colPtr->SetWidth( m_colWidths[ colName ] );
+
+        if( colName == first->first )
+            m_redrawNudge[colName] = walk;
+        else if( second != m_colWidths.end() && colName == second->first )
+            m_redrawNudge[colName] = -walk;
+
+        colPtr->SetWidth( m_colWidths[ colName ] + redrawNudge( colName ) );
     }
 
     walk = -walk;
+}
+
+
+int LIB_TREE_MODEL_ADAPTER::redrawNudge( const wxString& aColumn ) const
+{
+    auto it = m_redrawNudge.find( aColumn );
+    return it == m_redrawNudge.end() ? 0 : it->second;
 }
 
 
@@ -883,6 +903,10 @@ const LIB_TREE_NODE* LIB_TREE_MODEL_ADAPTER::showResults()
                     if( n->m_Name.StartsWith( "-- " ) )
                         return -1; // Skip this node and its children
 
+                    // A row the filter hides has no native row to select
+                    if( n->m_Score <= 0 )
+                        return -1;
+
                     if( n->m_Type == LIB_TREE_NODE::TYPE::ITEM
                               && ( n->m_Children.empty() || !m_preselect_unit )
                               && m_preselect_lib_id == n->m_LibId )
@@ -921,6 +945,9 @@ const LIB_TREE_NODE* LIB_TREE_MODEL_ADAPTER::showResults()
         recursiveDescent( m_tree,
                 [&]( const LIB_TREE_NODE* n )
                 {
+                    if( n->m_Score <= 0 )
+                        return -1;
+
                     if( n->m_Type == LIB_TREE_NODE::TYPE::ITEM )
                     {
                         firstMatch = n;

@@ -192,7 +192,6 @@ PCB_SELECTION_TOOL::PCB_SELECTION_TOOL() :
         SELECTION_TOOL( "common.InteractiveSelection" ),
         m_frame( NULL ),
         m_enteredGroup( NULL ),
-        m_nonModifiedCursor( KICURSOR::ARROW ),
         m_lockedItemsFiltered( false ),
         m_priv( nullptr )
 {
@@ -388,7 +387,7 @@ bool PCB_SELECTION_TOOL::Selectable( const BOARD_ITEM* aItem, bool checkVisibili
 }
 
 
-bool PCB_SELECTION_TOOL::selectionContains( const VECTOR2I& aPoint ) const
+bool PCB_SELECTION_TOOL::SelectionContains( const VECTOR2I& aPoint ) const
 {
     return false;
 }

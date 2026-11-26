@@ -115,9 +115,14 @@ void LTSPICE_SCHEMATIC::Load( SCHEMATIC* aSchematic, SCH_SHEET* aRootSheet, cons
 
     // TODO: Custom paths go here (non-recursive)
 
-    // Default LTspice libs
-    GetAscAndAsyFilePaths( m_ltspiceDataDir.GetPathWithSep() + wxS( "sub" ), true, m_ascNamesMap, m_asyNamesMap );
-    GetAscAndAsyFilePaths( m_ltspiceDataDir.GetPathWithSep() + wxS( "sym" ), true, m_ascNamesMap, m_asyNamesMap );
+    // Default LTspice libs, which are absent when LTspice is not installed
+    for( const wxString libDir : { wxS( "sub" ), wxS( "sym" ) } )
+    {
+        wxString path = m_ltspiceDataDir.GetPathWithSep() + libDir;
+
+        if( wxDirExists( path ) )
+            GetAscAndAsyFilePaths( path, true, m_ascNamesMap, m_asyNamesMap );
+    }
 
     wxString              rootElementName = aLibraryFileName.GetName().Lower();
     std::vector<wxString> uniqueAscNameKeys;
@@ -292,7 +297,7 @@ void LTSPICE_SCHEMATIC::Load( SCHEMATIC* aSchematic, SCH_SHEET* aRootSheet, cons
                        const SCH_FIELD* fieldA = sheetA->GetField( SCH_IO_LTSPICE_PARSER::LT_INSTNAME_FIELD );
                        const SCH_FIELD* fieldB = sheetB->GetField( SCH_IO_LTSPICE_PARSER::LT_INSTNAME_FIELD );
                        int              cmp = StrNumCmp( fieldA ? fieldA->GetText() : wxString(),
-                                                         fieldB ? fieldB->GetText() : wxString(), true );
+                                                         fieldB ? fieldB->GetText() : wxString(), CMP_T::IGNORE_CASE );
 
                        if( cmp != 0 )
                            return cmp < 0;
@@ -332,7 +337,7 @@ void LTSPICE_SCHEMATIC::Load( SCHEMATIC* aSchematic, SCH_SHEET* aRootSheet, cons
         for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
         {
             SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
-            wxString    ref = symbol->GetRef( &path );
+            wxString    ref = symbol->GetBaseRef( &path );
 
             symbol->SetRef( &path, ref + suffix );
         }
@@ -682,11 +687,11 @@ LTSPICE_SCHEMATIC::LT_SYMBOL LTSPICE_SCHEMATIC::ParseSymbol( const wxString& aSy
         {
             tokensSizeRangeCheck( tokens.size(), 6, 7, lineNumber, aSymbolName );
 
-            wxString lineWidth = tokens[1];
-            wxString startPointX = tokens[2];
-            wxString startPointY = tokens[3];
-            wxString endPointX = tokens[4];
-            wxString endPointY = tokens[5];
+            const wxString& lineWidth = tokens[1];
+            const wxString& startPointX = tokens[2];
+            const wxString& startPointY = tokens[3];
+            const wxString& endPointX = tokens[4];
+            const wxString& endPointY = tokens[5];
 
             LINE lt_line;
             lt_line.LineWidth = getLineWidth( lineWidth );
@@ -697,7 +702,7 @@ LTSPICE_SCHEMATIC::LT_SYMBOL LTSPICE_SCHEMATIC::ParseSymbol( const wxString& aSy
 
             if( tokens.size() == 7 )
             {
-                wxString lineStyle = tokens[6];
+                const wxString& lineStyle = tokens[6];
                 lineStyleNumber = integerCheck( lineStyle, lineNumber, aSymbolName );
             }
 
@@ -709,11 +714,11 @@ LTSPICE_SCHEMATIC::LT_SYMBOL LTSPICE_SCHEMATIC::ParseSymbol( const wxString& aSy
         {
             tokensSizeRangeCheck( tokens.size(), 6, 7, lineNumber, aSymbolName );
 
-            wxString lineWidth = tokens[1];
-            wxString botRightX = tokens[2];
-            wxString botRightY = tokens[3];
-            wxString topLeftX = tokens[4];
-            wxString topRightY = tokens[5];
+            const wxString& lineWidth = tokens[1];
+            const wxString& botRightX = tokens[2];
+            const wxString& botRightY = tokens[3];
+            const wxString& topLeftX = tokens[4];
+            const wxString& topRightY = tokens[5];
 
             RECTANGLE rect;
             rect.LineWidth = getLineWidth( lineWidth );
@@ -724,7 +729,7 @@ LTSPICE_SCHEMATIC::LT_SYMBOL LTSPICE_SCHEMATIC::ParseSymbol( const wxString& aSy
 
             if( tokens.size() == 7 )
             {
-                wxString lineStyle = tokens[6];
+                const wxString& lineStyle = tokens[6];
                 lineStyleNumber = integerCheck( lineStyle, lineNumber, aSymbolName );
             }
 
@@ -740,11 +745,11 @@ LTSPICE_SCHEMATIC::LT_SYMBOL LTSPICE_SCHEMATIC::ParseSymbol( const wxString& aSy
              */
             tokensSizeRangeCheck( tokens.size(), 6, 7, lineNumber, aSymbolName );
 
-            wxString lineWidth = tokens[1];
-            wxString botRightX = tokens[2];
-            wxString botRightY = tokens[3];
-            wxString topLeftX = tokens[4];
-            wxString topRightY = tokens[5];
+            const wxString& lineWidth = tokens[1];
+            const wxString& botRightX = tokens[2];
+            const wxString& botRightY = tokens[3];
+            const wxString& topLeftX = tokens[4];
+            const wxString& topRightY = tokens[5];
 
             CIRCLE circle;
             circle.LineWidth = getLineWidth( lineWidth );
@@ -755,7 +760,7 @@ LTSPICE_SCHEMATIC::LT_SYMBOL LTSPICE_SCHEMATIC::ParseSymbol( const wxString& aSy
 
             if( tokens.size() == 7 )
             {
-                wxString lineStyle = tokens[6];
+                const wxString& lineStyle = tokens[6];
                 lineStyleNumber = integerCheck( lineStyle, lineNumber, aSymbolName );
             }
 
@@ -772,15 +777,15 @@ LTSPICE_SCHEMATIC::LT_SYMBOL LTSPICE_SCHEMATIC::ParseSymbol( const wxString& aSy
              */
             tokensSizeRangeCheck( tokens.size(), 10, 11, lineNumber, aSymbolName );
 
-            wxString lineWidth = tokens[1];
-            wxString botRightX = tokens[2];
-            wxString botRightY = tokens[3];
-            wxString topLeftX = tokens[4];
-            wxString topRightY = tokens[5];
-            wxString arcStartPointX = tokens[6];
-            wxString arcStartPointY = tokens[7];
-            wxString arcEndPointX = tokens[8];
-            wxString arcEndPointY = tokens[9];
+            const wxString& lineWidth = tokens[1];
+            const wxString& botRightX = tokens[2];
+            const wxString& botRightY = tokens[3];
+            const wxString& topLeftX = tokens[4];
+            const wxString& topRightY = tokens[5];
+            const wxString& arcStartPointX = tokens[6];
+            const wxString& arcStartPointY = tokens[7];
+            const wxString& arcEndPointX = tokens[8];
+            const wxString& arcEndPointY = tokens[9];
 
             ARC arc;
             arc.LineWidth = getLineWidth( lineWidth );
@@ -793,7 +798,7 @@ LTSPICE_SCHEMATIC::LT_SYMBOL LTSPICE_SCHEMATIC::ParseSymbol( const wxString& aSy
 
             if( tokens.size() == 11 )
             {
-                wxString lineStyle = tokens[10];
+                const wxString& lineStyle = tokens[10];
                 lineStyleNumber = integerCheck( lineStyle, lineNumber, aSymbolName );
             }
 
@@ -805,11 +810,11 @@ LTSPICE_SCHEMATIC::LT_SYMBOL LTSPICE_SCHEMATIC::ParseSymbol( const wxString& aSy
         {
             tokensSizeRangeCheck( tokens.size(), 6, 6, lineNumber, aSymbolName );
 
-            wxString number = tokens[1];
-            wxString windowPosX = tokens[2];
-            wxString windowPosY = tokens[3];
-            wxString justification = tokens[4];
-            wxString fontSize = tokens[5];
+            const wxString& number = tokens[1];
+            const wxString& windowPosX = tokens[2];
+            const wxString& windowPosY = tokens[3];
+            const wxString& justification = tokens[4];
+            const wxString& fontSize = tokens[5];
 
             LT_WINDOW window;
             window.WindowNumber = integerCheck( number, lineNumber, aSymbolName );
@@ -863,10 +868,10 @@ LTSPICE_SCHEMATIC::LT_SYMBOL LTSPICE_SCHEMATIC::ParseSymbol( const wxString& aSy
         {
             tokensSizeRangeCheck( tokens.size(), 5, 5, lineNumber, aSymbolName );
 
-            wxString pinLocationX = tokens[1];
-            wxString pinLocationY = tokens[2];
-            wxString Justification = tokens[3];
-            wxString nameOffSet = tokens[4];
+            const wxString& pinLocationX = tokens[1];
+            const wxString& pinLocationY = tokens[2];
+            const wxString& Justification = tokens[3];
+            const wxString& nameOffSet = tokens[4];
 
             LT_PIN pin;
             pin.PinLocation = pointCheck( pinLocationX, pinLocationY, lineNumber,aSymbolName );
@@ -890,7 +895,7 @@ LTSPICE_SCHEMATIC::LT_SYMBOL LTSPICE_SCHEMATIC::ParseSymbol( const wxString& aSy
         {
             tokensSizeRangeCheck( tokens.size(), 2, 2, lineNumber, aSymbolName );
 
-            wxString symbolType = tokens[1];
+            const wxString& symbolType = tokens[1];
 
             lt_symbol.SymbolType = getSymbolType( symbolType );
         }
@@ -957,9 +962,9 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
             {
                 tokensSizeRangeCheck( tokens.size(), 4, 4, lineNumber, fileName );
 
-                wxString sheetNumber = tokens[1];
-                wxString sheetWidth = tokens[2];
-                wxString sheetHeight = tokens[3];
+                const wxString& sheetNumber = tokens[1];
+                const wxString& sheetWidth = tokens[2];
+                const wxString& sheetHeight = tokens[3];
 
                 ascFile.SheetNumber = integerCheck( sheetNumber, lineNumber, fileName );
                 ascFile.SheetSize = pointCheck( sheetWidth, sheetHeight, lineNumber, fileName );
@@ -968,10 +973,10 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
             {
                 tokensSizeRangeCheck( tokens.size(), 5, 5, lineNumber, fileName );
 
-                wxString symbolName = tokens[1];
-                wxString posX = tokens[2];
-                wxString posY = tokens[3];
-                wxString rotate_mirror_option = tokens[4];
+                wxString        symbolName = tokens[1];
+                const wxString& posX = tokens[2];
+                const wxString& posY = tokens[3];
+                const wxString& rotate_mirror_option = tokens[4];
 
                 symbolName.Replace( '\\', '/' );
 
@@ -983,16 +988,18 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
                     {
                         wxString fullName = wxFileName( fileName ).GetFullName();
 
-                        THROW_IO_ERROR(
-                                wxString::Format( _( "Missing symbol file '%s.asy', referenced from '%s' at line %d" ),
-                                                  symbolName, fullName, lineNumber ) );
+                        THROW_IO_ERROR( wxString::Format( _( "Missing symbol file '%s.asy', referenced from '%s' "
+                                                             "at line %d" ),
+                                                          symbolName,
+                                                          fullName,
+                                                          lineNumber ) );
                     }
 
                     if( !m_asyFileCache.contains( m_asyNamesMap.at( key ) ) )
                         THROW_IO_ERROR( wxString::Format( _( "Unable to read '%s'" ), m_asyNamesMap.at( key ) ) );
 
-                    LT_SYMBOL lt_symbol =
-                            ParseSymbol( symbolName, m_asyFileCache.at( m_asyNamesMap.at( key ) ), ascFile );
+                    LT_SYMBOL lt_symbol = ParseSymbol( symbolName, m_asyFileCache.at( m_asyNamesMap.at( key ) ),
+                                                       ascFile );
 
                     lt_symbol.AsyKey = key;
                     lt_symbol.Offset = pointCheck( posX, posY, lineNumber, fileName );
@@ -1003,8 +1010,9 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
                 }
                 catch( IO_ERROR& e )
                 {
-                    if( m_reporter )
-                        m_reporter->Report( e.What(), RPT_SEVERITY_ERROR );
+                    // the box stands in for the part, so this is not an error, and once per symbol is enough
+                    if( m_reporter && m_missingSymbols.insert( symbolName.Lower() ).second )
+                        m_reporter->Report( e.What(), RPT_SEVERITY_WARNING );
 
                     // Use dummy symbol
                     LT_SYMBOL lt_symbol = MakeDummySymbol( symbolName );
@@ -1019,10 +1027,10 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
             {
                 tokensSizeRangeCheck( tokens.size(), 5, 5, lineNumber, fileName );
 
-                wxString startPointX = tokens[1];
-                wxString startPointY = tokens[2];
-                wxString endPointX = tokens[3];
-                wxString endPointY = tokens[4];
+                const wxString& startPointX = tokens[1];
+                const wxString& startPointY = tokens[2];
+                const wxString& endPointX = tokens[3];
+                const wxString& endPointY = tokens[4];
 
                 WIRE wire;
                 wire.Start = pointCheck( startPointX, startPointY, lineNumber, fileName );
@@ -1036,9 +1044,9 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
             {
                 tokensSizeRangeCheck( tokens.size(), 4, 4, lineNumber, fileName );
 
-                wxString posX = tokens[1];
-                wxString posY = tokens[2];
-                wxString name = tokens[3];
+                const wxString& posX = tokens[1];
+                const wxString& posY = tokens[2];
+                const wxString& name = tokens[3];
 
                 FLAG flag;
                 flag.Offset = pointCheck( posX, posY, lineNumber, fileName );
@@ -1052,9 +1060,9 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
             {
                 tokensSizeRangeCheck( tokens.size(), 4, 4, lineNumber, fileName );
 
-                wxString posX = tokens[1];
-                wxString posY = tokens[2];
-                wxString expression = tokens[3];
+                const wxString& posX = tokens[1];
+                const wxString& posY = tokens[2];
+                const wxString& expression = tokens[3];
 
                 DATAFLAG flag;
                 flag.Offset = pointCheck( posX, posY, lineNumber, fileName );
@@ -1068,11 +1076,11 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
             {
                 tokensSizeRangeCheck( tokens.size(), 6, 6, lineNumber, fileName );
 
-                wxString number = tokens[1];
-                wxString windowPosX = tokens[2];
-                wxString windowPosY = tokens[3];
-                wxString justification = tokens[4];
-                wxString fontSize = tokens[5];
+                const wxString& number = tokens[1];
+                const wxString& windowPosX = tokens[2];
+                const wxString& windowPosY = tokens[3];
+                const wxString& justification = tokens[4];
+                const wxString& fontSize = tokens[5];
 
                 LT_SYMBOL* symbol = &ascFile.Symbols.back();
                 LT_WINDOW* window = nullptr;
@@ -1119,11 +1127,11 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
             {
                 tokensSizeRangeCheck( tokens.size(), 6, 7, lineNumber, fileName );
 
-                wxString lineWidth = tokens[1];
-                wxString startPointX = tokens[2];
-                wxString startPointY = tokens[3];
-                wxString endPointX = tokens[4];
-                wxString endPointY = tokens[5];
+                const wxString& lineWidth = tokens[1];
+                const wxString& startPointX = tokens[2];
+                const wxString& startPointY = tokens[3];
+                const wxString& endPointX = tokens[4];
+                const wxString& endPointY = tokens[5];
 
                 LINE lt_line;
                 lt_line.LineWidth = getLineWidth( lineWidth );
@@ -1134,7 +1142,7 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
 
                 if( tokens.size() == 7 )
                 {
-                    wxString lineStyle = tokens[6];
+                    const wxString& lineStyle = tokens[6];
                     lineStyleNumber = integerCheck( lineStyle, lineNumber, fileName );
                 }
 
@@ -1149,10 +1157,10 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
                 tokensSizeRangeCheck( tokens.size(), 6, 7, lineNumber, fileName );
 
                 // wxString lineWidth = tokens[1];
-                wxString botRightX = tokens[2];
-                wxString botRightY = tokens[3];
-                wxString topLeftX = tokens[4];
-                wxString topRightY = tokens[5];
+                const wxString& botRightX = tokens[2];
+                const wxString& botRightY = tokens[3];
+                const wxString& topLeftX = tokens[4];
+                const wxString& topRightY = tokens[5];
 
                 RECTANGLE rect;
                 rect.LineWidth = getLineWidth( tokens[1] );
@@ -1163,7 +1171,7 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
 
                 if( tokens.size() == 7 )
                 {
-                    wxString lineStyle = tokens[6];
+                    const wxString& lineStyle = tokens[6];
                     lineStyleNumber = integerCheck( lineStyle, lineNumber, fileName );
                 }
 
@@ -1177,11 +1185,11 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
             {
                 tokensSizeRangeCheck( tokens.size(), 6, 7, lineNumber, fileName );
 
-                wxString lineWidth = tokens[1];
-                wxString botRightX = tokens[2];
-                wxString botRightY = tokens[3];
-                wxString topLeftX = tokens[4];
-                wxString topRightY = tokens[5];
+                const wxString& lineWidth = tokens[1];
+                const wxString& botRightX = tokens[2];
+                const wxString& botRightY = tokens[3];
+                const wxString& topLeftX = tokens[4];
+                const wxString& topRightY = tokens[5];
 
                 CIRCLE circle;
                 circle.LineWidth = getLineWidth( lineWidth );
@@ -1192,7 +1200,7 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
 
                 if( tokens.size() == 7 )
                 {
-                    wxString lineStyle = tokens[6];
+                    const wxString& lineStyle = tokens[6];
                     lineStyleNumber = integerCheck( lineStyle, lineNumber, fileName );
                 }
 
@@ -1211,15 +1219,15 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
                  */
                 tokensSizeRangeCheck( tokens.size(), 10, 11, lineNumber, fileName );
 
-                wxString lineWidth = tokens[1];
-                wxString botRightX = tokens[2];
-                wxString botRightY = tokens[3];
-                wxString topLeftX = tokens[4];
-                wxString topRightY = tokens[5];
-                wxString arcStartPointX = tokens[6];
-                wxString arcStartPointY = tokens[7];
-                wxString arcEndPointX = tokens[8];
-                wxString arcEndPointY = tokens[9];
+                const wxString& lineWidth = tokens[1];
+                const wxString& botRightX = tokens[2];
+                const wxString& botRightY = tokens[3];
+                const wxString& topLeftX = tokens[4];
+                const wxString& topRightY = tokens[5];
+                const wxString& arcStartPointX = tokens[6];
+                const wxString& arcStartPointY = tokens[7];
+                const wxString& arcEndPointX = tokens[8];
+                const wxString& arcEndPointY = tokens[9];
 
                 ARC arc;
                 arc.LineWidth = getLineWidth( lineWidth );
@@ -1232,7 +1240,7 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
 
                 if( tokens.size() == 11 )
                 {
-                    wxString lineStyle = tokens[10];
+                    const wxString& lineStyle = tokens[10];
                     lineStyleNumber = integerCheck( lineStyle, lineNumber, fileName );
                 }
 
@@ -1246,9 +1254,9 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
             {
                 tokensSizeRangeCheck( tokens.size(), 4, 4, lineNumber, fileName );
 
-                wxString pinLocationX = tokens[1];
-                wxString pinLocationY = tokens[2];
-                wxString pinPolarity = tokens[3];
+                const wxString& pinLocationX = tokens[1];
+                const wxString& pinLocationY = tokens[2];
+                const wxString& pinPolarity = tokens[3];
 
                 IOPIN iopin;
                 iopin.Location = pointCheck( pinLocationX, pinLocationY, lineNumber, fileName );
@@ -1290,10 +1298,10 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
             {
                 tokensSizeRangeCheck( tokens.size(), 5, 5, lineNumber, fileName );
 
-                wxString startPointX = tokens[1];
-                wxString startPointY = tokens[2];
-                wxString endPointX = tokens[3];
-                wxString endPointY = tokens[4];
+                const wxString& startPointX = tokens[1];
+                const wxString& startPointY = tokens[2];
+                const wxString& endPointX = tokens[3];
+                const wxString& endPointY = tokens[4];
 
                 BUSTAP bustap;
                 bustap.Start = pointCheck( startPointX, startPointY, lineNumber, fileName );
@@ -1305,7 +1313,8 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
             }
             else if( element == "VERSION" )
             {
-                wxString versionNumber = tokens[1];
+                const wxString& versionNumber = tokens[1];
+
                 if( versionNumber.Contains( '.' ) )
                 {
                     wxString majorStr = versionNumber.BeforeFirst( '.' );
@@ -1327,5 +1336,3 @@ LTSPICE_SCHEMATIC::ParseAscFiles( const std::map<wxString, wxString>& aAscFilesC
 
     return ascFiles;
 }
-
-

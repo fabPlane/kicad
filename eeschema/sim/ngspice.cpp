@@ -73,7 +73,8 @@ NGSPICE::NGSPICE() :
         m_ngSpice_Running( nullptr ),
         m_ngSpice_LockRealloc( nullptr ),
         m_ngSpice_UnlockRealloc( nullptr ),
-        m_error( false )
+        m_error( false ),
+        m_lastStderrSeverity( RPT_SEVERITY_UNDEFINED )
 {
     init_dll();
 }
@@ -308,10 +309,19 @@ bool NGSPICE::Attach( const std::shared_ptr<SIMULATION_MODEL>& aModel, const wxS
 }
 
 
+void NGSPICE::resetStderrSeverity()
+{
+    std::lock_guard<std::mutex> lock( m_reporterMutex );
+    m_lastStderrSeverity = RPT_SEVERITY_UNDEFINED;
+}
+
+
 bool NGSPICE::LoadNetlist( const std::string& aNetlist )
 {
     LOCALE_IO         c_locale; // ngspice works correctly only with C locale
     std::stringstream ss( aNetlist );
+
+    resetStderrSeverity();
 
     // Own the deck as strings so a bad_alloc mid-build cannot leak or leave m_netlist
     // half-populated.  ngSpice_Circ only reads the array during the call, so plain string
@@ -348,6 +358,8 @@ bool NGSPICE::Run()
 
     // Install signal handlers to catch ngspice crashes in the background thread
     installSignalHandlers();
+
+    resetStderrSeverity();
 
     return Command( "bg_run" );     // bg_* commands execute in a separate thread
 }
@@ -728,6 +740,38 @@ bool NGSPICE::loadCodemodels( const std::string& aPath )
 }
 
 
+/**
+ * Severity of an ngspice line for the console filter.  An unprefixed stderr line continues the previous
+ * warning, or is an error ("Timestep too small"); a stdout line ends the continuation.
+ */
+static SEVERITY classifySpiceLine( const wxString& aText, bool aStderr, SEVERITY& aLastStderr )
+{
+    wxString tag = aText;
+
+    tag.Trim( false );
+    tag.MakeUpper();
+
+    SEVERITY severity = RPT_SEVERITY_UNDEFINED;
+
+    if( tag.StartsWith( wxS( "WARNING" ) ) )
+        severity = RPT_SEVERITY_WARNING;
+    else if( tag.StartsWith( wxS( "ERROR" ) ) || tag.StartsWith( wxS( "FATAL" ) ) )
+        severity = RPT_SEVERITY_ERROR;
+    else if( !aStderr )
+        severity = RPT_SEVERITY_UNDEFINED;
+    else if( tag.StartsWith( wxS( "NOTE" ) ) || tag.StartsWith( wxS( "USING " ) ) )
+        severity = RPT_SEVERITY_INFO;
+    else if( aLastStderr == RPT_SEVERITY_WARNING )
+        severity = RPT_SEVERITY_WARNING;
+    else
+        severity = RPT_SEVERITY_ERROR;
+
+    aLastStderr = aStderr ? severity : RPT_SEVERITY_UNDEFINED;
+
+    return severity;
+}
+
+
 int NGSPICE::cbSendChar( char* aWhat, int aId, void* aUser )
 {
     NGSPICE* sim = reinterpret_cast<NGSPICE*>( aUser );
@@ -737,14 +781,21 @@ int NGSPICE::cbSendChar( char* aWhat, int aId, void* aUser )
 
     if( reporter )
     {
+        bool fromStderr = strncasecmp( aWhat, "stderr ", 7 ) == 0;
+
         // strip stdout/stderr from the line
-        if( ( strncasecmp( aWhat, "stdout ", 7 ) == 0 )
-                || ( strncasecmp( aWhat, "stderr ", 7 ) == 0 ) )
+        if( ( strncasecmp( aWhat, "stdout ", 7 ) == 0 ) || fromStderr )
         {
             aWhat += 7;
         }
 
-        reporter->Report( aWhat );
+        // ngspice writes UTF-8, but paths may arrive in the local encoding.
+        wxString text = wxString::FromUTF8( aWhat );
+
+        if( text.IsEmpty() && *aWhat )
+            text = wxString( aWhat );
+
+        reporter->Report( text, classifySpiceLine( text, fromStderr, sim->m_lastStderrSeverity ) );
     }
 
     return 0;
@@ -797,7 +848,8 @@ int NGSPICE::cbControlledExit( int aStatus, NG_BOOL aImmediate, NG_BOOL aExitOnQ
         if( reporter )
         {
             reporter->Report( _( "Simulation terminated by ngspice. This may be caused by insufficient "
-                                 "memory or an internal error. The simulator will be reset." ) );
+                                 "memory or an internal error. The simulator will be reset." ),
+                              RPT_SEVERITY_ERROR );
         }
 
         if( stateListener )

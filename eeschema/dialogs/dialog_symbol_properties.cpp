@@ -52,10 +52,6 @@
 #include <panel_symbol_pin_map.h>
 
 
-wxDEFINE_EVENT( SYMBOL_DELAY_FOCUS, wxCommandEvent );
-wxDEFINE_EVENT( SYMBOL_DELAY_SELECTION, wxCommandEvent );
-
-
 enum PIN_TABLE_COL_ORDER
 {
     COL_NUMBER,
@@ -332,7 +328,10 @@ DIALOG_SYMBOL_PROPERTIES::DIALOG_SYMBOL_PROPERTIES( SCH_EDIT_FRAME* aParent, SCH
     std::vector<EMBEDDED_FILES*> embeddedFilesStack;
 
     if( m_part )
+    {
+        m_part->AppendParentEmbeddedFiles( embeddedFilesStack );
         embeddedFilesStack.push_back( m_part->GetEmbeddedFiles() );
+    }
 
     embeddedFilesStack.push_back( m_symbol->Schematic() );
 
@@ -427,16 +426,9 @@ DIALOG_SYMBOL_PROPERTIES::DIALOG_SYMBOL_PROPERTIES( SCH_EDIT_FRAME* aParent, SCH
     // wxFormBuilder doesn't include this event...
     m_fieldsGrid->Bind( wxEVT_GRID_CELL_CHANGING, &DIALOG_SYMBOL_PROPERTIES::OnGridCellChanging, this );
     m_pinGrid->Bind( wxEVT_GRID_COL_SORT, &DIALOG_SYMBOL_PROPERTIES::OnPinTableColSort, this );
-    Bind( SYMBOL_DELAY_FOCUS, &DIALOG_SYMBOL_PROPERTIES::HandleDelayedFocus, this );
-    Bind( SYMBOL_DELAY_SELECTION, &DIALOG_SYMBOL_PROPERTIES::HandleDelayedSelection, this );
 
-    wxCommandEvent* evt = new wxCommandEvent( SYMBOL_DELAY_SELECTION );
-    evt->SetClientData( new VECTOR2I( 0, FDC_VALUE ) );
-    QueueEvent( evt );
-
-    evt = new wxCommandEvent( SYMBOL_DELAY_FOCUS );
-    evt->SetClientData( new VECTOR2I( 0, FDC_VALUE ) );
-    QueueEvent( evt );
+    CallAfter( &DIALOG_SYMBOL_PROPERTIES::HandleDelayedSelection, 0, FDC_VALUE );
+    CallAfter( &DIALOG_SYMBOL_PROPERTIES::HandleDelayedFocus, 0, FDC_VALUE );
 
     // Remind user that they are editing the current variant.
     wxString variantName = aParent->Schematic().GetCurrentVariant();
@@ -480,8 +472,6 @@ DIALOG_SYMBOL_PROPERTIES::~DIALOG_SYMBOL_PROPERTIES()
 
     m_fieldsGrid->Unbind( wxEVT_GRID_CELL_CHANGING, &DIALOG_SYMBOL_PROPERTIES::OnGridCellChanging, this );
     m_pinGrid->Unbind( wxEVT_GRID_COL_SORT, &DIALOG_SYMBOL_PROPERTIES::OnPinTableColSort, this );
-    Unbind( SYMBOL_DELAY_FOCUS, &DIALOG_SYMBOL_PROPERTIES::HandleDelayedFocus, this );
-    Unbind( SYMBOL_DELAY_SELECTION, &DIALOG_SYMBOL_PROPERTIES::HandleDelayedSelection, this );
 
     // Delete the GRID_TRICKS.
     m_fieldsGrid->PopEventHandler( true );
@@ -651,6 +641,10 @@ bool DIALOG_SYMBOL_PROPERTIES::TransferDataToWindow()
     m_pinMapPanel->SetSymbol( libSymbol );
     m_pinMapPanel->TransferDataToWindow();
 
+    const bool hasSuffix = !schematic.GetRefSuffix( sheetPath ).IsEmpty();
+    m_composedRefLabel->Show( hasSuffix );
+    m_composedRef->Show( hasSuffix );
+
     m_fieldsGrid->Layout();
     Layout();
     m_fieldsGrid->SetMinVisibleRows( this, 4 );
@@ -776,12 +770,20 @@ bool DIALOG_SYMBOL_PROPERTIES::Validate()
         {
             DisplayErrorMessage( this, _( "Fields must have a name." ) );
 
-            wxCommandEvent *evt = new wxCommandEvent( SYMBOL_DELAY_FOCUS );
-            evt->SetClientData( new VECTOR2I( i, FDC_VALUE ) );
-            QueueEvent( evt );
+            CallAfter( &DIALOG_SYMBOL_PROPERTIES::HandleDelayedFocus, static_cast<int>( i ), FDC_VALUE );
 
             return false;
         }
+    }
+
+    wxString base;
+    wxString msg = m_symbol->BaseRefFromUser( GetParent()->GetCurrentSheet(),
+                                              m_fields->GetField( FIELD_T::REFERENCE )->GetText(), base );
+
+    if( !msg.IsEmpty() )
+    {
+        DisplayErrorMessage( this, msg );
+        return false;
     }
 
     return true;
@@ -895,7 +897,8 @@ bool DIALOG_SYMBOL_PROPERTIES::TransferDataFromWindow()
 
             *tmp = field;
 
-            if( !currentVariant.IsEmpty() )
+            // References are not variant data and are set for the sheet below
+            if( !currentVariant.IsEmpty() && field.GetId() != FIELD_T::REFERENCE )
             {
                 // Restore the default field text for existing fields.
                 tmp->SetText( defaultText, &currentSheet );
@@ -934,13 +937,12 @@ bool DIALOG_SYMBOL_PROPERTIES::TransferDataFromWindow()
                           return lhs.GetOrdinal() < rhs.GetOrdinal();
                       } );
 
-    if( currentVariant.IsEmpty() )
-    {
-        // Reference has a specific initialization, depending on the current active sheet
-        // because for a given symbol, in a complex hierarchy, there are more than one
-        // reference.
-        m_symbol->SetRef( &GetParent()->GetCurrentSheet(), m_fields->GetField( FIELD_T::REFERENCE )->GetText() );
-    }
+    // Reference has a specific initialization, depending on the current active sheet
+    // because for a given symbol, in a complex hierarchy, there are more than one
+    // reference.
+    wxString base;
+    m_symbol->BaseRefFromUser( currentSheet, m_fields->GetField( FIELD_T::REFERENCE )->GetText(), base );
+    m_symbol->SetUserRef( currentSheet, base );
 
     m_symbol->SetExcludedFromSim( m_cbExcludeFromSim->IsChecked(), &currentSheet, currentVariant );
     m_symbol->SetExcludedFromBOM( m_cbExcludeFromBom->IsChecked(), &currentSheet, currentVariant );
@@ -992,9 +994,7 @@ void DIALOG_SYMBOL_PROPERTIES::OnGridCellChanging( wxGridEvent& event )
     if( control && control->GetValidator() && !control->GetValidator()->Validate( control ) )
     {
         event.Veto();
-        wxCommandEvent *evt = new wxCommandEvent( SYMBOL_DELAY_FOCUS );
-        evt->SetClientData( new VECTOR2I( event.GetRow(), event.GetCol() ) );
-        QueueEvent( evt );
+        CallAfter( &DIALOG_SYMBOL_PROPERTIES::HandleDelayedFocus, event.GetRow(), event.GetCol() );
     }
     else if( event.GetCol() == FDC_NAME )
     {
@@ -1009,9 +1009,7 @@ void DIALOG_SYMBOL_PROPERTIES::OnGridCellChanging( wxGridEvent& event )
             {
                 DisplayErrorMessage( this, wxString::Format( _( "Field name '%s' already in use." ), newName ) );
                 event.Veto();
-                wxCommandEvent *evt = new wxCommandEvent( SYMBOL_DELAY_FOCUS );
-                evt->SetClientData( new VECTOR2I( event.GetRow(), event.GetCol() ) );
-                QueueEvent( evt );
+                CallAfter( &DIALOG_SYMBOL_PROPERTIES::HandleDelayedFocus, event.GetRow(), event.GetCol() );
             }
         }
     }
@@ -1023,11 +1021,7 @@ void DIALOG_SYMBOL_PROPERTIES::OnGridCellChanging( wxGridEvent& event )
 void DIALOG_SYMBOL_PROPERTIES::OnGridEditorShown( wxGridEvent& aEvent )
 {
     if( m_fields->GetFieldRow( FIELD_T::REFERENCE ) == aEvent.GetRow() && aEvent.GetCol() == FDC_VALUE )
-    {
-        wxCommandEvent* evt = new wxCommandEvent( SYMBOL_DELAY_SELECTION );
-        evt->SetClientData( new VECTOR2I( aEvent.GetRow(), aEvent.GetCol() ) );
-        QueueEvent( evt );
-    }
+        CallAfter( &DIALOG_SYMBOL_PROPERTIES::HandleDelayedSelection, aEvent.GetRow(), aEvent.GetCol() );
 
     m_editorShown = true;
 
@@ -1222,6 +1216,26 @@ void DIALOG_SYMBOL_PROPERTIES::AdjustPinsGridColumns()
 
 void DIALOG_SYMBOL_PROPERTIES::OnUpdateUI( wxUpdateUIEvent& event )
 {
+    if( m_composedRef->IsShown() )
+    {
+        const SCH_SHEET_PATH& sheet = GetParent()->GetCurrentSheet();
+        wxString              composed;
+
+        m_symbol->BaseRefFromUser( sheet, m_fields->GetField( FIELD_T::REFERENCE )->GetText(), composed );
+
+        const SCHEMATIC& schematic = GetParent()->Schematic();
+
+        // Unannotated references are never suffixed, and a package takes the suffix it shares across sheets
+        if( !composed.EndsWith( wxS( "?" ) ) )
+            composed += schematic.GetPackageRefSuffix( m_symbol, sheet );
+
+        if( m_composedRef->GetLabelText() != composed )
+        {
+            m_composedRef->SetLabelText( composed );
+            Layout();
+        }
+    }
+
     std::bitset<64> shownColumns = m_fieldsGrid->GetShownColumns();
 
     if( shownColumns != m_shownColumns )
@@ -1234,46 +1248,44 @@ void DIALOG_SYMBOL_PROPERTIES::OnUpdateUI( wxUpdateUIEvent& event )
 }
 
 
-void DIALOG_SYMBOL_PROPERTIES::HandleDelayedFocus( wxCommandEvent& event )
+void DIALOG_SYMBOL_PROPERTIES::HandleDelayedFocus( int aRow, int aCol )
 {
-    VECTOR2I *loc = static_cast<VECTOR2I*>( event.GetClientData() );
-
-    wxCHECK_RET( loc, wxT( "Missing focus cell location" ) );
-
-    // Run the AutoColumnSizer before setting focus (as it will clear any shown cell edit control
-    // if it has to resize that column).
-    m_fieldsGrid->RecomputeGridWidths();
-
-    // Handle a delayed focus
-
-    m_fieldsGrid->SetFocus();
-    m_fieldsGrid->MakeCellVisible( loc->x, loc->y );
-    m_fieldsGrid->SetGridCursor( loc->x, loc->y );
-
-    delete loc;
-
-    CallAfter(
-            [this]()
+    // Focusing the grid before the dialog is activated would present it
+    KIPLATFORM::UI::RunWhenActive( this,
+            [this, aRow, aCol]()
             {
-                m_fieldsGrid->EnableCellEditControl( true );
+                // Run the AutoColumnSizer before setting focus (as it will clear any shown cell
+                // edit control if it has to resize that column).
+                m_fieldsGrid->RecomputeGridWidths();
+
+                // Handle a delayed focus
+
+                m_fieldsGrid->SetFocus();
+                m_fieldsGrid->MakeCellVisible( aRow, aCol );
+                m_fieldsGrid->SetGridCursor( aRow, aCol );
+
+                CallAfter(
+                        [this]()
+                        {
+                            KIPLATFORM::UI::RunWhenActive( this,
+                                    [this]()
+                                    {
+                                        m_fieldsGrid->EnableCellEditControl( true );
+                                    } );
+                        } );
             } );
 }
 
 
-void DIALOG_SYMBOL_PROPERTIES::HandleDelayedSelection( wxCommandEvent& event )
+void DIALOG_SYMBOL_PROPERTIES::HandleDelayedSelection( int aRow, int aCol )
 {
-    VECTOR2I *loc = static_cast<VECTOR2I*>( event.GetClientData() );
-
-    wxCHECK_RET( loc, wxT( "Missing focus cell location" ) );
-
     // Handle a delayed selection
-    wxGridCellEditor* cellEditor = m_fieldsGrid->GetCellEditor( loc->x, loc->y );
+    wxGridCellEditor* cellEditor = m_fieldsGrid->GetCellEditor( aRow, aCol );
 
     if( wxTextEntry* txt = dynamic_cast<wxTextEntry*>( cellEditor->GetControl() ) )
         KIUI::SelectReferenceNumber( txt );
 
     cellEditor->DecRef();   // we're done; must release
-    delete loc;
 }
 
 

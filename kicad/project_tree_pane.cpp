@@ -73,6 +73,7 @@
 #include <git/git_status_handler.h>
 #include <git/kicad_git_common.h>
 #include <git/kicad_git_memory.h>
+#include <git/kigit_ignore.h>
 #include <git/project_git_utils.h>
 
 #include <dialogs/git/dialog_git_repository.h>
@@ -107,6 +108,97 @@ static bool gitTaskStillRunning( const std::future<void>& aTask )
 {
     return aTask.valid() && aTask.wait_for( std::chrono::seconds( 0 ) ) != std::future_status::ready;
 }
+
+
+namespace
+{
+
+// What the Ignore submenu can offer. A selection whose paths disagree offers nothing.
+struct IGNORE_SELECTION
+{
+    std::vector<GIT_IGNORE_TARGET> targets;
+
+    /// The rule for the extension every target shares, when they are all files sharing one.
+    wxString extensionRule;
+
+    /// None of them is tracked or already ignored, so a rule would take effect.
+    bool canIgnore = false;
+
+    /// All of them are ignored, so the menu offers taking that back.
+    bool ignored = false;
+
+    /// The project's own ignore file holds the rule, so it can be taken out again.
+    bool canKeepPath = false;
+    bool canKeepExtension = false;
+};
+
+
+// Reads the repository, so the caller holds the action lock.
+IGNORE_SELECTION gitIgnoreSelection( KIGIT_COMMON& aCommon, const wxString& aProjectPath,
+                                     const std::vector<PROJECT_TREE_ITEM*>& aSelection )
+{
+    const std::vector<wxString> rules = KIGIT::ReadIgnoreRules( KIGIT::ProjectIgnoreFile( aProjectPath ) );
+
+    IGNORE_SELECTION selection;
+    bool             allIgnored = true;
+    bool             allNamed = true;
+    bool             allFiles = true;
+    bool             anyTracked = false;
+
+    for( PROJECT_TREE_ITEM* item : aSelection )
+    {
+        if( !item )
+            return IGNORE_SELECTION();
+
+        wxString path = item->GetFileName();
+
+        if( !path.StartsWith( aProjectPath ) )
+            return IGNORE_SELECTION();
+
+        path = path.Mid( aProjectPath.length() );
+
+#ifdef __WINDOWS__
+        path.Replace( wxS( "\\" ), wxS( "/" ) );
+#endif
+
+        // The project folder holds the ignore file, so it cannot be one of its rules.
+        if( path.IsEmpty() )
+            return IGNORE_SELECTION();
+
+        const bool                isDirectory = item->GetType() == TREE_FILE_TYPE::DIRECTORY;
+        const KIGIT::IGNORE_STATE state = KIGIT::IgnoreState( aCommon, path, isDirectory );
+
+        allIgnored &= state.ignored;
+        anyTracked |= state.tracked;
+        allNamed &= alg::contains( rules, KIGIT::PathIgnoreRule( path, isDirectory ) );
+        allFiles &= !isDirectory;
+
+        const wxString extensionRule = KIGIT::ExtensionIgnoreRule( path );
+
+        if( selection.targets.empty() )
+            selection.extensionRule = extensionRule;
+        else if( selection.extensionRule != extensionRule )
+            selection.extensionRule.Clear();
+
+        selection.targets.push_back( { path, isDirectory } );
+    }
+
+    if( selection.targets.empty() )
+        return selection;
+
+    if( !allFiles )
+        selection.extensionRule.Clear();
+
+    selection.canIgnore = !anyTracked && !allIgnored;
+    selection.ignored = allIgnored;
+    selection.canKeepPath = allIgnored && allNamed;
+    selection.canKeepExtension =
+            allIgnored && !selection.extensionRule.IsEmpty() && alg::contains( rules, selection.extensionRule );
+
+    return selection;
+}
+
+} // namespace
 
 
 // list of files extensions listed in the tree project window
@@ -181,6 +273,11 @@ enum project_tree_ids
     ID_GIT_SWITCH_QUICK3,      // Switch the local repository to the third quick branch
     ID_GIT_SWITCH_QUICK4,      // Switch the local repository to the fourth quick branch
     ID_GIT_SWITCH_QUICK5,      // Switch the local repository to the fifth quick branch
+    ID_GIT_IGNORE_PATH,        // Add the selected paths to the project's ignored files
+    ID_GIT_IGNORE_EXTENSION,   // Ignore every file sharing the selection's extension
+    ID_GIT_KEEP_PATH,          // Take the selected paths out of the ignored files
+    ID_GIT_KEEP_EXTENSION,     // Stop ignoring every file sharing the selection's extension
+    ID_GIT_EDIT_IGNORE_FILE,   // Open the project's ignore file in a text editor
 
     ID_JOBS_RUN,
 };
@@ -202,6 +299,8 @@ BEGIN_EVENT_TABLE( PROJECT_TREE_PANE, wxSashLayoutWindow )
     EVT_MENU( ID_GIT_HISTORY, PROJECT_TREE_PANE::onGitHistory )
     EVT_MENU( ID_GIT_SWITCH_BRANCH, PROJECT_TREE_PANE::onGitSwitchBranch )
     EVT_MENU_RANGE( ID_GIT_SWITCH_QUICK1, ID_GIT_SWITCH_QUICK5, PROJECT_TREE_PANE::onGitSwitchBranch )
+    EVT_MENU_RANGE( ID_GIT_IGNORE_PATH, ID_GIT_KEEP_EXTENSION, PROJECT_TREE_PANE::onGitIgnore )
+    EVT_MENU( ID_GIT_EDIT_IGNORE_FILE, PROJECT_TREE_PANE::onGitEditIgnoreFile )
     EVT_MENU( ID_GIT_REMOVE_VCS, PROJECT_TREE_PANE::onGitRemoveVCS )
 
     EVT_MENU( ID_JOBS_RUN, PROJECT_TREE_PANE::onRunSelectedJobsFile )
@@ -892,14 +991,14 @@ void PROJECT_TREE_PANE::showContextMenu()
     {
         KIUI::AddMenuItem( &popup_menu, ID_PROJECT_SWITCH_TO_OTHER, _( "Switch to this Project" ),
                            _( "Close all editors, and switch to the selected project" ),
-                           KiBitmap( BITMAPS::open_project ) );
+                           KiBitmapBundle( BITMAPS::open_project ) );
         popup_menu.AppendSeparator();
     }
 
     if( can_create_new_directory )
     {
         KIUI::AddMenuItem( &popup_menu, ID_PROJECT_NEWDIR, _( "New Directory..." ),
-                           _( "Create a New Directory" ), KiBitmap( BITMAPS::directory ) );
+                           _( "Create a New Directory" ), KiBitmapBundle( BITMAPS::directory ) );
     }
 
     if( can_open_this_directory )
@@ -926,7 +1025,7 @@ void PROJECT_TREE_PANE::showContextMenu()
         }
 
         KIUI::AddMenuItem( &popup_menu, ID_PROJECT_OPEN_DIR, text, help_text,
-                           KiBitmap( BITMAPS::directory_browser ) );
+                           KiBitmapBundle( BITMAPS::directory_browser ) );
     }
 
     if( can_edit )
@@ -937,13 +1036,13 @@ void PROJECT_TREE_PANE::showContextMenu()
             help_text = _( "Open files in a Text Editor" );
 
         KIUI::AddMenuItem( &popup_menu, ID_PROJECT_TXTEDIT, _( "Edit in a Text Editor" ), help_text,
-                           KiBitmap( BITMAPS::editor ) );
+                           KiBitmapBundle( BITMAPS::editor ) );
     }
 
     if( run_jobs && selection.size() == 1 )
     {
         KIUI::AddMenuItem( &popup_menu, ID_JOBS_RUN, _( "Run Jobs" ), help_text,
-                           KiBitmap( BITMAPS::exchange ) );
+                           KiBitmapBundle( BITMAPS::exchange ) );
     }
 
     if( can_rename )
@@ -960,7 +1059,7 @@ void PROJECT_TREE_PANE::showContextMenu()
         }
 
         KIUI::AddMenuItem( &popup_menu, ID_PROJECT_RENAME, text, help_text,
-                           KiBitmap( BITMAPS::right ) );
+                           KiBitmapBundle( BITMAPS::right ) );
     }
 
     if( can_delete )
@@ -981,91 +1080,110 @@ void PROJECT_TREE_PANE::showContextMenu()
 
 #ifdef __WINDOWS__
         KIUI::AddMenuItem( &popup_menu, ID_PROJECT_DELETE, _( "Delete" ), help_text,
-                           KiBitmap( BITMAPS::trash ) );
+                           KiBitmapBundle( BITMAPS::trash ) );
 #else
         KIUI::AddMenuItem( &popup_menu, ID_PROJECT_DELETE, _( "Move to Trash" ), help_text,
-                           KiBitmap( BITMAPS::trash ) );
+                           KiBitmapBundle( BITMAPS::trash ) );
 #endif
     }
 
     if( vcs_menu )
     {
+        // Setting up the repository, its history, its branch and whether git is used at all
+        // apply to the whole project, so they are offered on the project file and nowhere else.
+        // Ignoring is the only thing here that acts on the item clicked.
+        const bool repoWide =
+                selection.size() == 1 && selection[0] && selection[0]->GetId() == m_TreeProject->GetRootItem();
         wxMenu*     vcs_submenu = new wxMenu();
-        wxMenu*     branch_submenu = new wxMenu();
         wxMenuItem* vcs_menuitem = nullptr;
 
-        vcs_menuitem = vcs_submenu->Append( ID_GIT_INITIALIZE_PROJECT,
-                                            _( "Add Project to Version Control..." ),
-                                            _( "Initialize a new repository" ) );
-        vcs_menuitem->Enable( vcs_can_init );
-
-        vcs_menuitem = vcs_submenu->Append( ID_GIT_REMOTE_SETTINGS, _( "Configure Default Remote..." ),
-                                            _( "Set or change the default remote URL and credentials" ) );
-        vcs_menuitem->Enable( vcs_can_set_remote );
-
-        // Committing, pushing and pulling are done from the docked Version Control panel, so
-        // the version-control submenu keeps only repository setup, history and branch operations.
-        vcs_submenu->AppendSeparator();
-
-        vcs_menuitem = vcs_submenu->Append( ID_GIT_HISTORY, _( "Version History..." ),
-                                            _( "Show the commits made to this project" ) );
-        vcs_menuitem->Enable( vcs_can_show_history );
-
-        // Reading the branch list walks the repository. On contention the submenu is built
-        // without the shortcuts rather than reading it concurrently.
-        std::shared_ptr<KIGIT_COMMON> common = gitCommon();
         m_gitMenuBranches.clear();
-        m_gitMenuSession = common;
-        std::vector<KIGIT_BRANCH_INFO> branches;
 
+        if( repoWide )
         {
-            std::unique_lock<std::mutex> branchLock = common->TryLockAction();
+            vcs_menuitem = vcs_submenu->Append( ID_GIT_INITIALIZE_PROJECT, _( "Add Project to Version Control..." ),
+                                                _( "Initialize a new repository" ) );
+            vcs_menuitem->Enable( vcs_can_init );
 
-            if( branchLock.owns_lock() )
-                branches = common->GetBranches();
-        }
+            vcs_menuitem = vcs_submenu->Append( ID_GIT_REMOTE_SETTINGS, _( "Configure Default Remote..." ),
+                                                _( "Set or change the default remote URL and credentials" ) );
+            vcs_menuitem->Enable( vcs_can_set_remote );
 
-        KIGIT::SortBranchesForDisplay( branches );
+            // Committing, pushing and pulling are done from the docked Version Control panel, so
+            // the version-control submenu keeps only repository setup, history and branch operations.
+            vcs_submenu->AppendSeparator();
 
-        for( const KIGIT_BRANCH_INFO& branch : branches )
-        {
-            if( branch.isRemote || branch.isCurrent )
-                continue;
+            vcs_menuitem = vcs_submenu->Append( ID_GIT_HISTORY, _( "Version History..." ),
+                                                _( "Show the commits made to this project" ) );
+            vcs_menuitem->Enable( vcs_can_show_history );
 
-            m_gitMenuBranches.push_back( branch.name );
+            // Reading the branch list walks the repository. On contention the submenu is built
+            // without the shortcuts rather than reading it concurrently.
+            std::shared_ptr<KIGIT_COMMON>  common = gitCommon();
+            std::vector<KIGIT_BRANCH_INFO> branches;
 
-            if( m_gitMenuBranches.size() == 5 )
-                break;
-        }
+            m_gitMenuSession = common;
 
-        for( size_t ii = 0; ii < m_gitMenuBranches.size(); ++ii )
-        {
-            wxString msg = _( "Switch to branch " ) + m_gitMenuBranches[ii];
-            vcs_menuitem = branch_submenu->Append( ID_GIT_SWITCH_QUICK1 + ii, m_gitMenuBranches[ii], msg );
+            {
+                KIGIT::ACTION_LOCK branchLock = common->TryLockAction();
+
+                if( branchLock.owns_lock() )
+                    branches = common->GetBranches();
+            }
+
+            KIGIT::SortBranchesForDisplay( branches );
+
+            for( const KIGIT_BRANCH_INFO& branch : branches )
+            {
+                if( branch.isRemote || branch.isCurrent )
+                    continue;
+
+                m_gitMenuBranches.push_back( branch.name );
+
+                if( m_gitMenuBranches.size() == 5 )
+                    break;
+            }
+
+            wxMenu* branch_submenu = new wxMenu();
+
+            for( size_t ii = 0; ii < m_gitMenuBranches.size(); ++ii )
+            {
+                wxString msg = _( "Switch to branch " ) + m_gitMenuBranches[ii];
+                vcs_menuitem = branch_submenu->Append( ID_GIT_SWITCH_QUICK1 + ii, m_gitMenuBranches[ii], msg );
+                vcs_menuitem->Enable( vcs_can_switch );
+            }
+
+            vcs_menuitem = branch_submenu->Append( ID_GIT_SWITCH_BRANCH, _( "Other..." ),
+                                                   _( "Switch to a different branch" ) );
+            vcs_menuitem->Enable( vcs_can_switch );
+
+            vcs_menuitem = vcs_submenu->Append( ID_GIT_SWITCH_BRANCH, _( "Switch to Branch" ), branch_submenu );
             vcs_menuitem->Enable( vcs_can_switch );
         }
 
-        vcs_menuitem = branch_submenu->Append( ID_GIT_SWITCH_BRANCH, _( "Other..." ),
-                                     _( "Switch to a different branch" ) );
-        vcs_menuitem->Enable( vcs_can_switch );
+        bool    ignore_usable = false;
+        wxMenu* ignore_submenu = buildIgnoreSubmenu( selection, ignore_usable );
 
-        vcs_menuitem = vcs_submenu->Append( ID_GIT_SWITCH_BRANCH, _( "Switch to Branch" ), branch_submenu );
-        vcs_menuitem->Enable( vcs_can_switch );
+        vcs_menuitem = vcs_submenu->AppendSubMenu( ignore_submenu, _( "Ignore" ) );
+        vcs_menuitem->Enable( ignore_usable );
 
-        vcs_submenu->AppendSeparator();
-
-        if( gitIntegrationDisabled )
+        if( repoWide )
         {
-            vcs_menuitem = vcs_submenu->Append( ID_GIT_REMOVE_VCS, _( "Enable Git Integration" ),
-                                 _( "Re-enable Git integration for this project" ) );
-        }
-        else
-        {
-            vcs_menuitem = vcs_submenu->Append( ID_GIT_REMOVE_VCS, _( "Disable Git Integration" ),
-                                 _( "Disable Git integration for this project" ) );
-        }
+            vcs_submenu->AppendSeparator();
 
-        vcs_menuitem->Enable( vcs_can_remove );
+            if( gitIntegrationDisabled )
+            {
+                vcs_menuitem = vcs_submenu->Append( ID_GIT_REMOVE_VCS, _( "Enable Git Integration" ),
+                                                    _( "Re-enable Git integration for this project" ) );
+            }
+            else
+            {
+                vcs_menuitem = vcs_submenu->Append( ID_GIT_REMOVE_VCS, _( "Disable Git Integration" ),
+                                                    _( "Disable Git integration for this project" ) );
+            }
+
+            vcs_menuitem->Enable( vcs_can_remove );
+        }
 
         popup_menu.AppendSeparator();
         popup_menu.AppendSubMenu( vcs_submenu, _( "Version Control" ) );
@@ -1076,7 +1194,7 @@ void PROJECT_TREE_PANE::showContextMenu()
 }
 
 
-void PROJECT_TREE_PANE::onOpenSelectedFileWithTextEditor( wxCommandEvent& event )
+void PROJECT_TREE_PANE::openInTextEditor( const std::vector<wxString>& aFileNames )
 {
     wxString editorname = Pgm().GetTextEditor();
 
@@ -1086,17 +1204,22 @@ void PROJECT_TREE_PANE::onOpenSelectedFileWithTextEditor( wxCommandEvent& event 
         return;
     }
 
-    std::vector<PROJECT_TREE_ITEM*> tree_data = GetSelectedData();
-
-    for( PROJECT_TREE_ITEM* item_data : tree_data )
+    for( const wxString& fullFileName : aFileNames )
     {
-        wxString fullFileName = item_data->GetFileName();
-
         if( !fullFileName.IsEmpty() )
-        {
             ExecuteFile( editorname, fullFileName.wc_str(), nullptr, false );
-        }
     }
+}
+
+
+void PROJECT_TREE_PANE::onOpenSelectedFileWithTextEditor( wxCommandEvent& event )
+{
+    std::vector<wxString> fileNames;
+
+    for( PROJECT_TREE_ITEM* item_data : GetSelectedData() )
+        fileNames.push_back( item_data->GetFileName() );
+
+    openInTextEditor( fileNames );
 }
 
 
@@ -1655,6 +1778,7 @@ void PROJECT_TREE_PANE::EmptyTreePrj()
 {
     m_branchQuery->Cancel();
     m_gitMenuBranches.clear();
+    m_gitMenuIgnoreTargets.clear();
     m_gitMenuSession.reset();
     KIGIT::ClearSyncWarnings( m_Parent );
 
@@ -1674,14 +1798,14 @@ void PROJECT_TREE_PANE::WaitForGitOperations()
         std::shared_ptr<KIGIT_COMMON> common = gitCommon();
         common->SetShuttingDown( true );
 
-        std::unique_lock<std::mutex> lock = common->TryLockAction();
+        KIGIT::ACTION_LOCK lock = common->TryLockAction();
 
         constexpr auto kGraceMs = std::chrono::seconds( 2 );
         auto           graceEnd = std::chrono::steady_clock::now() + kGraceMs;
 
         while( !lock.owns_lock() && std::chrono::steady_clock::now() < graceEnd )
         {
-            if( lock.try_lock() )
+            if( ( lock = common->TryLockActionLocal() ).owns_lock() )
                 break;
             std::this_thread::sleep_for( std::chrono::milliseconds( 50 ) );
         }
@@ -1699,7 +1823,7 @@ void PROJECT_TREE_PANE::WaitForGitOperations()
                                            100, this,
                                            wxPD_APP_MODAL | wxPD_SMOOTH );
 
-                while( !lock.try_lock()
+                while( !( lock = common->TryLockActionLocal() ).owns_lock()
                        && std::chrono::steady_clock::now() < intervalEnd )
                 {
                     progress.Pulse();
@@ -1743,6 +1867,7 @@ void PROJECT_TREE_PANE::releaseGitRepo()
 {
     m_branchQuery->Cancel();
     m_gitMenuBranches.clear();
+    m_gitMenuIgnoreTargets.clear();
     m_gitMenuSession.reset();
     Prj().ReleaseGitCommon();
 }
@@ -1763,6 +1888,7 @@ void PROJECT_TREE_PANE::syncGitListener()
 
     m_branchQuery->Cancel();
     m_gitMenuBranches.clear();
+    m_gitMenuIgnoreTargets.clear();
     m_gitMenuSession.reset();
     KIGIT::ClearSyncWarnings( m_Parent );
 
@@ -1790,7 +1916,6 @@ git_repository* PROJECT_TREE_PANE::gitRepo() const
 
 void PROJECT_TREE_PANE::onThemeChanged( wxSysColourChangedEvent &aEvent )
 {
-    GetBitmapStore()->ThemeChanged();
     m_TreeProject->LoadIcons();
     m_TreeProject->Refresh();
 
@@ -1820,7 +1945,7 @@ void KICAD_MANAGER_FRAME::OnChangeWatchedPaths( wxCommandEvent& aEvent )
 // Prompts for git credentials after an auth failure. Returns false if cancelled.
 static bool promptForGitCredentials( wxWindow* aParent, KIGIT_COMMON* aCommon, const wxString& aExplanation )
 {
-    return KIGIT::PromptForCredentials( aParent, aCommon, &Prj(), aExplanation );
+    return KIGIT::PromptForCredentials( aParent, aCommon, &Prj(), aExplanation ) == KIGIT::PROMPT_ANSWER::ACCEPTED;
 }
 
 
@@ -1828,9 +1953,10 @@ static bool promptForGitCredentials( wxWindow* aParent, KIGIT_COMMON* aCommon, c
 // local settings. Runs only after the remote itself was set up successfully.
 static void saveAcceptedRemoteSettings( PROJECT& aProject, const RemoteConfig& aConfig )
 {
-    // Keyed like the attach-time lookup, which never sees credentials embedded in the address
-    KIPLATFORM::SECRETS::StoreSecret( KIGIT_COMMON::ParseRemoteURL( aConfig.url ).url, aConfig.username,
-                                      aConfig.password );
+    // Keyed like the attach-time lookup, which never sees credentials embedded in the address. Async so an
+    // unlock prompt cannot hold the event loop
+    KIPLATFORM::SECRETS::StoreSecretAsync( KIGIT_COMMON::ParseRemoteURL( aConfig.url ).url, aConfig.username,
+                                           aConfig.password );
     aProject.GetLocalSettings().m_GitRepoUsername = aConfig.username;
     aProject.GetLocalSettings().m_GitSSHKey = aConfig.sshKey;
 
@@ -1930,7 +2056,7 @@ void PROJECT_TREE_PANE::onGitInitializeProject( wxCommandEvent& aEvent )
 
         if( std::optional<KIGIT::HOST_KEY_FAILURE> hostKey = handler.GetHostKeyFailure() )
         {
-            if( !KIGIT::PromptToTrustHost( m_parent, *hostKey, retriedAfterTrust ) )
+            if( KIGIT::PromptToTrustHost( m_parent, *hostKey, retriedAfterTrust ) != KIGIT::PROMPT_ANSWER::ACCEPTED )
                 break;
 
             retriedAfterTrust = true;
@@ -1975,7 +2101,7 @@ void PROJECT_TREE_PANE::onGitRemoteSettings( wxCommandEvent& aEvent )
 
     {
         // Read the remote under the lock, then release it before opening the dialog.
-        std::unique_lock<std::mutex> lock = KIGIT::TryLockAction( *common, this );
+        KIGIT::ACTION_LOCK lock = KIGIT::TryLockAction( *common, this );
 
         if( !lock.owns_lock() )
             return;
@@ -1991,16 +2117,48 @@ void PROJECT_TREE_PANE::onGitRemoteSettings( wxCommandEvent& aEvent )
         }
     }
 
-    wxWindow*             topLevelParent = wxGetTopLevelParent( this );
-    DIALOG_GIT_REPOSITORY dlg( topLevelParent, repo, existingURL );
-    dlg.SetTitle( _( "Configure Default Remote" ) );
-
     // Credentials are stored separately from the remote URL.
     KIGIT_COMMON credentials( nullptr );
     credentials.SetUsername( common->GetUsername() );
     credentials.SetRemote( existingURL );
-    dlg.SetUsername( credentials.GetUsername() );
-    dlg.SetPassword( credentials.GetPassword() );
+
+    if( credentials.SecretRead() )
+    {
+        showGitRemoteSettings( existingURL, credentials.GetUsername(), credentials.GetPassword() );
+        return;
+    }
+
+    wxWeakRef<PROJECT_TREE_PANE>  self( this );
+    std::shared_ptr<KIGIT_COMMON> session = gitCommon();
+    wxString                      username = credentials.GetUsername();
+
+    // Saving the dialog stores its password, so a locked keyring must unlock rather than read as empty
+    KIPLATFORM::SECRETS::GetSecretAsync(
+            credentials.GetRemote(), username,
+            [self, session, existingURL, username]( bool aFound, const wxString& aSecret )
+            {
+                if( !self || self->gitCommon() != session || session->IsShuttingDown() || !session->GetRepo() )
+                    return;
+
+                self->showGitRemoteSettings( existingURL, username, aFound ? aSecret : wxString() );
+            } );
+}
+
+
+void PROJECT_TREE_PANE::showGitRemoteSettings( const wxString& aExistingURL, const wxString& aUsername,
+                                               const wxString& aPassword )
+{
+    KIGIT_COMMON*   common = gitCommon().get();
+    git_repository* repo = common ? common->GetRepo() : nullptr;
+
+    if( !repo )
+        return;
+
+    wxWindow*             topLevelParent = wxGetTopLevelParent( this );
+    DIALOG_GIT_REPOSITORY dlg( topLevelParent, repo, aExistingURL );
+    dlg.SetTitle( _( "Configure Default Remote" ) );
+    dlg.SetUsername( aUsername );
+    dlg.SetPassword( aPassword );
     dlg.SetRepoSSHPath( Prj().GetLocalSettings().m_GitSSHKey );
 
     if( dlg.ShowModal() != wxID_OK )
@@ -2021,7 +2179,7 @@ void PROJECT_TREE_PANE::onGitRemoteSettings( wxCommandEvent& aEvent )
 
     {
         // Update the remote config and cached branch info under the same lock.
-        std::unique_lock<std::mutex> lock = KIGIT::WaitForActionLock( *common, this );
+        KIGIT::ACTION_LOCK lock = KIGIT::WaitForActionLock( *common, this );
 
         if( !lock.owns_lock() )
             return;
@@ -2142,7 +2300,7 @@ void PROJECT_TREE_PANE::switchGitBranch( std::shared_ptr<KIGIT_COMMON> aCommon, 
         wxString error;
 
         {
-            std::unique_lock<std::mutex> lock = KIGIT::WaitForActionLock( *aCommon, this );
+            KIGIT::ACTION_LOCK lock = KIGIT::WaitForActionLock( *aCommon, this );
 
             if( !lock.owns_lock() )
                 return;
@@ -2162,6 +2320,100 @@ void PROJECT_TREE_PANE::switchGitBranch( std::shared_ptr<KIGIT_COMMON> aCommon, 
     };
 
     ProjectClearOfUncommittedWork( m_Parent, this, *m_branchQuery, std::move( createBranch ) );
+}
+
+
+wxMenu* PROJECT_TREE_PANE::buildIgnoreSubmenu( const std::vector<PROJECT_TREE_ITEM*>& aSelection, bool& aUsable )
+{
+    wxMenu*                       submenu = new wxMenu();
+    std::shared_ptr<KIGIT_COMMON> common = gitCommon();
+    IGNORE_SELECTION              ignore;
+
+    m_gitMenuIgnoreTargets.clear();
+
+    if( !Prj().GetLocalSettings().m_GitIntegrationDisabled && common->GetRepo() )
+    {
+        // Reading the state walks the index, so a busy repository leaves the submenu disabled.
+        KIGIT::ACTION_LOCK lock = common->TryLockAction();
+
+        if( lock.owns_lock() )
+            ignore = gitIgnoreSelection( *common, Prj().GetProjectPath(), aSelection );
+    }
+
+    m_gitMenuIgnoreTargets = ignore.targets;
+
+    const bool single = ignore.targets.size() == 1;
+    const bool folder = single && ignore.targets.front().isDirectory;
+
+    auto append = [submenu]( int aId, const wxString& aLabel, const wxString& aHelp, bool aEnabled )
+    {
+        submenu->Append( aId, aLabel, aHelp )->Enable( aEnabled );
+    };
+
+    if( ignore.ignored )
+    {
+        // Only a rule in the project's own ignore file can be taken out of it.
+        append( ID_GIT_KEEP_PATH,
+                folder   ? _( "Stop Ignoring This Folder" )
+                : single ? _( "Stop Ignoring This File" )
+                         : _( "Stop Ignoring Selected Items" ),
+                _( "Take the rule naming these out of the project's ignored files" ), ignore.canKeepPath );
+
+        if( ignore.canKeepExtension )
+        {
+            append( ID_GIT_KEEP_EXTENSION,
+                    wxString::Format( _( "Stop Ignoring All '%s' Files" ), ignore.extensionRule ),
+                    _( "Take that rule out of the project's ignored files" ), true );
+        }
+    }
+    else
+    {
+        append( ID_GIT_IGNORE_PATH,
+                folder   ? _( "Ignore This Folder" )
+                : single ? _( "Ignore This File" )
+                         : _( "Ignore Selected Items" ),
+                _( "Leave these out of version control" ), ignore.canIgnore );
+
+        if( !ignore.extensionRule.IsEmpty() )
+        {
+            append( ID_GIT_IGNORE_EXTENSION, wxString::Format( _( "Ignore All '%s' Files" ), ignore.extensionRule ),
+                    _( "Leave every file with this extension out of version control" ), ignore.canIgnore );
+        }
+    }
+
+    // A pattern matching nothing on disk has no item to right-click, so the file stays reachable.
+    const bool haveIgnoreFile = KIGIT::ProjectIgnoreFile( Prj().GetProjectPath() ).FileExists();
+
+    submenu->AppendSeparator();
+    append( ID_GIT_EDIT_IGNORE_FILE, _( "Edit Ignore File..." ),
+            _( "Open the project's ignored files in a text editor" ), haveIgnoreFile );
+
+    aUsable = ignore.canIgnore || ignore.canKeepPath || ignore.canKeepExtension || haveIgnoreFile;
+
+    return submenu;
+}
+
+
+void PROJECT_TREE_PANE::onGitIgnore( wxCommandEvent& aEvent )
+{
+    GIT_IGNORE_CHANGE change;
+
+    switch( aEvent.GetId() )
+    {
+    case ID_GIT_IGNORE_PATH: change = GIT_IGNORE_CHANGE::IGNORE_PATH; break;
+    case ID_GIT_IGNORE_EXTENSION: change = GIT_IGNORE_CHANGE::IGNORE_EXTENSION; break;
+    case ID_GIT_KEEP_PATH: change = GIT_IGNORE_CHANGE::KEEP_PATH; break;
+    case ID_GIT_KEEP_EXTENSION: change = GIT_IGNORE_CHANGE::KEEP_EXTENSION; break;
+    default: return;
+    }
+
+    ChangeGitIgnore( m_Parent, this, change, m_gitMenuIgnoreTargets );
+}
+
+
+void PROJECT_TREE_PANE::onGitEditIgnoreFile( wxCommandEvent& aEvent )
+{
+    openInTextEditor( { KIGIT::ProjectIgnoreFile( Prj().GetProjectPath() ).GetFullPath() } );
 }
 
 
@@ -2231,12 +2483,16 @@ void PROJECT_TREE_PANE::updateGitStatusIcons()
         return;
     }
 
-    std::stack<wxTreeItemId> items;
-    items.push(m_TreeProject->GetRootItem());
+    const wxColour normal = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOWTEXT );
+    const wxColour dimmed = wxSystemSettings::GetColour( wxSYS_COLOUR_GRAYTEXT );
+
+    // Git reports an ignored folder on its own, so the flag travels down to its contents.
+    std::stack<std::pair<wxTreeItemId, bool>> items;
+    items.push( { m_TreeProject->GetRootItem(), false } );
 
     while( !items.empty() )
     {
-        wxTreeItemId current = items.top();
+        auto [current, parentIgnored] = items.top();
         items.pop();
 
         if( current.IsOk() && m_TreeProject->ItemHasChildren( current ) )
@@ -2246,10 +2502,22 @@ void PROJECT_TREE_PANE::updateGitStatusIcons()
 
             while( child.IsOk() )
             {
-                items.push( child );
+                auto       it = m_gitStatusIcons.find( child );
+                const bool known = it != m_gitStatusIcons.end();
+                const bool ignored =
+                        parentIgnored || ( known && it->second == KIGIT_COMMON::GIT_STATUS::GIT_STATUS_IGNORED );
 
-                if( auto it = m_gitStatusIcons.find( child ); it != m_gitStatusIcons.end() )
-                    m_TreeProject->SetItemState( child, static_cast<int>( it->second ) );
+                items.push( { child, ignored } );
+
+                const int      state = known && !ignored ? static_cast<int>( it->second ) : wxTREE_ITEMSTATE_NONE;
+                const wxColour colour = ignored ? dimmed : normal;
+
+                // Setting either repaints the row, so only a change is worth writing.
+                if( m_TreeProject->GetItemState( child ) != state )
+                    m_TreeProject->SetItemState( child, state );
+
+                if( m_TreeProject->GetItemTextColour( child ) != colour )
+                    m_TreeProject->SetItemTextColour( child, colour );
 
                 child = m_TreeProject->GetNextChild( current, cookie );
             }
@@ -2374,7 +2642,7 @@ void PROJECT_TREE_PANE::updateGitStatusIconMap( std::shared_ptr<KIGIT_COMMON> aG
 
     // Acquire the git action mutex to synchronize with EmptyTreePrj() shutdown.
     // This ensures the repository isn't freed while we're using it.
-    std::unique_lock<std::mutex> gitLock = aGitCommon->TryLockAction();
+    KIGIT::ACTION_LOCK gitLock = aGitCommon->TryLockAction();
 
     if( !gitLock.owns_lock() )
     {
@@ -2418,21 +2686,26 @@ void PROJECT_TREE_PANE::updateGitStatusIconMap( std::shared_ptr<KIGIT_COMMON> aG
     bool updated = currentStatus != m_gitLastStatus;
     m_gitLastStatus = std::move( currentStatus );
 
-    // Update status icons based on file status
+    // Rebuilt rather than added to, so an item git has stopped reporting on loses its badge.
+    std::map<wxTreeItemId, KIGIT_COMMON::GIT_STATUS> icons;
+
     for( const auto& [absPath, fileStatus] : fileStatusMap )
     {
         auto iter = m_gitTreeCache.find( absPath );
+
         if( iter == m_gitTreeCache.end() )
         {
             wxLogTrace( traceGit, wxS( "File '%s' not found in tree cache" ), absPath );
             continue;
         }
 
-        auto [it, inserted] = m_gitStatusIcons.try_emplace( iter->second, fileStatus.status );
-        if( inserted || it->second != fileStatus.status )
-            updated = true;
-        it->second = fileStatus.status;
+        icons[iter->second] = fileStatus.status;
     }
+
+    if( icons != m_gitStatusIcons )
+        updated = true;
+
+    m_gitStatusIcons = std::move( icons );
 
     // Get the current branch name
     wxString branchName = statusHandler.GetCurrentBranchName();

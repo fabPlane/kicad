@@ -96,6 +96,7 @@
 #include <api/common/types/base_types.pb.h>
 #include <libraries/symbol_library_adapter.h>
 #include <project_sch.h>
+#include <sch_rule_area.h>
 #include <trace_helpers.h>
 
 using namespace kiapi::common::commands;
@@ -192,6 +193,10 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
     registerHandler<SetPageSettings, types::PageSettings>( &API_HANDLER_SCH::handleSetPageSettings );
     registerHandler<GetSchematicNetlist, SchematicNetlistResponse>( &API_HANDLER_SCH::handleGetSchematicNetlist );
     registerHandler<CrossProbeAnnounce, CrossProbeAnnounceResponse>( &API_HANDLER_SCH::handleCrossProbeAnnounce );
+    registerHandler<kiapi::schematic::tasks::StartErcTask, kiapi::common::tasks::StartTaskResponse>(
+            &API_HANDLER_SCH::handleStartErcTask );
+    registerHandler<kiapi::schematic::tasks::GetErcTaskResult, kiapi::schematic::tasks::ErcTaskResult>(
+            &API_HANDLER_SCH::handleGetErcTaskResult, true );
     registerHandler<SyncSelection, SyncSelectionResponse>(
             &API_HANDLER_SCH::handleSyncSelection, HANDLER_MODE::GUI_ONLY );
     registerHandler<HighlightNets, HighlightNetsResponse>(
@@ -290,7 +295,11 @@ bool API_HANDLER_SCH::packSchItem( google::protobuf::Any& aOut, SCH_ITEM* aItem,
         if( !PackSymbol( &symbol, static_cast<SCH_SYMBOL*>( aItem ), aPath ) )
             return false;
 
-        aOut.PackFrom( symbol );
+        if( !aOut.PackFrom( symbol ) )
+        {
+            wxFAIL_MSG( wxT( "Failed to pack SCH_SYMBOL" ) );
+            return false;
+        }
     }
     else if( aItem->Type() == SCH_SHEET_T )
     {
@@ -299,7 +308,11 @@ bool API_HANDLER_SCH::packSchItem( google::protobuf::Any& aOut, SCH_ITEM* aItem,
         if( !PackSheet( &sheet, static_cast<SCH_SHEET*>( aItem ), aPath ) )
             return false;
 
-        aOut.PackFrom( sheet );
+        if( !aOut.PackFrom( sheet ) )
+        {
+            wxFAIL_MSG( wxT( "Failed to pack SCH_SHEET" ) );
+            return false;
+        }
     }
     else
     {
@@ -574,11 +587,13 @@ void API_HANDLER_SCH::collectErcMarkers( ErcResultsResponse& aResponse ) const
 
             SEVERITY severity = marker->GetSeverity();
 
+            // Serialize() already filled in the excluded flag and description, and the severity
+            // when the marker can reach its schematic
             msg->mutable_id()->set_value( marker->m_Uuid.AsStdString() );
-            msg->set_severity( ToProtoEnum<SEVERITY, types::RuleSeverity>( severity ) );
-            msg->set_excluded( marker->IsExcluded() );
             msg->set_exclusion_comment( marker->GetComment().ToUTF8() );
-            msg->set_description( marker->GetRCItem()->GetErrorMessage( true ).ToUTF8() );
+
+            if( msg->severity() == types::RuleSeverity::RS_UNKNOWN )
+                msg->set_severity( ToProtoEnum<SEVERITY, types::RuleSeverity>( severity ) );
 
             switch( severity )
             {
@@ -1445,10 +1460,10 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_SCH::handleGetItemsById( const HAND
 
     GetItemsResponse response;
     SCH_ITEM* item = nullptr;
-    google::protobuf::Any any;
 
     for( const types::KIID& idProto : aCtx.Request.items() )
     {
+        google::protobuf::Any any;
         KIID id( idProto.value() );
 
         SCH_SHEET_PATH itemPath;
@@ -1473,7 +1488,8 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_SCH::handleGetItemsById( const HAND
             if( !PackSymbol( &symbol, static_cast<SCH_SYMBOL*>( item ), itemPath ) )
                 continue;
 
-            any.PackFrom( symbol );
+            if( !any.PackFrom( symbol ) )
+                continue;
         }
         else if( item->Type() == SCH_SHEET_T )
         {
@@ -1482,7 +1498,8 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_SCH::handleGetItemsById( const HAND
             if( !PackSheet( &sheet, static_cast<SCH_SHEET*>( item ), itemPath ) )
                 continue;
 
-            any.PackFrom( sheet );
+            if( !any.PackFrom( sheet ) )
+                continue;
         }
         else
         {
@@ -2016,6 +2033,12 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
         {
             SCH_SHEET* sheet = static_cast<SCH_SHEET*>( item.get() );
 
+            if( !ValidateSheetInstance( &status, sheet, sheetProto ) )
+            {
+                aItemHandler( status, anyItem );
+                continue;
+            }
+
             // A new sheet gets the screen of the file it names: an existing file is loaded (or
             // shared, if the hierarchy already uses it) and a missing one is created on disk
             if( aCreate && !sheet->GetScreen() )
@@ -2082,6 +2105,15 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
             }
         }
 
+        // A refused request must not leave the created item staged
+        if( aCreate && item->Type() == SCH_SYMBOL_T
+                && !ValidateSymbolInstance( &status, static_cast<SCH_SYMBOL*>( item.get() ), symbolProto, targetPath,
+                                            schematic() ) )
+        {
+            aItemHandler( status, anyItem );
+            continue;
+        }
+
         if( aCreate )
         {
             SCH_ITEM* createdItem = static_cast<SCH_ITEM*>( item.release() );
@@ -2098,8 +2130,8 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
                     continue;
                 }
 
-                if( PackSymbol( &packed, symbol, targetPath ) )
-                    newItem.PackFrom( packed );
+                if( PackSymbol( &packed, symbol, targetPath, schematic() ) )
+                    (void) newItem.PackFrom( packed );
             }
             else if( createdItem->Type() == SCH_SHEET_T )
             {
@@ -2116,7 +2148,7 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
                 }
 
                 if( PackSheet( &packed, sheet, targetPath ) )
-                    newItem.PackFrom( packed );
+                    (void) newItem.PackFrom( packed );
             }
             else
             {
@@ -2127,13 +2159,25 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
         {
             // SwapItemData hands the item the temporary's (empty) instance list, so keep the
             // placements to restore afterwards.
-            std::vector<SCH_SYMBOL_INSTANCE> symbolPlacements;
-            std::vector<SCH_SHEET_INSTANCE>  sheetPlacements;
+            std::vector<SCH_SYMBOL_INSTANCE>    symbolPlacements;
+            std::vector<SCH_SHEET_INSTANCE>     sheetPlacements;
+            std::vector<SCH_RULE_AREA_INSTANCE> ruleAreaPlacements;
 
             if( existingItem->Type() == SCH_SYMBOL_T )
                 symbolPlacements = static_cast<SCH_SYMBOL*>( existingItem )->GetInstances();
             else if( existingItem->Type() == SCH_SHEET_T )
                 sheetPlacements = static_cast<SCH_SHEET*>( existingItem )->GetInstances();
+            else if( existingItem->Type() == SCH_RULE_AREA_T )
+                ruleAreaPlacements = static_cast<SCH_RULE_AREA*>( existingItem )->GetInstances();
+
+            // A refused request must not leave the swapped data behind
+            if( existingItem->Type() == SCH_SYMBOL_T
+                    && !ValidateSymbolInstance( &status, static_cast<SCH_SYMBOL*>( existingItem ), symbolProto,
+                                                existingPath, schematic() ) )
+            {
+                aItemHandler( status, anyItem );
+                continue;
+            }
 
             // An unchanged library definition keeps the library symbol the sheet already has, so
             // that the lib_symbols cache is not rewritten under a new name
@@ -2152,6 +2196,12 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
                 connectivityChanged = true;
             }
 
+            if( existingItem->Type() == SCH_RULE_AREA_T )
+            {
+                for( const SCH_RULE_AREA_INSTANCE& placement : ruleAreaPlacements )
+                    static_cast<SCH_RULE_AREA*>( existingItem )->AddInstance( placement );
+            }
+
             if( existingItem->Type() == SCH_SYMBOL_T )
             {
                 SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( existingItem );
@@ -2167,7 +2217,7 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
                 }
 
                 if( PackSymbol( &packed, symbol, existingPath ) )
-                    newItem.PackFrom( packed );
+                    (void) newItem.PackFrom( packed );
             }
             else if( existingItem->Type() == SCH_SHEET_T )
             {
@@ -2184,7 +2234,7 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
                 }
 
                 if( PackSheet( &packed, sheet, existingPath ) )
-                    newItem.PackFrom( packed );
+                    (void) newItem.PackFrom( packed );
             }
             else
             {
@@ -2376,13 +2426,11 @@ applySchematicPlotSettings( const schematic::jobs::SchematicPlotSettings& aSetti
     if( aSettings.page_size() != schematic::jobs::SchematicJobPageSize::SJPS_UNKNOWN )
         aJob.m_pageSizeSelect = FromProtoEnum<JOB_PAGE_SIZE>( aSettings.page_size() );
 
-    switch( aSettings.sheet_mode() )
-    {
-    case schematic::jobs::SJSM_ALL_SHEETS:   aJob.m_plotAll = true;  break;
-    case schematic::jobs::SJSM_SINGLE_SHEET: aJob.m_plotAll = false; break;
-    case schematic::jobs::SJSM_UNKNOWN:
-    default:                                 aJob.m_plotAll = false; break;
-    }
+    // An unspecified sheet mode keeps the value from aSettings.plot_all()
+    if( aSettings.sheet_mode() == schematic::jobs::SJSM_ALL_SHEETS )
+        aJob.m_plotAll = true;
+    else if( aSettings.sheet_mode() == schematic::jobs::SJSM_SINGLE_SHEET )
+        aJob.m_plotAll = false;
 
     if( aDocument.has_sheet_path() )
         aJob.m_sheetPath = UnpackSheetPath( aDocument.sheet_path() ).AsString();
@@ -2979,7 +3027,7 @@ bool findSymbolsAndPins( const SCH_SHEET_LIST& aSchematicSheetList, const SCH_SH
 
         SCH_SYMBOL* symbol = schRef.GetSymbol();
         wxString    refNum = schRef.GetRefNumber();
-        wxString    fullRef = schRef.GetRef() + refNum;
+        wxString    fullRef = schRef.GetComposedRef();
 
         // Skip power symbols
         if( fullRef.StartsWith( wxS( "#" ) ) )
@@ -3080,7 +3128,7 @@ bool sheetContainsOnlyWantedItems(
             schRef.Split();
 
         wxString refNum = schRef.GetRefNumber();
-        wxString fullRef = schRef.GetRef() + refNum;
+        wxString fullRef = schRef.GetComposedRef();
 
         // Skip power symbols
         if( fullRef.StartsWith( wxS( "#" ) ) )
@@ -3535,7 +3583,7 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleAddVariant( const HANDLER_CONTEXT<A
         undoCmd->SetDescription( _( "Add Variant" ) );
         frame()->PushCommandToUndoList( undoCmd );
 
-        frame()->UpdateVariantSelectionCtrl( frame()->Schematic().GetVariantNamesForUI() );
+        frame()->SyncVariantUI();
     }
 
     bumpRevision();
@@ -3601,7 +3649,7 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleDeleteVariant( const HANDLER_CONTEX
         if( frame()->Schematic().GetCurrentVariant().CmpNoCase( name ) == 0 )
             frame()->SetCurrentVariant( wxEmptyString );
 
-        frame()->UpdateVariantSelectionCtrl( frame()->Schematic().GetVariantNamesForUI() );
+        frame()->SyncVariantUI();
         frame()->GetCanvas()->Refresh();
     }
 
@@ -3684,15 +3732,11 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleRenameVariant( const HANDLER_CONTEX
         undoCmd->SetDescription( _( "Rename Variant" ) );
         frame()->PushCommandToUndoList( undoCmd );
 
-        // This will zero out the selection if it happened to point to the old name
-        frame()->UpdateVariantSelectionCtrl( frame()->Schematic().GetVariantNamesForUI() );
+        frame()->SyncVariantUI();
 
+        // Repaint ${VARIANT} text under the new name
         if( isCurrent )
-        {
-            // This will reset the variant-selection-ctrl's selection, but only if the
-            // names have already been updated to include the new name
             frame()->SetCurrentVariant( newName );
-        }
     }
 
     bumpRevision();
@@ -3775,7 +3819,7 @@ HANDLER_RESULT<Empty> API_HANDLER_SCH::handleCopyVariant( const HANDLER_CONTEXT<
         undoCmd->SetDescription( _( "Copy Variant" ) );
         frame()->PushCommandToUndoList( undoCmd );
 
-        frame()->UpdateVariantSelectionCtrl( frame()->Schematic().GetVariantNamesForUI() );
+        frame()->SyncVariantUI();
     }
 
     bumpRevision();
@@ -5101,7 +5145,20 @@ HANDLER_RESULT<PlaceFromLibraryResponse> API_HANDLER_SCH::handlePlaceSymbolFromL
     }
 
     SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &project() );
-    LIB_SYMBOL* libSymbol = adapter->LoadSymbol( libId );
+    LIB_SYMBOL* libSymbol = nullptr;
+
+    try
+    {
+        libSymbol = adapter->LoadSymbol( libId );
+    }
+    catch( const IO_ERROR& ioe )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "error loading symbol '{}' from library: {}", libId.Format().wx_str(),
+                                          ioe.What().utf8_string() ) );
+        return tl::unexpected( e );
+    }
 
     if( !libSymbol )
     {
@@ -5155,7 +5212,19 @@ HANDLER_RESULT<PlaceFromLibraryResponse> API_HANDLER_SCH::handlePlaceSymbolFromL
 
     if( !aCtx.Request.reference().empty() )
     {
-        symbol->SetRef( &targetPath, wxString::FromUTF8( aCtx.Request.reference() ) );
+        wxString base;
+        wxString error = symbol->BaseRefFromUser( targetPath, wxString::FromUTF8( aCtx.Request.reference() ), base,
+                                                  schematic() );
+
+        if( !error.IsEmpty() )
+        {
+            ApiResponseStatus e;
+            e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( error.ToStdString() );
+            return tl::unexpected( e );
+        }
+
+        symbol->SetRef( &targetPath, base );
     }
     else
     {
@@ -5172,13 +5241,17 @@ HANDLER_RESULT<PlaceFromLibraryResponse> API_HANDLER_SCH::handlePlaceSymbolFromL
         {
             existingRefs.SortByReferenceOnly();
 
-            SCH_REFERENCE_LIST refs;
-            refs.AddItem( newReference );
-            refs.SetRefDesTracker( schematic()->Settings().m_refDesTracker );
-            refs.ReannotateByOptions( static_cast<ANNOTATE_ORDER_T>( schematic()->Settings().m_AnnotateSortOrder ),
-                                      static_cast<ANNOTATE_ALGO_T>( schematic()->Settings().m_AnnotateMethod ),
-                                      schematic()->Settings().m_AnnotateStartNum, existingRefs, false, &hierarchy );
-            refs.UpdateAnnotation();
+            // Suffix mode numbers every instance of the sheet file together, so they share one base
+            std::vector<SCH_SHEET_PATH> paths = { targetPath };
+
+            if( schematic()->Settings().m_AnnotateReusedSheetSuffixes )
+            {
+                SCH_SHEET_LIST screenPaths = hierarchy.FindAllSheetsForScreen( targetPath.LastScreen() );
+                screenPaths.SortByPageNumbers();
+                paths.assign( screenPaths.begin(), screenPaths.end() );
+            }
+
+            AnnotateNewSymbol( symbol.get(), paths, existingRefs, schematic()->Settings(), &hierarchy );
         }
     }
 
@@ -5200,8 +5273,8 @@ HANDLER_RESULT<PlaceFromLibraryResponse> API_HANDLER_SCH::handlePlaceSymbolFromL
 
     kiapi::schematic::types::SchematicSymbolInstance packed;
 
-    if( PackSymbol( &packed, placed, targetPath ) )
-        response.mutable_item()->PackFrom( packed );
+    if( PackSymbol( &packed, placed, targetPath, schematic() ) )
+        (void) response.mutable_item()->PackFrom( packed );
 
     return response;
 }

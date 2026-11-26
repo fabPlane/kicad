@@ -25,6 +25,8 @@
 
 #include <diff_merge/auto_resolution.h>
 #include <diff_merge/diff_scene.h>
+#include <pgm_base.h>
+#include <reporter.h>
 #include <trace_helpers.h>
 #include <widgets/widget_diff_canvas.h>
 
@@ -99,6 +101,45 @@ AUTO_MODE loadAutoResolutionFile( std::map<wxString, KICAD_DIFF::ITEM_RES>& aOut
 } // namespace
 
 
+DIALOG_KICAD_MERGE_3WAY::CONFLICT_CONTEXT
+DIALOG_KICAD_MERGE_3WAY::LibraryContext( const std::set<wxString>& aNames, LIBRARY_ITEM_DRAWER aDraw )
+{
+    std::map<KIID_PATH, wxString> names;
+
+    for( const wxString& name : aNames )
+        names.emplace( KICAD_DIFF::LibraryItemKiidPath( name ), name );
+
+    auto nameOf = [names = std::move( names )]( const KIID_PATH& aId ) -> wxString
+    {
+        auto it = names.find( aId );
+        return it != names.end() ? it->second : wxString();
+    };
+
+    CONFLICT_CONTEXT ctx;
+
+    ctx.describeItem = nameOf;
+    ctx.drawSide = [nameOf, draw = std::move( aDraw )]( WIDGET_DIFF_CANVAS& aCanvas, SIDE aSide,
+                                                        const std::optional<KIID_PATH>& aId )
+    {
+        draw( aCanvas, aSide, aId ? nameOf( *aId ) : wxString() );
+    };
+
+    return ctx;
+}
+
+
+bool DIALOG_KICAD_MERGE_3WAY::CanOpen( REPORTER& aReporter )
+{
+    if( Pgm().IsGUI() )
+        return true;
+
+    aReporter.Report( _( "--interactive requires a GUI KiCad process; the console "
+                         "kicad-cli cannot open dialogs.\n" ),
+                      RPT_SEVERITY_ERROR );
+    return false;
+}
+
+
 DIALOG_KICAD_MERGE_3WAY::DIALOG_KICAD_MERGE_3WAY( wxWindow* aParent,
                                                   const KICAD_DIFF::MERGE_PLAN& aPlan,
                                                   CONFLICT_CONTEXT aContext ) :
@@ -144,6 +185,14 @@ DIALOG_KICAD_MERGE_3WAY::DIALOG_KICAD_MERGE_3WAY( wxWindow* aParent,
     m_sdbSizerApply->Enable( KICAD_DIFF::CollectUnresolvedConflicts( m_plan, m_conflictActionIndex ).empty() );
 
     Layout();
+
+    // The first conflict is drawn before the canvas has a surface, so draw it again once shown
+    CallAfter(
+            [this]()
+            {
+                if( m_canvas )
+                    m_canvas->ForceRefresh();
+            } );
 
     // Headless / scripted mode: if KICAD_MERGETOOL_AUTO is set, apply the
     // pre-recorded resolutions and close the dialog immediately. The
@@ -434,21 +483,31 @@ void DIALOG_KICAD_MERGE_3WAY::showConflict( int aIndex )
     m_labelDetail->SetLabel(
             wxString::Format( _( "Conflict on %s, %s" ), describe( action.id, action.id.AsString() ), shown ) );
 
+    auto changeOn = [&]( const std::map<KIID_PATH, const KICAD_DIFF::ITEM_CHANGE*>& aChanges )
+    {
+        auto it = aChanges.find( action.id );
+        return it != aChanges.end() ? it->second : nullptr;
+    };
+
+    const KICAD_DIFF::ITEM_CHANGE* ours = changeOn( m_context.oursChanges );
+    const KICAD_DIFF::ITEM_CHANGE* theirs = changeOn( m_context.theirsChanges );
+
     if( action.kind == KICAD_DIFF::ITEM_RES::MERGE_PROPS )
     {
         // The detail box does not wrap, so the lines are broken here.
-        m_textDetail->SetValue( KICAD_DIFF::BuildConflictDetailText( action )
+        m_textDetail->SetValue( KICAD_DIFF::BuildConflictDetailText( action, ours, theirs, m_context.units.get() )
                                 + _( "\n\nBoth sides changed this item, and their edits are combined.\n"
                                      "Where both changed the same thing, your version is kept.\n"
                                      "Pick a side to take that version whole instead." ) );
     }
     else if( m_radioUnresolved->GetValue() )
     {
-        m_textDetail->SetValue( _( "Pick Ours, Theirs, or Ancestor to preview and keep that version." ) );
+        m_textDetail->SetValue( _( "Pick Ours, Theirs, or Ancestor to preview and keep that version." ) + wxS( "\n" )
+                                + KICAD_DIFF::ConflictValuesText( action, ours, theirs, m_context.units.get() ) );
     }
     else
     {
-        m_textDetail->SetValue( KICAD_DIFF::BuildConflictDetailText( action ) );
+        m_textDetail->SetValue( KICAD_DIFF::BuildConflictDetailText( action, ours, theirs, m_context.units.get() ) );
     }
 
     rebuildCanvas();

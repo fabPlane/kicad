@@ -227,9 +227,7 @@ void PCB_BUILDER::Build()
     for( const SOURCE_NET* net : TypedItems<const SOURCE_NET>( m_design->Nets ) )
     {
         // The schematic import names the net the same way, so an update from the schematic keeps it
-        NETINFO_ITEM* info = new NETINFO_ITEM( &m_board, ToKiCadMarkup( net->Name ) );
-        m_board.Add( info );
-        m_nets[net] = info;
+        m_nets[net] = m_board.FindOrAddNet( ToKiCadMarkup( net->Name ) );
     }
 
     buildRules();
@@ -674,7 +672,7 @@ void PCB_BUILDER::buildPlanes()
             for( ZONE* zone : planes )
             {
                 if( pad->GetNet() == zone->GetNet() )
-                    pad->SetThermalSpokeAngle( m_design->ThermalAngled ? ANGLE_45 : ANGLE_0 );
+                    pad->SetThermalSpokeAngle( PADSTACK::ALL_LAYERS, m_design->ThermalAngled ? ANGLE_45 : ANGLE_0 );
 
                 if( pad->HasHole() && pad->IsOnLayer( zone->GetLayer() ) && pad->GetNet() == zone->GetNet() )
                     pad->SetZoneLayerOverride( zone->GetLayer(), ZLO_FORCE_FLASHED );

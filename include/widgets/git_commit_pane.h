@@ -28,6 +28,7 @@
 
 #include <dialogs/git/git_commit_pane_base.h>
 #include <dialogs/git/git_transfer.h>
+#include <git/git_transfer_busy.h>
 #include <git/git_editor_snapshot.h>
 #include <git/kigit_known_hosts.h>
 
@@ -47,7 +48,7 @@ class wxStaticText;
  * options, the changed files with a checkbox each, the commit and Get Changes buttons, and a
  * gear holding the commit settings and the advanced Git window.
  */
-class GIT_COMMIT_PANE : public GIT_COMMIT_PANE_BASE
+class GIT_COMMIT_PANE : public GIT_COMMIT_PANE_BASE, public GIT_TRANSFER_WATCHER
 {
 public:
     GIT_COMMIT_PANE( EDA_BASE_FRAME* aParent );
@@ -56,6 +57,9 @@ public:
     /// gear's entry for opening that window is left out there.
     GIT_COMMIT_PANE( wxWindow* aParent, EDA_BASE_FRAME* aFrame );
     ~GIT_COMMIT_PANE() override;
+
+    /// Follow a transfer on this pane's repository beginning or ending in any window.
+    void OnGitTransfersChanged() override;
 
     /// Lay out the pane, then re-wrap the status line when the width its column got has changed.
     bool Layout() override;
@@ -72,11 +76,6 @@ public:
 
     /// Read the project's git status and repopulate the list.
     void RefreshFileList();
-
-    /// Put the panel into the state it uses while a transfer runs, for one started elsewhere.
-    /// The advanced window hosts this panel, so a fetch or a force push begun from there must
-    /// disable the same controls. A transfer this panel started keeps the state until it ends.
-    void SetTransferBusy( bool aBusy, const wxString& aStatus = wxEmptyString );
 
     /// Show a line of transfer progress. Called from the UI thread by a KIGIT_STATUS_REPORTER.
     void ShowTransferProgress( const wxString& aText );
@@ -137,6 +136,9 @@ private:
     void onChecklistChanged( wxDataViewEvent& aEvent );
     void onMessageChanged( wxCommandEvent& aEvent );
     void onIdle( wxIdleEvent& aEvent );
+    /// Set the icons and colours that follow the light or dark theme.
+    void applyTheme();
+    void onThemeChanged( wxSysColourChangedEvent& aEvent );
 
     /// The gear's menu: the advanced window and the author.
     void onSettings( wxCommandEvent& aEvent );
@@ -187,9 +189,26 @@ private:
     /// Enable or disable the controls while a network operation runs, showing a status.
     void setBusy( bool aBusy, const wxString& aStatus );
 
+    /// The transfers on the repository this pane shows.
+    GIT_TRANSFER_BUSY& transfers() const;
+
+    /// The transfers on it that other windows started, leaving out this pane's own.
+    bool     othersBusy() const;
+    wxString othersStatus() const;
+    bool     othersCanCancel() const;
+
     /// Read an action's prerequisites off the UI thread, then resume only in the same project.
     void runActionQuery( std::shared_ptr<KIGIT_COMMON> aCommon, std::function<void( KIGIT_COMMON& )> aWork,
                          std::function<void()> aDone, const wxString& aStatus );
+
+    /// Read the keyring before a transfer, holding the pane busy as aStatus, then call aStart unless
+    /// cancelled or the session changed. False when nothing needs reading
+    bool deferForSecret( const std::shared_ptr<KIGIT_COMMON>& aCommon, const wxString& aStatus,
+                         std::function<void()> aStart );
+    void abandonKeyringWait();
+
+    /// Forget a keyring wait without touching the busy state. True when one was pending
+    bool dropKeyringWait();
 
     // The on*Done continuations run back on the UI thread, so credential prompts and
     // confirmations stay there. aRetriedAfterTrust marks a transfer already rerun after a trusted host key.
@@ -244,6 +263,9 @@ private:
 
     bool m_hasUnpushedCommits;
 
+    /// Commits waiting to be pushed, or 0 when the branch has no upstream to count them against
+    size_t m_unpushedCount = 0;
+
     bool m_hasRemote;
 
     /// Whether the last completed status snapshot had a repository.
@@ -252,8 +274,8 @@ private:
     /// True when HEAD is a commit rather than a branch, so nothing can be committed or pushed.
     bool m_headDetached;
 
-    /// True when the upstream has commits this project does not, so Get Changes has work to do.
-    bool m_upstreamAhead;
+    /// Commits the upstream has that this project does not, which Get Changes brings in.
+    size_t m_upstreamAhead;
 
     /// True while a merge or rebase is in progress. The network button then reads Abandon.
     bool m_operationInProgress;
@@ -273,8 +295,7 @@ private:
     /// The branch and commit the last refresh showed, so Undo takes back only the commit the user saw.
     std::pair<wxString, wxString> m_undoHead;
 
-    /// The description box's hint, a label laid over it while it is empty. Null where the box
-    /// shows its own.
+    /// The description box's hint, a label laid over it while it is empty.
     wxStaticText* m_descriptionHint = nullptr;
 
     /// Opens the History page from the docked panel. Never shown inside the advanced window.
@@ -293,6 +314,25 @@ private:
     /// The push or pull this panel submitted last.
     KIGIT_TRANSFER m_transfer;
 
+    /// Keyring reads and credential prompts the current request has shown, reset when it ends
+    int m_credentialPrompts = 0;
+
+    /// A push or pull waits on the keyring. The count fences off an answer from a cancelled wait
+    bool     m_keyringWait = false;
+    unsigned m_keyringRequest = 0;
+
+    /// The status m_transfer began with, shown again once other windows' transfers end before it
+    wxString m_transferStatus;
+
+    /// m_transfer's hold on the repository, so every other pane on it follows and can cancel it
+    GIT_TRANSFER_BUSY::HOLD m_ownHold;
+
+    /// Follows the transfers other windows run on this pane's repository
+    UTIL::LINK m_transferLink;
+
+    /// The busy state shows another window's transfer, which this pane releases when the last one ends
+    bool m_showingOthers = false;
+
 
     /// Told when a transfer starts and ends. Empty unless an owning window asked.
     std::function<void( bool )> m_busyChangedHandler;
@@ -306,6 +346,9 @@ private:
     /// The controls' minimum height from the last layout, applied to the AUI pane at idle time.
     int       m_dockMinHeight = -1;
     wxWindow* m_dockParent = nullptr;
+
+    /// The managed window's client height the AUI minimum was last clamped to.
+    int       m_dockFrameHeight = -1;
     bool      m_dockUpdatePending = false;
 
     /// True once this panel has attached its refresh listener to a session at least once. A

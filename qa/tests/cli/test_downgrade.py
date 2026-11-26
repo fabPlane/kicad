@@ -27,6 +27,12 @@ HATCH_FOOTPRINT = """(footprint "Hatch" (version 20260623) (generator "pcbnew")
   (fp_rect (start 0 0) (end 10 5) (stroke (width 0.2) (type default))
     (fill hatch) (layer "F.SilkS")))
 """
+SCALED_FOOTPRINT = """(footprint "Scaled" (version 20260623) (generator "pcbnew")
+  (layer "F.Cu")
+  (transform (translate 0 0) (rotate 0) (scale 2 2))
+  (fp_rect (start 0 0) (end 10 5) (stroke (width 0.2) (type default))
+    (fill no) (layer "F.SilkS")))
+"""
 HATCH_SYMBOL = """(kicad_symbol_lib (version 20260629) (generator "eeschema")
   (symbol "Hatch"
     (property "Reference" "U" (at 0 2 0) (effects (font (size 1 1))))
@@ -1205,6 +1211,198 @@ class TestDropApproximations(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(list(output_directory.iterdir()), [sentinel])
                 self.assertEqual(sentinel.read_bytes(), b"existing user data")
+                self.assertEqual(self.source_snapshot(), original)
+
+
+class TestLibraryDowngrade(unittest.TestCase):
+    """sym downgrade and fp downgrade convert one library with no design involved."""
+
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory(prefix="kicad_library_downgrade_")
+        self.addCleanup(self.scratch.cleanup)
+        self.root = Path(self.scratch.name)
+        self.symbols = self.root / "Local.kicad_sym"
+        self.symbols.write_text(HATCH_SYMBOL)
+        self.footprints = self.root / "Local.pretty"
+        self.footprints.mkdir()
+        (self.footprints / "Hatch.kicad_mod").write_text(HATCH_FOOTPRINT)
+        self.env = os.environ.copy()
+        self.env["KICAD_CONFIG_HOME"] = str(self.root / "config")
+        self.env["LC_ALL"] = "C"
+
+    def cli(self, *args):
+        return subprocess.run(
+            [os.environ.get("KICAD_CLI", "kicad-cli"), *map(str, args)],
+            env=self.env, capture_output=True, text=True, timeout=60,
+        )
+
+    def require_success(self, result):
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def sources(self):
+        return (self.symbols.read_bytes(), (self.footprints / "Hatch.kicad_mod").read_bytes())
+
+    def tree(self):
+        """Every path in the scratch area except the settings KiCad writes for itself."""
+        return sorted(p.relative_to(self.root) for p in self.root.rglob("*")
+                      if "config" not in p.relative_to(self.root).parts)
+
+    def library(self, kind):
+        return self.symbols if kind == "sym" else self.footprints
+
+    def output(self, kind, name):
+        return self.root / name / ("Local.kicad_sym" if kind == "sym" else "Local.pretty")
+
+    def converted(self, kind, output):
+        return (output if kind == "sym" else output / "Hatch.kicad_mod").read_text()
+
+    def downgrade(self, kind, output, *options):
+        where = ["--output", output] if output else []
+        return self.cli(kind, "downgrade", self.library(kind), "--target", "9.0", *where, *options)
+
+    def test_library_converts_without_a_design(self):
+        for kind, version, fill in (("sym", 20241209, "(type outline)"), ("fp", 20241229, "(fill yes)")):
+            with self.subTest(kind=kind):
+                original = self.sources()
+                output = self.output(kind, f"converted-{kind}")
+                self.require_success(self.downgrade(kind, output, "--force"))
+                converted = self.converted(kind, output)
+                self.assertIn(f"(version {version})", converted)
+                self.assertIn(fill, converted)
+                self.assertEqual(self.sources(), original)
+
+    def test_drop_approximations_omits_the_fill(self):
+        for kind, fill in (("sym", "(type none)"), ("fp", "(fill no)")):
+            with self.subTest(kind=kind):
+                original = self.sources()
+                output = self.output(kind, f"dropped-{kind}")
+                self.require_success(self.downgrade(kind, output, "--force", "--drop-approximations"))
+                self.assertIn(fill, self.converted(kind, output))
+                self.assertEqual(self.sources(), original)
+
+    def test_dry_run_reports_without_writing(self):
+        for kind in ("sym", "fp"):
+            with self.subTest(kind=kind):
+                before = self.tree()
+                original = self.sources()
+                self.require_success(self.downgrade(kind, None, "--dry-run"))
+                self.assertEqual(self.tree(), before)
+                self.assertEqual(self.sources(), original)
+
+    def test_lossy_conversion_needs_force(self):
+        for kind in ("sym", "fp"):
+            with self.subTest(kind=kind):
+                original = self.sources()
+                output = self.output(kind, f"refused-{kind}")
+                self.assertNotEqual(self.downgrade(kind, output).returncode, 0)
+                self.assertFalse(output.exists())
+                self.assertEqual(self.sources(), original)
+
+    def test_blocked_library_is_refused_despite_force(self):
+        self.symbols.write_text(HATCH_SYMBOL.replace('(symbol "Hatch"', '(symbol "Hatch" (power local)', 1))
+        (self.footprints / "Hatch.kicad_mod").write_text(SCALED_FOOTPRINT)
+        for kind in ("sym", "fp"):
+            with self.subTest(kind=kind):
+                original = self.sources()
+                output = self.output(kind, f"blocked-{kind}")
+                self.assertNotEqual(self.downgrade(kind, output, "--force").returncode, 0)
+                self.assertFalse(output.exists())
+                self.assertEqual(self.sources(), original)
+
+    def test_existing_output_is_left_alone(self):
+        for kind in ("sym", "fp"):
+            with self.subTest(kind=kind):
+                output = self.output(kind, f"occupied-{kind}")
+                output.parent.mkdir()
+                if kind == "sym":
+                    output.write_bytes(b"existing user data")
+                else:
+                    output.mkdir()
+                    (output / "keep.txt").write_bytes(b"existing user data")
+                self.assertNotEqual(self.downgrade(kind, output, "--force").returncode, 0)
+                kept = output if kind == "sym" else output / "keep.txt"
+                self.assertEqual(kept.read_bytes(), b"existing user data")
+
+
+class TestCompatibilityReportFile(unittest.TestCase):
+    """--report writes the readable compatibility report that the dialog shows."""
+
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory(prefix="kicad_downgrade_report_")
+        self.addCleanup(self.scratch.cleanup)
+        self.root = Path(self.scratch.name)
+        self.source = self.root / "source"
+        self.source.mkdir()
+        shutil.copyfile(GOLDEN / "current/body_styles.kicad_pro", self.source / "body_styles.kicad_pro")
+        shutil.copyfile(GOLDEN / "current/body_styles.kicad_sch", self.source / "body_styles.kicad_sch")
+        shutil.copyfile(GOLDEN / "current/graphics.kicad_pcb", self.source / "body_styles.kicad_pcb")
+        self.symbols = self.source / "Local.kicad_sym"
+        self.symbols.write_text(HATCH_SYMBOL)
+        self.footprints = self.source / "Local.pretty"
+        self.footprints.mkdir()
+        (self.footprints / "Hatch.kicad_mod").write_text(HATCH_FOOTPRINT)
+        self.env = os.environ.copy()
+        self.env["KICAD_CONFIG_HOME"] = str(self.root / "config")
+        self.env["LC_ALL"] = "C"
+
+    def cli(self, *args):
+        return subprocess.run(
+            [os.environ.get("KICAD_CLI", "kicad-cli"), *map(str, args)],
+            env=self.env, capture_output=True, text=True, timeout=60,
+        )
+
+    def require_success(self, result):
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def source_snapshot(self):
+        return {str(p.relative_to(self.source)): p.read_bytes()
+                for p in self.source.rglob("*") if p.is_file()}
+
+    def commands(self):
+        return (("project", self.source / "body_styles.kicad_pro"),
+                ("sch", self.source / "body_styles.kicad_sch"),
+                ("pcb", self.source / "body_styles.kicad_pcb"),
+                ("sym", self.symbols),
+                ("fp", self.footprints))
+
+    def test_every_downgrade_command_can_write_the_report(self):
+        for group, source in self.commands():
+            with self.subTest(group=group):
+                report = self.root / f"report-{group}.txt"
+                self.require_success(self.cli(group, "downgrade", source, "--target", "9.0", "--dry-run"))
+                self.assertFalse(report.exists())
+                self.require_success(
+                    self.cli(group, "downgrade", source, "--target", "9.0", "--dry-run", "--report", report))
+                self.assertGreater(len(report.read_text().splitlines()), 1)
+
+    def test_text_and_json_reports_describe_the_same_findings(self):
+        text = self.root / "report.txt"
+        js = self.root / "report.json"
+        self.require_success(
+            self.cli("project", "downgrade", self.source / "body_styles.kicad_pro", "--target", "9.0",
+                     "--dry-run", "--report", text, "--report-json", js))
+        written = text.read_text()
+        entries = json.loads(js.read_text())["entries"]
+        self.assertTrue(entries)
+        for entry in entries:
+            self.assertIn(entry["feature"], written)
+
+    def test_report_is_written_even_when_the_export_is_refused(self):
+        original = self.source_snapshot()
+        report = self.root / "refused.txt"
+        result = self.cli("sym", "downgrade", self.symbols, "--target", "9.0",
+                          "--output", self.root / "out/Local.kicad_sym", "--report", report)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertGreater(len(report.read_text().strip()), 0)
+        self.assertEqual(self.source_snapshot(), original)
+
+    def test_report_cannot_overwrite_a_design_or_library(self):
+        victim = self.source / "body_styles.kicad_sch"
+        for group, source in self.commands():
+            with self.subTest(group=group):
+                original = self.source_snapshot()
+                result = self.cli(group, "downgrade", source, "--target", "9.0", "--dry-run", "--report", victim)
+                self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(self.source_snapshot(), original)
 
 

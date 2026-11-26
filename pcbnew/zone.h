@@ -246,7 +246,7 @@ public:
     }
 
     int GetThermalReliefGap() const { return m_thermalReliefGap; }
-    int GetThermalReliefGap( PAD* aPad, wxString* aSource = nullptr ) const;
+    int GetThermalReliefGap( PAD* aPad, PCB_LAYER_ID aLayer, wxString* aSource = nullptr ) const;
 
     void SetThermalReliefSpokeWidth( int aThermalReliefSpokeWidth )
     {
@@ -602,6 +602,8 @@ public:
      * @param aFlipDirection is the direction of the flip.
      */
     void Mirror( const VECTOR2I& aMirrorRef, FLIP_DIRECTION aFlipDirection ) override;
+
+    void Mirror( const SEG& aAxis ) override;
 
     /**
      * @return the class name.

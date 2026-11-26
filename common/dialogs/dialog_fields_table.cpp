@@ -58,6 +58,15 @@
 #endif
 
 
+static constexpr int MAX_COL_WIDTH = 100000;
+
+
+static bool isValidColumnWidth( int aWidth )
+{
+    return aWidth > 0 && aWidth <= MAX_COL_WIDTH;
+}
+
+
 namespace
 {
 template <typename PRESET>
@@ -506,13 +515,23 @@ void DIALOG_FIELDS_TABLE::saveJobSettings( JOB_EXPORT_BOM& aJob )
 }
 
 
+void DIALOG_FIELDS_TABLE::rememberLoadedPresets()
+{
+    m_loadedSettings.m_BomPresets = GetUserBomPresets();
+    m_loadedSettings.m_BomSettings = getDataModel()->GetBomSettings();
+    m_loadedSettings.m_BomFmtPresets = GetUserBomFmtPresets();
+    m_loadedSettings.m_BomFmtSettings = GetCurrentBomFmtSettings();
+}
+
+
 bool DIALOG_FIELDS_TABLE::savePresets( bool aSaveCurrentSettings )
 {
     bool modified = false;
 
+    // Compare with the presets as loaded, so a stored preset the load merely normalized stays untouched
     std::vector<BOM_PRESET> presets = GetUserBomPresets();
 
-    if( m_cfgBomSettings.m_BomPresets != presets )
+    if( m_loadedSettings.m_BomPresets != presets )
     {
         modified = true;
         m_cfgBomSettings.m_BomPresets = presets;
@@ -520,7 +539,7 @@ bool DIALOG_FIELDS_TABLE::savePresets( bool aSaveCurrentSettings )
 
     BOM_PRESET bomSettings = getDataModel()->GetBomSettings();
 
-    if( aSaveCurrentSettings && m_cfgBomSettings.m_BomSettings != bomSettings )
+    if( aSaveCurrentSettings && m_loadedSettings.m_BomSettings != bomSettings )
     {
         modified = true;
         m_cfgBomSettings.m_BomSettings = bomSettings;
@@ -528,7 +547,7 @@ bool DIALOG_FIELDS_TABLE::savePresets( bool aSaveCurrentSettings )
 
     std::vector<BOM_FMT_PRESET> fmts = GetUserBomFmtPresets();
 
-    if( m_cfgBomSettings.m_BomFmtPresets != fmts )
+    if( m_loadedSettings.m_BomFmtPresets != fmts )
     {
         modified = true;
         m_cfgBomSettings.m_BomFmtPresets = fmts;
@@ -536,7 +555,7 @@ bool DIALOG_FIELDS_TABLE::savePresets( bool aSaveCurrentSettings )
 
     BOM_FMT_PRESET fmtSettings = GetCurrentBomFmtSettings();
 
-    if( aSaveCurrentSettings && m_cfgBomSettings.m_BomFmtSettings != fmtSettings )
+    if( aSaveCurrentSettings && m_loadedSettings.m_BomFmtSettings != fmtSettings )
     {
         modified = true;
         m_cfgBomSettings.m_BomFmtSettings = fmtSettings;
@@ -680,14 +699,30 @@ void DIALOG_FIELDS_TABLE::SavePanelLayout()
 }
 
 
+int DIALOG_FIELDS_TABLE::getStoredColumnWidth( const std::string& aFieldName ) const
+{
+    auto it = m_cfgDialogSettings.field_widths.find( aFieldName );
+
+    if( it == m_cfgDialogSettings.field_widths.end() || !isValidColumnWidth( it->second ) )
+        return 0;
+
+    return m_grid->FromDIP( it->second );
+}
+
+
 void DIALOG_FIELDS_TABLE::SaveColumnWidths()
 {
     for( int i = 0; i < m_grid->GetNumberCols(); i++ )
     {
         if( m_grid->IsColShown( i ) )
         {
+            int width = m_grid->ToDIP( m_grid->GetColSize( i ) );
+
+            if( !isValidColumnWidth( width ) )
+                continue;
+
             std::string fieldName( getDataModel()->GetColFieldName( i ).ToUTF8() );
-            m_cfgDialogSettings.field_widths[fieldName] = m_grid->GetColSize( i );
+            m_cfgDialogSettings.field_widths[fieldName] = width;
         }
     }
 }
@@ -823,9 +858,9 @@ void DIALOG_FIELDS_TABLE::SetupAllColumnProperties()
 
             std::string key( getDataModel()->GetColFieldName( col ).ToUTF8() );
 
-            if( m_cfgDialogSettings.field_widths.count( key ) && ( m_cfgDialogSettings.field_widths.at( key ) > 0 ) )
+            if( int storedWidth = getStoredColumnWidth( key ); storedWidth > 0 )
             {
-                m_grid->SetColSize( col, m_cfgDialogSettings.field_widths.at( key ) );
+                m_grid->SetColSize( col, storedWidth );
             }
             else
             {
@@ -1141,6 +1176,13 @@ void DIALOG_FIELDS_TABLE::OnRemoveField( wxCommandEvent& aEvent )
                     getDataModel()->RemoveColumn( col );
 
                 m_viewControlsDataModel->DeleteRow( row );
+
+                for( auto& [name, preset] : m_bomPresets )
+                    std::erase_if( preset.fieldsOrdered,
+                                   [&]( BOM_FIELD const& f )
+                                   {
+                                       return f.name == fieldName;
+                                   } );
 
                 syncBomPresetSelection();
                 OnModify();
@@ -1671,8 +1713,8 @@ void DIALOG_FIELDS_TABLE::doApplyBomPreset( const BOM_PRESET& aPreset )
         m_viewControlsDataModel->SetValue( i, LABEL_COLUMN, label );
         m_grid->SetColLabelValue( col, label );
 
-        if( m_cfgDialogSettings.field_widths.count( fieldNameStr ) )
-            m_grid->SetColSize( col, m_cfgDialogSettings.field_widths.at( fieldNameStr ) );
+        if( int storedWidth = getStoredColumnWidth( fieldNameStr ); storedWidth > 0 )
+            m_grid->SetColSize( col, storedWidth );
 
         // Set shown columns
         bool show = getDataModel()->GetShowColumn( col );
@@ -1757,8 +1799,16 @@ void DIALOG_FIELDS_TABLE::rebuildBomPresetsWidget()
     // At least the built-in presets should always be present
     wxASSERT( !m_bomPresets.empty() );
 
-    m_cbBomPresets->SetSelection( default_idx );
-    m_currentBomPreset = static_cast<BOM_PRESET*>( m_cbBomPresets->GetClientData( default_idx ) );
+    if( static_cast<unsigned int>( default_idx ) < m_cbBomPresets->GetCount() )
+    {
+        m_cbBomPresets->SetSelection( default_idx );
+        m_currentBomPreset = static_cast<BOM_PRESET*>( m_cbBomPresets->GetClientData( default_idx ) );
+    }
+    else if( !m_cbBomPresets->IsEmpty() )
+    {
+        m_cbBomPresets->SetSelection( 0 );
+        m_currentBomPreset = static_cast<BOM_PRESET*>( m_cbBomPresets->GetClientData( 0 ) );
+    }
 }
 
 
@@ -2016,10 +2066,17 @@ BOM_FMT_PRESET DIALOG_FIELDS_TABLE::GetCurrentBomFmtSettings()
 
     if( selection != wxNOT_FOUND )
     {
-        if( auto* preset = static_cast<BOM_FMT_PRESET*>( m_cbBomFmtPresets->GetClientData( selection ) ) )
-            current.name = preset->name;
+        if( m_cbBomFmtPresets->HasClientData() )
+        {
+            if( auto* preset = static_cast<BOM_FMT_PRESET*>( m_cbBomFmtPresets->GetClientData( selection ) ) )
+                current.name = preset->name;
+            else
+                current.name = m_cbBomFmtPresets->GetString( selection );
+        }
         else
+        {
             current.name = m_cbBomFmtPresets->GetString( selection );
+        }
     }
 
     current.fieldDelimiter = m_textFieldDelimiter->GetValue();
@@ -2153,8 +2210,16 @@ void DIALOG_FIELDS_TABLE::rebuildBomFmtPresetsWidget()
     // At least the built-in presets should always be present
     wxASSERT( !m_bomFmtPresets.empty() );
 
-    m_cbBomFmtPresets->SetSelection( default_idx );
-    m_currentBomFmtPreset = static_cast<BOM_FMT_PRESET*>( m_cbBomFmtPresets->GetClientData( default_idx ) );
+    if( static_cast<unsigned int>( default_idx ) < m_cbBomFmtPresets->GetCount() )
+    {
+        m_cbBomFmtPresets->SetSelection( default_idx );
+        m_currentBomFmtPreset = static_cast<BOM_FMT_PRESET*>( m_cbBomFmtPresets->GetClientData( default_idx ) );
+    }
+    else if( !m_cbBomPresets->IsEmpty() )
+    {
+        m_cbBomFmtPresets->SetSelection( 0 );
+        m_currentBomFmtPreset = static_cast<BOM_FMT_PRESET*>( m_cbBomFmtPresets->GetClientData( 0 ) );
+    }
 }
 
 

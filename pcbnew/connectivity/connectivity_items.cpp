@@ -160,6 +160,7 @@ CN_ITEM* CN_LIST::Add( PAD* pad )
      case PAD_ATTRIB::SMD:
      case PAD_ATTRIB::NPTH:
      case PAD_ATTRIB::CONN:
+     case PAD_ATTRIB::NON_COMPONENT:
      {
         LSEQ lmsk = pad->GetLayerSet().CuStack();
 
@@ -259,7 +260,8 @@ CN_ITEM* CN_LIST::Add( CN_ZONE_LAYER* zitem )
     appendItem( zitem );
     addItemtoTree( zitem );
 
-    // Re-mark dirty after tree insertion since BBox() clears the dirty flag
+    // In step with the other Add() overloads, where BBox() clears the flag. A zone layer
+    // answers from its cached island box and leaves it alone.
     zitem->SetDirty( true );
     SetDirty();
     return zitem;
@@ -394,9 +396,10 @@ int CN_ANCHOR::ConnectedItemsCount() const
     {
         if( item->Parent()->Type() == PCB_ZONE_T )
         {
-            ZONE* zone = static_cast<ZONE*>( item->Parent() );
-
-            if( zone->HitTestFilledArea( item->GetBoardLayer(), Pos() ) )
+            // The connection is to this island, which carries a triangulation index, not to
+            // every island the zone filled on the layer. Testing the whole fill walks every
+            // point of a plane, which the ratsnest asks for twice per airline.
+            if( static_cast<CN_ZONE_LAYER*>( item )->ContainsPoint( Pos() ) )
                 connected_count++;
         }
         else if( item->Parent()->HitTest( Pos() ) )

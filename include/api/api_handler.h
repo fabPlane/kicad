@@ -74,6 +74,21 @@ public:
      */
     API_RESULT Handle( ApiRequest& aMsg );
 
+    /// @return true if this handler can process the given request message type
+    bool CanHandle( const std::string& aTypeName ) const
+    {
+        return m_handlers.find( aTypeName ) != m_handlers.end();
+    }
+
+    /**
+     * @return true if the given request message is allowed while an async API task is running.
+     */
+    bool AllowsDuringTask( const std::string& aTypeName ) const
+    {
+        auto it = m_handlers.find( aTypeName );
+        return it != m_handlers.end() && it->second.AllowedDuringTask;
+    }
+
     /**
      * Whether a command can be served when KiCad is running without an editor window.
      * Commands registered as GUI_ONLY are still dispatched in headless mode; they are expected to
@@ -113,6 +128,12 @@ public:
     /// @return the server this handler is registered with, or nullptr
     KICAD_API_SERVER* Server() const { return m_server; }
 
+    /// Set by KICAD_API_SERVER::RegisterHandler; null when the handler is not registered.
+    void setApiServer( KICAD_API_SERVER* aServer ) { attachServer( aServer ); }
+
+    /// Same as Server(); kept under the upstream name
+    KICAD_API_SERVER* apiServer() const { return m_server; }
+
 protected:
     friend class KICAD_API_SERVER;
 
@@ -148,6 +169,15 @@ protected:
      */
     typedef std::function<HANDLER_RESULT<ApiResponse>( ApiRequest& )> REQUEST_HANDLER;
 
+    /// A handler method together with the metadata reported by GetSupportedCommands
+    struct HANDLER_ENTRY
+    {
+        REQUEST_HANDLER Handler;
+        std::string     ResponseTypeName;
+        HANDLER_MODE    Mode = HANDLER_MODE::HEADLESS_CAPABLE;
+        bool            AllowedDuringTask = false;
+    };
+
     /**
      * Registers an API command handler for the given message types.
      *
@@ -163,11 +193,13 @@ protected:
      * @param aHandler is the handler function for the given request and response types
      * @param aMode declares whether the command can be served without an editor window; this is
      *              only metadata for GetSupportedCommands and does not affect dispatch
+     * @param aAllowedDuringTask marks the command as safe to serve while an async task is running
      */
     template <class RequestType, class ResponseType, class HandlerType>
     void registerHandler( HANDLER_RESULT<ResponseType> ( HandlerType::*aHandler )(
                                   const HANDLER_CONTEXT<RequestType>& ),
-                          HANDLER_MODE aMode = HANDLER_MODE::HEADLESS_CAPABLE )
+                          HANDLER_MODE aMode = HANDLER_MODE::HEADLESS_CAPABLE,
+                          bool aAllowedDuringTask = false )
     {
         std::string typeName { RequestType().GetTypeName() };
 
@@ -176,12 +208,13 @@ protected:
 
         m_registrationOrder.push_back( typeName );
 
-        REGISTERED_HANDLER& entry = m_handlers[typeName];
+        HANDLER_ENTRY& entry = m_handlers[typeName];
         entry.ResponseTypeName = ResponseType().GetTypeName();
         entry.Mode = aMode;
+        entry.AllowedDuringTask = aAllowedDuringTask;
 
         entry.Handler =
-                [this, aHandler]( ApiRequest& aRequest ) -> API_RESULT
+                [this, aHandler, typeName]( ApiRequest& aRequest ) -> API_RESULT
                 {
                     HANDLER_CONTEXT<RequestType> ctx;
                     ApiResponse envelope;
@@ -196,8 +229,17 @@ protected:
 
                     if( response.has_value() )
                     {
+                        if( !envelope.mutable_message()->PackFrom( *response ) )
+                        {
+                            wxFAIL_MSG( wxString::Format( "Failed to pack '%s'", typeName ) );
+
+                            ApiResponseStatus status;
+                            status.set_status( ApiStatusCode::AS_INTERNAL_ERROR );
+                            status.set_error_message( "the response could not be serialized" );
+                            return tl::unexpected( status );
+                        }
+
                         envelope.mutable_status()->set_status( ApiStatusCode::AS_OK );
-                        envelope.mutable_message()->PackFrom( *response );
                         return envelope;
                     }
                     else
@@ -207,16 +249,22 @@ protected:
                 };
     }
 
-    /// A handler method together with the metadata reported by GetSupportedCommands
-    struct REGISTERED_HANDLER
+    /**
+     * Registers a headless-capable API command handler.  @see the overload above.
+     *
+     * @param aAllowedDuringTask marks the command as safe to serve while an async task is running
+     */
+    template <class RequestType, class ResponseType, class HandlerType>
+    void registerHandler( HANDLER_RESULT<ResponseType> ( HandlerType::*aHandler )(
+                                  const HANDLER_CONTEXT<RequestType>& ),
+                          bool aAllowedDuringTask )
     {
-        REQUEST_HANDLER Handler;
-        std::string     ResponseTypeName;
-        HANDLER_MODE    Mode;
-    };
+        registerHandler<RequestType, ResponseType, HandlerType>(
+                aHandler, HANDLER_MODE::HEADLESS_CAPABLE, aAllowedDuringTask );
+    }
 
     /// Maps type name (without the URL prefix) to a handler method
-    std::map<std::string, REGISTERED_HANDLER> m_handlers;
+    std::map<std::string, HANDLER_ENTRY> m_handlers;
 
     /// Request type names in the order they were registered, for stable command listings
     std::vector<std::string> m_registrationOrder;

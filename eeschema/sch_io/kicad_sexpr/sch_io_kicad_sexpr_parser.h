@@ -137,8 +137,8 @@ public:
 
     struct CHAIN_TERMINAL
     {
-        wxString ref;
-        wxString pin;
+        wxString refDes;
+        wxString pinNum;
     };
     using CHAIN_TERMINALS = std::pair<CHAIN_TERMINAL, CHAIN_TERMINAL>;
 
@@ -290,7 +290,7 @@ private:
     void parseGroupMembers( GROUP_INFO& aGroupInfo );
 
     SCH_SHEET_PIN* parseSchSheetPin( SCH_SHEET* aSheet );
-    SCH_FIELD* parseSchField( SCH_ITEM* aParent );
+    SCH_FIELD*          parseSchField( SCH_ITEM* aParent, std::set<FIELD_T>* aReadMandatoryFields = nullptr );
     SCH_SYMBOL* parseSchematicSymbol();
     SCH_BITMAP* parseImage();
     SCH_SHEET* parseSheet();

@@ -367,9 +367,12 @@ bool DRC_TEST_PROVIDER_COPPER_CLEARANCE::testSingleLayerItemAgainstItem( BOARD_I
                     continue;
             }
 
-            int netcode = b_net[ii] ? b_net[ii]->GetNetCode() : 0;
+            const int netcode = b_net[ii] ? b_net[ii]->GetNetCode() : 0;
 
-            if( netcode && m_drcEngine->IsNetTieExclusion( netcode, layer, holeShape->Centre(), a[ii] ) )
+            // Footprint-internal net-tie pads can be left unassigned, so net code 0 must be
+            // tested too. For example, a net tie that connects across two layers by a PTH
+            // pad that isn't connected to the external nets directly.
+            if( m_drcEngine->IsNetTieExclusion( netcode, layer, holeShape->Centre(), a[ii] ) )
                 continue;
 
             constraint = m_drcEngine->EvalRules( HOLE_CLEARANCE_CONSTRAINT, b[ii], a[ii], layer );
@@ -1275,8 +1278,8 @@ void DRC_TEST_PROVIDER_COPPER_CLEARANCE::testZonesToZones()
     BS::multi_future<void> zone_futures;
 
     auto reportZoneZoneViolation =
-            [this]( ZONE* zoneA, ZONE* zoneB, VECTOR2I& pt, int actual, const DRC_CONSTRAINT& constraint,
-                    PCB_LAYER_ID layer ) -> void
+            [this]( ZONE* zoneA, ZONE* zoneB, const VECTOR2I& pt, const VECTOR2I& otherPt, int actual,
+                    const DRC_CONSTRAINT& constraint, PCB_LAYER_ID layer ) -> void
             {
                 std::shared_ptr<DRC_ITEM> drcItem = DRC_ITEM::Create( DRCE_CLEARANCE );
                 drcItem->SetErrorDetail( formatMsg( _( "(%s clearance %s; actual %s)" ),
@@ -1285,7 +1288,7 @@ void DRC_TEST_PROVIDER_COPPER_CLEARANCE::testZonesToZones()
                                                     std::max( actual, 0 ) ) );
                 drcItem->SetItems( zoneA, zoneB );
                 drcItem->SetViolatingRule( constraint.GetParentRule() );
-                reportTwoItemGeometry( drcItem, pt, zoneA, zoneB, layer, actual );
+                reportTwoPointGeometry( drcItem, pt, pt, actual > 0 ? otherPt : pt, layer );
             };
 
     auto checkZones =
@@ -1302,6 +1305,7 @@ void DRC_TEST_PROVIDER_COPPER_CLEARANCE::testZonesToZones()
                 ZONE*          zoneB = m_board->m_DRCCopperZones[zoneB_idx];
                 int            actual = 0;
                 VECTOR2I       pt;
+                VECTOR2I       otherPt;
                 DRC_CONSTRAINT constraint = m_drcEngine->EvalRules( CLEARANCE_CONSTRAINT, zoneA, zoneB, layer );
                 int            clearance = constraint.GetValue().Min();
 
@@ -1348,9 +1352,8 @@ void DRC_TEST_PROVIDER_COPPER_CLEARANCE::testZonesToZones()
                                     {
                                         const SEG& testSegment = testSegments[segIdx];
                                         int64_t  dist_sq = 0;
-                                        VECTOR2I other_pt;
 
-                                        refSegment.NearestPoints( testSegment, pt, other_pt, dist_sq );
+                                        refSegment.NearestPoints( testSegment, pt, otherPt, dist_sq );
                                         actual = std::floor( std::sqrt( dist_sq ) + 0.5 );
 
                                         if( actual < clearance )
@@ -1367,7 +1370,7 @@ void DRC_TEST_PROVIDER_COPPER_CLEARANCE::testZonesToZones()
                             if( found )
                             {
                                 done.fetch_add( 1 );
-                                reportZoneZoneViolation( zoneA, zoneB, pt, actual, constraint, layer );
+                                reportZoneZoneViolation( zoneA, zoneB, pt, otherPt, actual, constraint, layer );
                                 return;
                             }
                         }

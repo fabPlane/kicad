@@ -42,6 +42,7 @@
 #include <trace_helpers.h>
 
 #include <wx/app.h>
+#include <wx/evtloop.h>
 #include <wx/frame.h>
 #include <wx/image.h>
 
@@ -389,6 +390,7 @@ OPENGL_GAL::OPENGL_GAL( const KIGFX::VC_SETTINGS& aVcSettings, GAL_DISPLAY_OPTIO
 
 #if defined _WIN32 || defined _WIN64
     Connect( wxEVT_ENTER_WINDOW, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
+    Connect( wxEVT_LEAVE_WINDOW, wxMouseEventHandler( OPENGL_GAL::skipMouseEvent ) );
 #endif
 
     Bind( wxEVT_GESTURE_ZOOM, &OPENGL_GAL::skipGestureEvent, this );
@@ -529,14 +531,30 @@ wxString OPENGL_GAL::CheckFeatures( GAL_DISPLAY_OPTIONS& aOptions )
         KIGFX::VC_SETTINGS dummy;
         opengl_gal = new KIGFX::OPENGL_GAL( dummy, aOptions, testFrame );
 
+#ifdef __WXGTK__
+        // GTK may not realize a frame shown without activation before the yield ends
         testFrame->Raise();
         testFrame->Show();
+#else
+        // Activating it would take focus from the window that asked for a canvas
+        if( wxEventLoopBase::GetActive() )
+        {
+            testFrame->ShowWithoutActivating();
+        }
+        else
+        {
+            testFrame->Raise();
+            testFrame->Show();
+        }
+#endif
 
 #ifdef __WXGTK__
         // On GTK, Show() only queues realization. The GDK drawing window
         // needed by SetCurrent() may not exist yet. Yield to let the event
         // loop process the realize signal before we try to lock the context.
-        wxYield();
+        // Input waits, so a click is not handled in the middle of the caller's work
+        wxEventLoopGuarantor ensureLoop;
+        wxEventLoopBase::GetActive()->YieldFor( wxEVT_CATEGORY_UI );
 #endif
 
         GAL_CONTEXT_LOCKER lock( opengl_gal );
@@ -3546,17 +3564,10 @@ void CALLBACK ErrorCallback( GLenum aErrorCode )
 
 static void InitTesselatorCallbacks( GLUtesselator* aTesselator )
 {
-#if defined( _MSC_VER )
-#pragma warning( push )
-#pragma warning( disable : 4191 )
-#endif
-    gluTessCallback( aTesselator, GLU_TESS_VERTEX_DATA, (void( CALLBACK* )()) VertexCallback );
-    gluTessCallback( aTesselator, GLU_TESS_COMBINE_DATA, (void( CALLBACK* )()) CombineCallback );
-    gluTessCallback( aTesselator, GLU_TESS_EDGE_FLAG, (void( CALLBACK* )()) EdgeCallback );
-    gluTessCallback( aTesselator, GLU_TESS_ERROR, (void( CALLBACK* )()) ErrorCallback );
-#if defined( _MSC_VER )
-#pragma warning( pop )
-#endif
+    gluTessCallback( aTesselator, GLU_TESS_VERTEX_DATA, ToGluCallback( VertexCallback ) );
+    gluTessCallback( aTesselator, GLU_TESS_COMBINE_DATA, ToGluCallback( CombineCallback ) );
+    gluTessCallback( aTesselator, GLU_TESS_EDGE_FLAG, ToGluCallback( EdgeCallback ) );
+    gluTessCallback( aTesselator, GLU_TESS_ERROR, ToGluCallback( ErrorCallback ) );
 }
 
 

@@ -25,7 +25,7 @@
 #include <set>
 
 #include "connection_graph.h"
-#include "kiface_ids.h"
+#include <kiface_services.h>
 #include <advanced_config.h>
 #include <connectivity/conn_facade.h>
 #include <common.h>     // for ExpandEnvVarSubstitutions
@@ -420,28 +420,28 @@ int ERC_TESTER::TestPinMap( KIFACE* aCvPcb, PROJECT* aProject )
     const bool checkStale = m_settings.IsTestEnabled( ERCE_PIN_MAP_STALE_PIN );
     const bool checkDuplicate = m_settings.IsTestEnabled( ERCE_PIN_MAP_DUPLICATE_PAD );
     const bool checkBadPad = m_settings.IsTestEnabled( ERCE_PIN_MAP_BAD_PAD );
+    wxString   msg;
 
-    typedef void ( *PAD_NUMBERS_FN_PTR )( const wxString&, PROJECT*, std::set<wxString>& );
-
-    PAD_NUMBERS_FN_PTR padFetcher =
-            aCvPcb ? (PAD_NUMBERS_FN_PTR) aCvPcb->IfaceOrAddress( KIFACE_FOOTPRINT_PAD_NUMBERS ) : nullptr;
+    KIFACE_FOOTPRINT_PAD_NUMBERS_SERVICE::Type padFetcher =
+            GetKifaceService<KIFACE_FOOTPRINT_PAD_NUMBERS_SERVICE>( aCvPcb );
 
     std::map<wxString, std::set<wxString>> padCache;
 
-    auto getPads = [&]( const wxString& aFootprintId ) -> const std::set<wxString>&
-    {
-        auto it = padCache.find( aFootprintId );
+    auto getPads =
+            [&]( const wxString& aFootprintId ) -> const std::set<wxString>&
+            {
+                auto it = padCache.find( aFootprintId );
 
-        if( it != padCache.end() )
-            return it->second;
+                if( it != padCache.end() )
+                    return it->second;
 
-        std::set<wxString>& pads = padCache[aFootprintId];
+                std::set<wxString>& pads = padCache[aFootprintId];
 
-        if( padFetcher && !aFootprintId.IsEmpty() )
-            padFetcher( aFootprintId, aProject, pads );
+                if( padFetcher && !aFootprintId.IsEmpty() )
+                    padFetcher( aFootprintId, aProject, pads );
 
-        return pads;
-    };
+                return pads;
+            };
 
     // Pin maps and the symbol's pin numbers are library-symbol properties, so iterate unique
     // screens (not sheet paths) to avoid double-reporting on reused hierarchical sheets.
@@ -462,22 +462,23 @@ int ERC_TESTER::TestPinMap( KIFACE* aCvPcb, PROJECT* aProject )
             }
         }
 
-        for( const auto& source : sources )
+        for( const SCH_CONNECTIVITY::PIN_MAP_FACT& source : sources )
         {
-            const PIN_MAP_SET& maps = source.maps;
-            const auto& pinNumbers = source.pinNumbers;
-            const auto& jumperGroups = source.jumperGroups;
+            const PIN_MAP_SET&        maps = source.maps;
+            const std::set<wxString>& pinNumbers = source.pinNumbers;
+            const JUMPER_GROUP_SET&   jumperGroups = source.jumperGroups;
 
-            auto sharesJumperGroup = [&]( const wxString& aPinA, const wxString& aPinB )
-            {
-                for( const JUMPER_GROUP& group : jumperGroups.GetAll() )
-                {
-                    if( group.Contains( aPinA ) && group.Contains( aPinB ) )
-                        return true;
-                }
+            auto sharesJumperGroup =
+                    [&]( const wxString& aPinA, const wxString& aPinB )
+                    {
+                        for( const JUMPER_GROUP& group : jumperGroups.GetAll() )
+                        {
+                            if( group.Contains( aPinA ) && group.Contains( aPinB ) )
+                                return true;
+                        }
 
-                return false;
-            };
+                        return false;
+                    };
 
             for( const PIN_MAP& map : maps.GetAll() )
             {
@@ -489,10 +490,13 @@ int ERC_TESTER::TestPinMap( KIFACE* aCvPcb, PROJECT* aProject )
                             continue;
 
                         std::shared_ptr<ERC_ITEM> ercItem = ERC_ITEM::Create( ERCE_PIN_MAP_STALE_PIN );
+
+                        msg.Printf( _( "Pin map '%s' references unknown symbol pin '%s'" ),
+                                    map.GetName(),
+                                    entry.m_PinNumber );
+
                         ercItem->SetItems( source.id );
-                        ercItem->SetErrorMessage(
-                                wxString::Format( _( "Pin map '%s' references unknown symbol pin '%s'" ), map.GetName(),
-                                                  entry.m_PinNumber ) );
+                        ercItem->SetErrorMessage( msg );
                         screen->Append( new SCH_MARKER( std::move( ercItem ), source.position ) );
                         errors++;
                     }
@@ -502,6 +506,13 @@ int ERC_TESTER::TestPinMap( KIFACE* aCvPcb, PROJECT* aProject )
                 if( checkDuplicate )
                 {
                     std::map<wxString, wxString> padToPin;
+
+                    // Enter identity maps for those pins that aren't explicitly mapped
+                    for( const wxString& pinNumber : pinNumbers )
+                    {
+                        if( !map.HasEntry( pinNumber ) )
+                            padToPin[pinNumber] = pinNumber;
+                    }
 
                     for( const PIN_MAP_ENTRY& entry : map.GetEntries() )
                     {
@@ -517,10 +528,14 @@ int ERC_TESTER::TestPinMap( KIFACE* aCvPcb, PROJECT* aProject )
                                      && !sharesJumperGroup( it->second, entry.m_PinNumber ) )
                             {
                                 std::shared_ptr<ERC_ITEM> ercItem = ERC_ITEM::Create( ERCE_PIN_MAP_DUPLICATE_PAD );
+
+                                msg.Printf( _( "Symbol pins '%s' and '%s' both map to pad '%s'" ),
+                                            it->second,
+                                            entry.m_PinNumber,
+                                            pad );
+
                                 ercItem->SetItems( source.id );
-                                ercItem->SetErrorMessage(
-                                        wxString::Format( _( "Symbol pins '%s' and '%s' both map to pad '%s'" ),
-                                                          it->second, entry.m_PinNumber, pad ) );
+                                ercItem->SetErrorMessage( msg );
                                 screen->Append( new SCH_MARKER( std::move( ercItem ), source.position ) );
                                 errors++;
                             }
@@ -551,10 +566,14 @@ int ERC_TESTER::TestPinMap( KIFACE* aCvPcb, PROJECT* aProject )
                                 continue;
 
                             std::shared_ptr<ERC_ITEM> ercItem = ERC_ITEM::Create( ERCE_PIN_MAP_BAD_PAD );
+
+                            msg.Printf( _( "Pin map '%s' references pad '%s' not present on footprint '%s'" ),
+                                        boundMap->GetName(),
+                                        pad,
+                                        assoc.m_FootprintLibId.GetUniStringLibId() );
+
                             ercItem->SetItems( source.id );
-                            ercItem->SetErrorMessage( wxString::Format(
-                                    _( "Pin map '%s' references pad '%s' not present on footprint '%s'" ),
-                                    boundMap->GetName(), pad, assoc.m_FootprintLibId.GetUniStringLibId() ) );
+                            ercItem->SetErrorMessage( msg );
                             screen->Append( new SCH_MARKER( std::move( ercItem ), source.position ) );
                             errors++;
                         }
@@ -566,18 +585,23 @@ int ERC_TESTER::TestPinMap( KIFACE* aCvPcb, PROJECT* aProject )
 
     if( m_settings.IsTestEnabled( ERCE_PIN_MAP_UNMAPPED_PIN ) && padFetcher )
     {
-        auto report = [&]( const SCH_SHEET_PATH& sheet, const KIID& pin, const VECTOR2I& position,
-                           const wxString& number, const wxString& footprint )
-        {
-            auto error = ERC_ITEM::Create( ERCE_PIN_MAP_UNMAPPED_PIN );
-            error->SetItems( pin );
-            error->SetSheetSpecificPath( sheet );
-            error->SetItemsSheetPaths( sheet );
-            error->SetErrorMessage( wxString::Format(
-                    _( "Pin '%s' is connected but maps to no pad on footprint '%s'" ), number, footprint ) );
-            sheet.LastScreen()->Append( new SCH_MARKER( std::move( error ), position ) );
-            ++errors;
-        };
+        auto report =
+                [&]( const SCH_SHEET_PATH& sheet, const KIID& pin, const VECTOR2I& position, const wxString& number,
+                     const wxString& footprint )
+                {
+                    std::shared_ptr<ERC_ITEM> error = ERC_ITEM::Create( ERCE_PIN_MAP_UNMAPPED_PIN );
+
+                    msg.Printf( _( "Pin '%s' is connected but maps to no pad on footprint '%s'" ),
+                                number,
+                                footprint );
+
+                    error->SetItems( pin );
+                    error->SetSheetSpecificPath( sheet );
+                    error->SetItemsSheetPaths( sheet );
+                    error->SetErrorMessage( msg );
+                    sheet.LastScreen()->Append( new SCH_MARKER( std::move( error ), position ) );
+                    ++errors;
+                };
 
         if( ADVANCED_CFG::GetCfg().m_ConnectivityEngine )
         {
@@ -592,7 +616,7 @@ int ERC_TESTER::TestPinMap( KIFACE* aCvPcb, PROJECT* aProject )
 
                 LIB_ID footprint;
                 footprint.Parse( pin.footprint, true );
-                const auto& pads = getPads( footprint.GetUniStringLibId() );
+                const std::set<wxString>& pads = getPads( footprint.GetUniStringLibId() );
 
                 if( !pads.empty() && !SCH_PIN::HasIdentityPad( pin.number, pads ) )
                     report( *sheet, pin.item, pin.position, pin.number, pin.footprint );
@@ -1015,6 +1039,110 @@ int ERC_TESTER::TestMultiunitFootprints()
                                                      reference->name, unit.name ) );
             error->SetItems( std::vector<KIID>{ reference->item, unit.item } );
             markers.Place( std::move( error ), unit.sheet, unit.position, reference->sheet, unit.sheet );
+        }
+    }
+
+    return markers.Count();
+}
+
+
+int ERC_TESTER::TestAnnotation()
+{
+    SCH_REFERENCE_LIST references;
+    m_schematic->Hierarchy().GetSymbols( references, SYMBOL_FILTER_NON_POWER, true );
+
+    ERC_MARKER_PLACER markers( *m_schematic );
+
+    references.CheckAnnotation(
+            [&]( ERCE_T aType, const wxString& aMsg, SCH_REFERENCE* aItemA, SCH_REFERENCE* aItemB )
+            {
+                if( !m_settings.IsTestEnabled( aType ) )
+                    return;
+
+                std::shared_ptr<ERC_ITEM> ercItem = ERC_ITEM::Create( aType );
+                ercItem->SetErrorMessage( aMsg );
+
+                if( aItemB )
+                    ercItem->SetItems( aItemA->GetSymbol(), aItemB->GetSymbol() );
+                else
+                    ercItem->SetItems( aItemA->GetSymbol() );
+
+                // Saved exclusions name these markers without a sheet path, as the dialog placed them
+                markers.Place( std::move( ercItem ), aItemA->GetSheetPath().Path(),
+                               aItemA->GetSymbol()->GetPosition(), ITEM_PATHS::NONE, false );
+            } );
+
+    return markers.Count();
+}
+
+
+int ERC_TESTER::TestDuplicateSheetSuffixes()
+{
+    ERC_MARKER_PLACER markers( *m_schematic );
+    const bool        suffixMode = m_schematic->Settings().m_AnnotateReusedSheetSuffixes;
+
+    // Suffix mode shares one base across instances, so two bare instances also collide
+    for( const auto& [path, first] : m_schematic->RefSuffixCollisions( suffixMode ) )
+    {
+        KIID_PATH parent = path.Path();
+        KIID_PATH otherParent = first.Path();
+        parent.pop_back();
+        otherParent.pop_back();
+
+        std::shared_ptr<ERC_ITEM> ercItem = ERC_ITEM::Create( ERCE_DUPLICATE_SHEET_SUFFIX );
+        ercItem->SetItems( path.Last(), first.Last() );
+        markers.Place( std::move( ercItem ), parent, path.Last()->GetPosition(), parent, otherParent );
+    }
+
+    return markers.Count();
+}
+
+
+int ERC_TESTER::TestRefSuffixMismatch()
+{
+    ERC_MARKER_PLACER markers( *m_schematic );
+    const bool        suffixMode = m_schematic->Settings().m_AnnotateReusedSheetSuffixes;
+
+    std::map<const SCH_SCREEN*, const SCH_SHEET_PATH*> firstPath;
+
+    for( const SCH_SHEET_PATH& path : m_sheetList )
+    {
+        auto [first, isFirst] = firstPath.emplace( path.LastScreen(), &path );
+
+        for( SCH_ITEM* item : path.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL*         symbol = static_cast<SCH_SYMBOL*>( item );
+            SCH_SYMBOL_INSTANCE instance;
+            wxString            msg;
+
+            if( !symbol->GetInstance( instance, path.PathRef() ) )
+                continue;
+
+            const SCH_SHEET_PATH& firstUse = *first->second;
+
+            if( suffixMode && instance.m_RefLacksSuffix )
+            {
+                msg = wxString::Format( _( "Reference %s was saved without the suffix %s" ), instance.m_Reference,
+                                        m_schematic->GetRefSuffix( path ) );
+            }
+            else if( suffixMode && !isFirst && !m_schematic->CopiesSelectDifferentUnits( symbol )
+                     && !instance.m_Reference.StartsWith( wxS( "#" ) )
+                     && symbol->IsAnnotated( &path ) && symbol->IsAnnotated( &firstUse )
+                     && symbol->GetBaseRef( &path ) != symbol->GetBaseRef( &firstUse ) )
+            {
+                // Suffix mode numbers the first instance and every other instance shares its base
+                msg = wxString::Format( _( "Reference %s does not share the base of %s" ), symbol->GetRef( &path ),
+                                        symbol->GetRef( &firstUse ) );
+            }
+            else
+            {
+                continue;
+            }
+
+            std::shared_ptr<ERC_ITEM> ercItem = ERC_ITEM::Create( ERCE_REF_SUFFIX_MISMATCH );
+            ercItem->SetErrorMessage( msg );
+            ercItem->SetItems( symbol );
+            markers.Place( std::move( ercItem ), path.Path(), symbol->GetPosition(), ITEM_PATHS::MAIN );
         }
     }
 
@@ -2831,6 +2959,15 @@ int ERC_TESTER::TestLibSymbolIssues()
     int                     err_count = 0;
 
     const bool captured = ADVANCED_CFG::GetCfg().m_ConnectivityEngine;
+    const int  flags = m_schematic->Settings().SymbolCompareFlags();
+
+    std::set<const SCH_SYMBOL*> outdated;
+
+    if( !captured && m_settings.IsTestEnabled( ERCE_LIB_SYMBOL_MISMATCH ) )
+    {
+        for( SCH_SYMBOL* symbol : SCH_SCREENS( m_schematic->Root() ).OutdatedSymbols( *adapter, flags ) )
+            outdated.insert( symbol );
+    }
 
     struct LIBRARY_ISSUE
     {
@@ -2894,15 +3031,13 @@ int ERC_TESTER::TestLibSymbolIssues()
                 if( !m_settings.IsTestEnabled( ERCE_LIB_SYMBOL_MISMATCH ) )
                     return issues;
 
-                std::unique_ptr<LIB_SYMBOL> flattenedSymbol = libSymbol->Flatten();
-                const int                   flags = m_schematic->Settings().SymbolCompareFlags();
-                bool                        mismatch = false;
+                bool mismatch = false;
 
                 if( captured )
                 {
                     if( aSource.attributes.duplicatePinNumbersAreJumpers || !aSource.HasDuplicatePins() )
                     {
-                        mismatch = !SCH_CONNECTIVITY::ExtractLibrarySymbolFact( *flattenedSymbol )
+                        mismatch = !SCH_CONNECTIVITY::ExtractLibrarySymbolFact( *libSymbol->Flatten() )
                                             .Matches( aSource, flags );
                     }
                 }
@@ -2920,7 +3055,7 @@ int ERC_TESTER::TestLibSymbolIssues()
                         CheckDuplicatePins( embedded, messages, &unitsProvider );
                     }
 
-                    mismatch = messages.empty() && flattenedSymbol->Compare( *embedded, flags ) != 0;
+                    mismatch = messages.empty() && outdated.contains( aSymbol );
                 }
 
                 if( mismatch )
@@ -3014,9 +3149,8 @@ int ERC_TESTER::TestFootprintLinkIssues( KIFACE* aCvPcb, PROJECT* aProject )
         ( *adapter )->BlockUntilLoaded();
     }
 
-    typedef int (*TESTER_FN_PTR)( const wxString&, PROJECT* );
-
-    TESTER_FN_PTR linkTester = (TESTER_FN_PTR) aCvPcb->IfaceOrAddress( KIFACE_TEST_FOOTPRINT_LINK );
+    KIFACE_TEST_FOOTPRINT_LINK_SERVICE::Type linkTester =
+            GetKifaceService<KIFACE_TEST_FOOTPRINT_LINK_SERVICE>( aCvPcb );
     ERC_MARKER_PLACER markers( *m_schematic );
 
     for( const auto& source : collectFootprints( *m_schematic ) )
@@ -3439,6 +3573,15 @@ void ERC_TESTER::RunTests( DS_PROXY_VIEW_ITEM* aDrawingSheet, SCH_EDIT_FRAME* aE
 
         TestDuplicateSheetNames( true );
     }
+
+    // The schematic editor's dialog used to own this, so headless runs never checked annotation
+    TestAnnotation();
+
+    if( m_settings.IsTestEnabled( ERCE_DUPLICATE_SHEET_SUFFIX ) )
+        TestDuplicateSheetSuffixes();
+
+    if( m_settings.IsTestEnabled( ERCE_REF_SUFFIX_MISMATCH ) )
+        TestRefSuffixMismatch();
 
     // Test pin-to-pad maps for stale pins, duplicate pad targets and bad pad references (issue #2282).
     if( m_settings.IsTestEnabled( ERCE_PIN_MAP_STALE_PIN ) || m_settings.IsTestEnabled( ERCE_PIN_MAP_DUPLICATE_PAD )

@@ -33,6 +33,9 @@ struct FileStatus
     wxString filePath;
     KIGIT_COMMON::GIT_STATUS status;
     unsigned int gitStatus;  // Raw git status flags
+
+    /// Git reports a directory or a submodule rather than the files inside it
+    bool isDirectory = false;
 };
 
 class APIEXPORT GIT_STATUS_HANDLER : public KIGIT_REPO_MIXIN
@@ -45,10 +48,11 @@ public:
      * Get detailed file status for all files in the specified path
      * @param aPathspec Path specification to filter files (empty for all files)
      * @param aChangedOnly Omit unmodified tracked files, for callers that only list changes
+     * @param aReadOk Set false when git could not read the status, which otherwise reads as no changes
      * @return Map of absolute file paths to their status information
      */
-    std::map<wxString, FileStatus> GetFileStatus( const wxString& aPathspec = wxEmptyString,
-                                                  bool            aChangedOnly = false );
+    std::map<wxString, FileStatus> GetFileStatus( const wxString& aPathspec = wxEmptyString, bool aChangedOnly = false,
+                                                  bool* aReadOk = nullptr );
 
     /**
      * Get the current branch name

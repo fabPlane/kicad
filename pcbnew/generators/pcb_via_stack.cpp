@@ -194,7 +194,16 @@ void PCB_VIA_STACK::Mirror( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirecti
     PCB_GENERATOR::Mirror( aCentre, aFlipDirection );
 
     if( m_hops )
-        m_hops->Mirror( aCentre, aFlipDirection );
+        m_hops->Mirror( MIRROR_AXIS( aCentre, aFlipDirection ) );
+}
+
+
+void PCB_VIA_STACK::Mirror( const SEG& aAxis )
+{
+    PCB_GENERATOR::Mirror( aAxis );
+
+    if( m_hops )
+        m_hops->Mirror( aAxis );
 }
 
 
@@ -1070,7 +1079,9 @@ void PCB_VIA_STACK::Serialize( google::protobuf::Any& aContainer ) const
         stack.add_members()->set_value( member->m_Uuid.AsStdString() );
 
     kiapi::common::PackCustomProperties( stack.mutable_custom_properties(), *this );
-    aContainer.PackFrom( stack );
+
+    if( !aContainer.PackFrom( stack ) )
+        wxFAIL_MSG( wxT( "Failed to pack PCB_VIA_STACK" ) );
 }
 
 

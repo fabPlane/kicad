@@ -18,6 +18,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <atomic>
+
 #include <netclass.h>
 #include <api/api_enums.h>
 #include <connectivity/conn_text.h>
@@ -58,11 +60,12 @@
 #include <validators.h>
 #include <properties/property.h>
 #include <properties/property_mgr.h>
+#include <properties/property_validators.h>
 
 
 wxString SCH_SYMBOL::GetRefProp() const
 {
-    return GetRef( &Schematic()->CurrentSheet() );
+    return GetBaseRef( &Schematic()->CurrentSheet() );
 }
 
 
@@ -871,7 +874,9 @@ void SCH_SYMBOL::Serialize( google::protobuf::Any& aContainer ) const
 {
     kiapi::schematic::types::SchematicSymbolInstance symbol;
     Serialize( symbol );
-    aContainer.PackFrom( symbol );
+
+    if( !aContainer.PackFrom( symbol ) )
+        wxFAIL_MSG( wxT( "Failed to pack SCH_SYMBOL" ) );
 }
 
 
@@ -1116,6 +1121,7 @@ bool SCH_SYMBOL::IsMovableFromAnchorPoint() const
 void SCH_SYMBOL::SetLibId( const LIB_ID& aLibId )
 {
     m_lib_id = aLibId;
+    BumpRefGeneration();
 }
 
 
@@ -1251,6 +1257,7 @@ void SCH_SYMBOL::updatePins()
         ii->second.erase( it );
         pin->GetAlternates() = libPin->GetAlternates();
         pin->SetLibPin( libPin );
+        pin->SetCustomProperties( libPin->GetCustomProperties() );
         pin->SetPosition( libPin->GetPosition() );
         pin->SetUnit( libPin->GetUnit() );
         pin->SetBodyStyle( libPin->GetBodyStyle() );
@@ -1521,6 +1528,9 @@ void SCH_SYMBOL::AddHierarchicalReference( const SCH_SYMBOL_INSTANCE& aInstance 
     SCH_SYMBOL_INSTANCE instance = aInstance;
     RemoveInstance( instance.m_Path );
 
+    // The flag judged the copied reference against its source path's suffix
+    instance.m_RefLacksSuffix = false;
+
     wxLogTrace( traceSchSheetPaths,
                 wxS( "Adding symbol '%s' instance:\n"
                      "    sheet path '%s'\n"
@@ -1544,9 +1554,53 @@ void SCH_SYMBOL::AddHierarchicalReference( const SCH_SYMBOL_INSTANCE& aInstance 
 
 const wxString SCH_SYMBOL::GetRef( const SCH_SHEET_PATH* sheet, bool aIncludeUnit ) const
 {
-    KIID_PATH path = sheet->Path();
+    return refFor( sheet, aIncludeUnit, true );
+}
+
+
+wxString SCH_SYMBOL::GetBaseRef( const SCH_SHEET_PATH* aSheet, bool aIncludeUnit ) const
+{
+    return refFor( aSheet, aIncludeUnit, false );
+}
+
+
+wxString SCH_SYMBOL::GetUnitRef( const SCH_SHEET_PATH* aSheet, int aUnit ) const
+{
+    return refFor( aSheet, true, true, aUnit );
+}
+
+
+static std::atomic<uint64_t> s_refGeneration{ 0 };
+
+
+uint64_t SCH_SYMBOL::RefGeneration()
+{
+    return s_refGeneration.load( std::memory_order_acquire );
+}
+
+
+void SCH_SYMBOL::BumpRefGeneration()
+{
+    s_refGeneration.fetch_add( 1, std::memory_order_acq_rel );
+}
+
+
+wxString SCH_SYMBOL::GetCurrentSheetRef() const
+{
+    if( const SCHEMATIC* schematic = Schematic() )
+        return GetRef( &schematic->CurrentSheet() );
+
+    return GetField( FIELD_T::REFERENCE )->GetText();
+}
+
+
+wxString SCH_SYMBOL::refFor( const SCH_SHEET_PATH* sheet, bool aIncludeUnit, bool aCompose,
+                             std::optional<int> aUnit ) const
+{
+    const KIID_PATH& path = sheet->PathRef();
     wxString  ref;
-    wxString  subRef;
+    int       instanceUnit = 0;
+    bool      onPath = false;
 
     const bool traceEnabled = wxLog::IsAllowedTraceMask( traceSchSymbolRef );
 
@@ -1562,7 +1616,8 @@ const wxString SCH_SYMBOL::GetRef( const SCH_SHEET_PATH* sheet, bool aIncludeUni
         const SCH_SYMBOL_INSTANCE& instance = m_instances[it->second];
 
         ref = instance.m_Reference;
-        subRef = SubReference( instance.m_Unit );
+        instanceUnit = instance.m_Unit;
+        onPath = true;
 
         if( traceEnabled )
             wxLogTrace( traceSchSymbolRef, "  MATCH FOUND: ref=%s", ref );
@@ -1588,8 +1643,28 @@ const wxString SCH_SYMBOL::GetRef( const SCH_SHEET_PATH* sheet, bool aIncludeUni
             wxLogTrace( traceSchSymbolRef, "  Using unannotated reference: %s", ref );
     }
 
-    if( aIncludeUnit && GetUnitCount() > 1 )
-        ref += subRef;
+    // Unannotated references stay recognisable, and a symbol not on this path has no suffix there
+    const bool compose = aCompose && onPath && ref.Last() != '?';
+    const int  unitCount = GetUnitCount();
+    const bool withUnit = aUnit || ( aIncludeUnit && unitCount > 1 );
+
+    if( aUnit )
+        ref += SubReference( *aUnit, false );
+    else if( withUnit && onPath )
+        ref += SubReference( instanceUnit );
+
+    const SCHEMATIC* schematic = compose ? Schematic() : nullptr;
+
+    // A unit shows its own sheet's suffix, while the package composes with the lowest suffix among its units
+    if( schematic && schematic->HasRefSuffixes() )
+    {
+        if( aUnit && *aUnit != GetUnitSelection( sheet ) )
+            ref += schematic->GetUnitRefSuffix( this, *sheet, *aUnit );
+        else if( withUnit || unitCount < 2 )
+            schematic->AppendRefSuffix( ref, *sheet );
+        else
+            ref += schematic->GetPackageRefSuffix( this, *sheet );
+    }
 
     if( traceEnabled )
         wxLogTrace( traceSchSymbolRef, "  Final reference: %s", ref );
@@ -1600,10 +1675,105 @@ const wxString SCH_SYMBOL::GetRef( const SCH_SHEET_PATH* sheet, bool aIncludeUni
 
 void SCH_SYMBOL::SetRefProp( const wxString& aRef )
 {
-    FIELD_VALIDATOR validator( FIELD_T::REFERENCE );
+    FIELD_VALIDATOR       validator( FIELD_T::REFERENCE );
+    const SCH_SHEET_PATH& sheet = Schematic()->CurrentSheet();
+    wxString              base;
 
-    if( validator.DoValidate( aRef, nullptr ) )
-        SetRef( &Schematic()->CurrentSheet(), aRef );
+    if( validator.DoValidate( aRef, nullptr ) && BaseRefFromUser( sheet, aRef, base ).IsEmpty() )
+        SetUserRef( sheet, base );
+}
+
+
+wxString SCH_SYMBOL::BaseRefFromUser( const SCH_SHEET_PATH& aSheet, const wxString& aText, wxString& aBase,
+                                      const SCHEMATIC* aSchematic ) const
+{
+    const SCHEMATIC* schematic = Schematic() ? Schematic() : aSchematic;
+
+    aBase = aText;
+
+    if( !schematic )
+        return wxEmptyString;
+
+    SCH_SYMBOL_INSTANCE existing;
+    const bool          onPath = GetInstance( existing, aSheet.Path() );
+    const wxString      own = schematic->GetRefSuffix( aSheet );
+    const wxString      package = schematic->GetPackageRefSuffix( this, aSheet );
+
+    // An unedited base may end in suffix text, as R12 with a suffix of 2
+    if( onPath && aText == existing.m_Reference )
+        return wxEmptyString;
+
+    // An echoed composed reference keeps its base even where a sibling suffix is longer
+    if( onPath && ( ( !own.IsEmpty() && aText == existing.m_Reference + own )
+                    || ( !package.IsEmpty() && aText == existing.m_Reference + package ) ) )
+    {
+        aBase = existing.m_Reference;
+        return wxEmptyString;
+    }
+
+    auto endsIn =
+            [&]( const wxString& aSuffix )
+            {
+                return !aSuffix.IsEmpty() && aText.length() > aSuffix.length() && aText.EndsWith( aSuffix );
+            };
+
+    // A unit of a package spanning sheets shows the package's suffix, which may be another sheet's
+    size_t matched = endsIn( own ) ? own.length() : 0;
+
+    if( endsIn( package ) )
+        matched = std::max( matched, package.length() );
+
+    wxString sibling;
+
+    // The longest suffix wins, since _B_A typed on the _A channel names the _B_A channel
+    for( const SCH_SHEET_PATH& path : schematic->Hierarchy().FindAllSheetsForScreen( aSheet.LastScreen() ) )
+    {
+        if( path == aSheet )
+            continue;
+
+        const wxString suffix = schematic->GetRefSuffix( path );
+
+        if( endsIn( suffix ) && suffix.length() > matched )
+        {
+            matched = suffix.length();
+            sibling = path.PathHumanReadable( false );
+        }
+    }
+
+    if( !sibling.IsEmpty() )
+        return wxString::Format( _( "%s ends with the reference suffix of sheet %s." ), aText, sibling );
+
+    aBase = aText.Left( aText.length() - matched );
+    return wxEmptyString;
+}
+
+
+void SCH_SYMBOL::SetUserRef( const SCH_SHEET_PATH& aSheet, const wxString& aBase )
+{
+    SetRef( &aSheet, aBase );
+
+    const SCHEMATIC* schematic = Schematic();
+
+    if( !schematic || !schematic->Settings().m_AnnotateReusedSheetSuffixes )
+        return;
+
+    std::vector<SCH_SHEET_PATH> copies;
+    const int                   unit = GetUnitSelection( &aSheet );
+
+    for( const SCH_SHEET_PATH& path : schematic->Hierarchy().FindAllSheetsForScreen( aSheet.LastScreen() ) )
+    {
+        if( path == aSheet )
+            continue;
+
+        // Copies that select different units keep their own bases, which the annotator pairs into packages
+        if( GetUnitCount() > 1 && GetUnitSelection( &path ) != unit )
+            return;
+
+        copies.push_back( path );
+    }
+
+    for( const SCH_SHEET_PATH& path : copies )
+        SetRef( &path, aBase );
 }
 
 
@@ -1611,6 +1781,13 @@ void SCH_SYMBOL::SetValueProp( const wxString& aValue )
 {
     wxString currentVariant = Schematic()->GetCurrentVariant();
     SetValueFieldText( aValue, &Schematic()->CurrentSheet(), currentVariant );
+}
+
+
+void SCH_SYMBOL::SetRefLacksSuffix( const KIID_PATH& aPath, bool aLacksSuffix )
+{
+    if( auto it = m_instancePathIndex.find( aPath ); it != m_instancePathIndex.end() )
+        m_instances[it->second].m_RefLacksSuffix = aLacksSuffix;
 }
 
 
@@ -1622,9 +1799,17 @@ void SCH_SYMBOL::SetRef( const SCH_SHEET_PATH* sheet, const wxString& ref )
     bool changed = false;
 
     if( auto it = m_instancePathIndex.find( path ); it != m_instancePathIndex.end() )
-        changed = std::exchange( m_instances[it->second].m_Reference, ref ) != ref;
+    {
+        SCH_SYMBOL_INSTANCE& instance = m_instances[it->second];
+        changed = std::exchange( instance.m_Reference, ref ) != ref;
+
+        if( changed )
+            instance.m_RefLacksSuffix = false;
+    }
     else
+    {
         AddHierarchicalReference( path, ref, m_unit );
+    }
 
     for( std::unique_ptr<SCH_PIN>& pin : m_pins )
         pin->ClearDefaultNetName( sheet );
@@ -1740,7 +1925,7 @@ wxString SCH_SYMBOL::GetFieldText( const SCH_FIELD* aField, const wxString& aFie
     {
     case FIELD_T::REFERENCE:
         wxCHECK( aPath, aField->GetText() );
-        return GetRef( aPath, false );
+        return GetBaseRef( aPath );
         break;
 
     case FIELD_T::FOOTPRINT:
@@ -2851,6 +3036,7 @@ void SCH_SYMBOL::swapData( SCH_ITEM* aItem )
     std::swap( m_pinMapOverride, symbol->m_pinMapOverride );
 
     std::swap( m_instances, symbol->m_instances );
+    BumpRefGeneration();
     std::swap( m_instancePathIndex, symbol->m_instancePathIndex );
     std::swap( m_schLibSymbolName, symbol->m_schLibSymbolName );
     std::swap( m_doNetlist, symbol->m_doNetlist );
@@ -2954,7 +3140,10 @@ bool SCH_SYMBOL::ResolveTextVar( const SCH_SHEET_PATH* aPath, wxString* token, c
         embeddedFilesStack.push_back( schematic->GetEmbeddedFiles() );
 
         if( m_part )
+        {
+            m_part->AppendParentEmbeddedFiles( embeddedFilesStack );
             embeddedFilesStack.push_back( m_part->GetEmbeddedFiles() );
+        }
 
         simLibMgr.SetFilesStack( std::move( embeddedFilesStack ) );
 
@@ -3229,7 +3418,7 @@ bool SCH_SYMBOL::ResolveTextVar( const SCH_SHEET_PATH* aPath, wxString* token, c
                     {
                         // Return the full unit reference (e.g., "J601A")
                         if( pinUnit != ALL_UNITS )
-                            result = GetRef( aPath, false ) + SubReference( pinUnit, false );
+                            result = GetUnitRef( aPath, pinUnit );
                         else
                             result = GetRef( aPath, false );
                     }
@@ -3473,6 +3662,8 @@ void SCH_SYMBOL::ClearAnnotation( const SCH_SHEET_PATH* aSheetPath, bool aResetP
                     instance.m_Reference = UTIL::GetRefDesUnannotated( m_prefix );
                 else
                     instance.m_Reference = UTIL::GetRefDesUnannotated( instance.m_Reference );
+
+                instance.m_RefLacksSuffix = false;
             }
         }
     }
@@ -3484,11 +3675,15 @@ void SCH_SYMBOL::ClearAnnotation( const SCH_SHEET_PATH* aSheetPath, bool aResetP
                 instance.m_Reference = UTIL::GetRefDesUnannotated( m_prefix );
             else
                 instance.m_Reference = UTIL::GetRefDesUnannotated( instance.m_Reference );
+
+            instance.m_RefLacksSuffix = false;
         }
     }
 
     for( std::unique_ptr<SCH_PIN>& pin : m_pins )
         pin->ClearDefaultNetName( aSheetPath );
+
+    invalidateConnectivity();
 
     // Only modify the REFERENCE field text when clearing ALL annotations (aSheetPath is NULL).
     // When clearing for a specific sheet path, we must preserve the field text because it serves
@@ -4144,7 +4339,8 @@ bool SCH_SYMBOL::HasConnectivityChanges( const SCH_ITEM* aItem, const SCH_SHEET_
     if( GetUnitSelection( aInstance ) != symbol->GetUnitSelection( aInstance ) )
         return true;
 
-    if( GetRef( aInstance ) != symbol->GetRef( aInstance ) )
+    // Both sit on one path, so their bases differ exactly when their references do
+    if( GetBaseRef( aInstance ) != symbol->GetBaseRef( aInstance ) )
         return true;
 
     // Power symbol value field changes are connectivity changes.
@@ -4211,7 +4407,7 @@ SCH_ITEM* SCH_SYMBOL::GetDrawItem( const VECTOR2I& aPosition, KICAD_T aType )
 wxString SCH_SYMBOL::GetItemDescription( UNITS_PROVIDER* aUnitsProvider, bool aFull ) const
 {
     return wxString::Format( _( "Symbol %s [%s]" ),
-                             KIUI::EllipsizeMenuText( GetField( FIELD_T::REFERENCE )->GetText() ),
+                             KIUI::EllipsizeMenuText( GetCurrentSheetRef() ),
                              KIUI::EllipsizeMenuText( GetLibId().GetLibItemName() ) );
 }
 
@@ -4412,6 +4608,7 @@ SCH_SYMBOL& SCH_SYMBOL::operator=( const SCH_SYMBOL& aSymbol )
 
         m_instances = aSymbol.m_instances;
         m_instancePathIndex = aSymbol.m_instancePathIndex;
+        BumpRefGeneration();
         m_doNetlist = aSymbol.m_doNetlist;
         m_passthroughMode = aSymbol.m_passthroughMode;
         m_signalName = aSymbol.m_signalName;
@@ -4906,8 +5103,10 @@ std::unordered_set<wxString> SCH_SYMBOL::GetComponentClassNames( const SCH_SHEET
                 {
                     if( field.GetUntranslatedName() == wxT( "Component Class" ) )
                     {
-                        if( field.GetShownText( aPath, INTERNAL ) != wxEmptyString )
-                            componentClass.insert( field.GetShownText( aPath, INTERNAL, aVariantName ) );
+                        const wxString classname = field.GetShownText( aPath, INTERNAL, aVariantName );
+
+                        if( classname != wxEmptyString )
+                            componentClass.insert( classname );
                     }
                 }
             };
@@ -4919,9 +5118,7 @@ std::unordered_set<wxString> SCH_SYMBOL::GetComponentClassNames( const SCH_SHEET
     for( const SCH_RULE_AREA* ruleArea : m_rule_areas_cache )
     {
         for( const SCH_DIRECTIVE_LABEL* label : ruleArea->GetDirectives() )
-        {
             getComponentClassFields( label->GetFields() );
-        }
     }
 
     return componentClass;
@@ -5451,7 +5648,35 @@ static struct SCH_SYMBOL_DESC
 
         propMgr.AddProperty( new PROPERTY<SCH_SYMBOL, wxString>( _HKI( "Reference" ),
                     &SCH_SYMBOL::SetRefProp, &SCH_SYMBOL::GetRefProp ),
-                    groupFields );
+                    groupFields )
+                .SetValidator( []( const wxAny&& aValue, EDA_ITEM* aItem ) -> VALIDATOR_RESULT
+                               {
+                                   SCH_SYMBOL* symbol = dynamic_cast<SCH_SYMBOL*>( aItem );
+                                   wxString    value;
+                                   wxString    base;
+
+                                   if( !symbol || !symbol->Schematic() || !aValue.GetAs( &value ) )
+                                       return {};
+
+                                   wxString msg = symbol->BaseRefFromUser( symbol->Schematic()->CurrentSheet(),
+                                                                           value, base );
+
+                                   if( msg.IsEmpty() )
+                                       return {};
+
+                                   return std::make_unique<VALIDATION_ERROR_MSG>( msg );
+                               } );
+        propMgr.AddProperty( new PROPERTY<SCH_SYMBOL, wxString>( _HKI( "Composed Reference" ),
+                    NO_SETTER( SCH_SYMBOL, wxString ), &SCH_SYMBOL::GetCurrentSheetRef ),
+                    groupFields )
+                .SetAvailableFunc( []( INSPECTABLE* aObject )
+                                   {
+                                       SCH_SYMBOL* symbol = dynamic_cast<SCH_SYMBOL*>( aObject );
+
+                                       return symbol && symbol->Schematic()
+                                              && !symbol->Schematic()->GetRefSuffix(
+                                                          symbol->Schematic()->CurrentSheet() ).IsEmpty();
+                                   } );
         propMgr.AddProperty( new PROPERTY<SCH_SYMBOL, wxString>( _HKI( "Value" ),
                     &SCH_SYMBOL::SetValueProp, &SCH_SYMBOL::GetValueProp ),
                     groupFields );

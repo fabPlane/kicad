@@ -74,7 +74,7 @@ DIALOG_GLOBAL_EDIT_TRACKS_AND_VIAS::DIALOG_GLOBAL_EDIT_TRACKS_AND_VIAS( PCB_EDIT
     m_layerCtrl->SetBoardFrame( m_parent );
     m_layerCtrl->SetLayersHotkeys( false );
     m_layerCtrl->SetNotAllowedLayerSet( LSET::AllNonCuMask() );
-    m_layerCtrl->SetUndefinedLayerName( INDETERMINATE_ACTION );
+    m_layerCtrl->SetAllowsIndeterminateState( INDETERMINATE_ACTION );
     m_layerCtrl->Resync();
 
     for( auto& preset : magic_enum::enum_values<IPC4761_PRESET>() )
@@ -309,7 +309,7 @@ void DIALOG_GLOBAL_EDIT_TRACKS_AND_VIAS::processItem( PICKED_ITEMS_LIST* aUndoLi
             setViaConfiguration( v, static_cast<IPC4761_PRESET>( m_protectionFeatures->GetSelection() ) );
         }
 
-        if( ( isArc || isTrack ) && m_layerCtrl->GetLayerSelection() != UNDEFINED_LAYER )
+        if( ( isArc || isTrack ) && !m_layerCtrl->IsIndeterminate() )
         {
             if( aUndoList->FindItem( aItem ) < 0 )
             {
@@ -318,7 +318,7 @@ void DIALOG_GLOBAL_EDIT_TRACKS_AND_VIAS::processItem( PICKED_ITEMS_LIST* aUndoLi
                 aUndoList->PushItem( picker );
             }
 
-            aItem->SetLayer( ToLAYER_ID( m_layerCtrl->GetLayerSelection() ) );
+            aItem->SetLayer( m_layerCtrl->GetLayerIDSelection() );
             m_parent->GetBoard()->GetConnectivity()->Update( aItem );
         }
     }
@@ -364,7 +364,7 @@ void DIALOG_GLOBAL_EDIT_TRACKS_AND_VIAS::visitItem( PICKED_ITEMS_LIST* aUndoList
 
     if( m_layerFilterOpt->GetValue() && m_layerFilter->GetLayerSelection() != UNDEFINED_LAYER )
     {
-        if( aItem->GetLayer() != m_layerFilter->GetLayerSelection() )
+        if( aItem->GetLayer() != m_layerFilter->GetLayerIDSelection() )
             return;
     }
 

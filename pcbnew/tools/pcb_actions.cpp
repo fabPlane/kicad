@@ -501,7 +501,7 @@ TOOL_ACTION PCB_ACTIONS::placeStackup( TOOL_ACTION_ARGS()
         .Scope( AS_GLOBAL )
         .LegacyHotkeyName( "Add Stackup Table" )
         .FriendlyName( _( "Add Stackup Table" ) )
-        .Tooltip( _( "Add a board stackup table on a graphic layer" ) )
+        .Tooltip( _( "Add a board stackup table that follows the stackup" ) )
         .ToolbarState( TOOLBAR_STATE::TOGGLE )
         .Flags( AF_ACTIVATE ) );
 
@@ -1071,6 +1071,12 @@ TOOL_ACTION PCB_ACTIONS::mirrorV( TOOL_ACTION_ARGS()
         .FriendlyName( _( "Mirror Vertically" ) )
         .Tooltip( _( "Mirrors selected item(s) across the X axis" ) )
         .Icon( BITMAPS::mirror_v ) );
+
+TOOL_ACTION PCB_ACTIONS::mirrorInteractive( TOOL_ACTION_ARGS()
+        .Name( "pcbnew.InteractiveEdit.mirrorInteractive" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Mirror Interactive" ) )
+        .Tooltip( _( "Mirrors selected item(s) interactively" ) ) );
 
 TOOL_ACTION PCB_ACTIONS::swap( TOOL_ACTION_ARGS()
         .Name( "pcbnew.InteractiveEdit.swap" )
@@ -2091,8 +2097,8 @@ TOOL_ACTION PCB_ACTIONS::showEeschema( TOOL_ACTION_ARGS()
 TOOL_ACTION PCB_ACTIONS::drcRuleEditor( TOOL_ACTION_ARGS()
         .Name( "pcbnew.DRETool.drcRuleEditor" )
         .Scope( AS_GLOBAL )
-        .FriendlyName( _( "DRC Rule Editor" ) )
-        .Tooltip( _( "Open DRC rule editor window" ) ) );
+        .FriendlyName( _( "Design Rules..." ) )
+        .Tooltip( _( "Edit the design rules in Board Setup" ) ) );
 
 // PCB_CONTROL
 //
@@ -3188,6 +3194,17 @@ TOOL_ACTION PCB_ACTIONS::tuneSkew( TOOL_ACTION_ARGS()
         .ToolbarState( TOOLBAR_STATE::TOGGLE )
         .Flags( AF_ACTIVATE )
         .Parameter( PNS::PNS_MODE_TUNE_DIFF_PAIR_SKEW ) );
+
+
+TOOL_ACTION PCB_ACTIONS::routerSpreadTracks( TOOL_ACTION_ARGS()
+        .Name( "pcbnew.InteractiveRouter.SpreadTracks" )
+        .Scope( AS_GLOBAL )
+        // Don't be tempted to remove "Modern Toolset only".  It's in the legacy property name.
+        .FriendlyName( _( "Spread Tracks" ) )
+        .ToolbarState( TOOLBAR_STATE::TOGGLE )
+        .Flags( AF_ACTIVATE )
+        .Icon( BITMAPS::spread_tracks )
+        .Parameter( PNS::PNS_MODE_SPREAD_TRACKS ) );
 
 TOOL_ACTION PCB_ACTIONS::routerInlineDrag( TOOL_ACTION_ARGS()
         .Name( "pcbnew.InteractiveRouter.InlineDrag" )

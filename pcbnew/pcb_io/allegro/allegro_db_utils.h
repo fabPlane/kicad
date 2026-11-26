@@ -108,7 +108,7 @@ public:
 
     const BLK_T* operator->() const
     {
-        wxASSERT( m_block != nullptr );
+        wxCHECK( m_block != nullptr, nullptr );
         return &BlockDataAs<BLK_T>( *m_block );
     }
 
@@ -190,7 +190,7 @@ public:
             {
                 m_current = ( *m_nextFunc )( *m_currBlock );
 
-                if( m_current == m_tail || m_board->IsSentinel( m_current ) )
+                if( m_current == m_tail )
                 {
                     m_current = 0;
                 }

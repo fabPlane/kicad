@@ -599,6 +599,9 @@ std::vector<PCB_MARKER*> BOARD::ResolveDRCExclusions( bool aCreateMarkers )
 
     for( PCB_MARKER* marker : GetBoard()->Markers() )
     {
+        if( !marker->GetRCItem() )
+            continue;
+
         DRC_EXCLUSION lookup = DRC_EXCLUSION::FromMarker( *marker );
 
         if( auto it = exclusions.find( lookup ); it != exclusions.end() )
@@ -641,6 +644,31 @@ std::vector<PCB_MARKER*> BOARD::ResolveDRCExclusions( bool aCreateMarkers )
                 m_designSettings->m_DrcExclusions.insert( exclusion );
             }
         }
+    }
+
+    return newMarkers;
+}
+
+
+std::vector<PCB_MARKER*> BOARD::ReloadDRCExclusions( std::vector<PCB_MARKER*>& aStale )
+{
+    std::vector<PCB_MARKER*> wereExcluded;
+
+    for( PCB_MARKER* marker : m_markers )
+    {
+        if( marker->IsExcluded() )
+        {
+            wereExcluded.push_back( marker );
+            marker->SetExcluded( false );
+        }
+    }
+
+    std::vector<PCB_MARKER*> newMarkers = ResolveDRCExclusions( true );
+
+    for( PCB_MARKER* marker : wereExcluded )
+    {
+        if( !marker->IsExcluded() )
+            aStale.push_back( marker );
     }
 
     return newMarkers;
@@ -1528,7 +1556,10 @@ void BOARD::Add( BOARD_ITEM* aBoardItem, ADD_MODE aMode, bool aSkipConnectivity 
     switch( aBoardItem->Type() )
     {
     case PCB_NETINFO_T:
-        m_NetInfo.AppendNet( (NETINFO_ITEM*) aBoardItem );
+        // A duplicate net is deleted here, so nothing below may touch it
+        if( !m_NetInfo.AppendNet( (NETINFO_ITEM*) aBoardItem ) )
+            return;
+
         break;
 
     // this one uses a vector
@@ -1607,6 +1638,7 @@ void BOARD::Add( BOARD_ITEM* aBoardItem, ADD_MODE aMode, bool aSkipConnectivity 
     case PCB_TEXTBOX_T:
     case PCB_TABLE_T:
     case PCB_DRILL_CHART_T:
+    case PCB_STACKUP_TABLE_T:
     case PCB_DRILL_MAP_T:
     case PCB_TARGET_T:
     case PCB_GRID_ITEM_T:
@@ -1691,7 +1723,7 @@ void BOARD::BulkRemoveStaleTeardrops( BOARD_COMMIT& aCommit )
 void BOARD::Remove( BOARD_ITEM* aBoardItem, REMOVE_MODE aRemoveMode )
 {
     // find these calls and fix them!  Don't send me no stinking' nullptr.
-    wxASSERT( aBoardItem );
+    wxCHECK2( aBoardItem, return );
 
     // This is redundant with BOARD_COMMIT::Push but necessary to support SWIG interaction
     // until the SWIG API is completely removed (since it doesn't use the commit system)
@@ -1769,6 +1801,7 @@ void BOARD::Remove( BOARD_ITEM* aBoardItem, REMOVE_MODE aRemoveMode )
     case PCB_TEXTBOX_T:
     case PCB_TABLE_T:
     case PCB_DRILL_CHART_T:
+    case PCB_STACKUP_TABLE_T:
     case PCB_DRILL_MAP_T:
     case PCB_TARGET_T:
     case PCB_GRID_ITEM_T:
@@ -1884,6 +1917,7 @@ void BOARD::RemoveAll( std::initializer_list<KICAD_T> aTypes )
         case PCB_TEXTBOX_T:
         case PCB_TABLE_T:
         case PCB_DRILL_CHART_T:
+        case PCB_STACKUP_TABLE_T:
         case PCB_DRILL_MAP_T:
         case PCB_TARGET_T:
         case PCB_BARCODE_T:
@@ -2594,9 +2628,10 @@ BOX2I BOARD::ComputeBoundingBox( bool aBoardEdgesOnly, bool aPhysicalLayersOnly 
                 bbox.Merge( aZone->GetBoundingBox() );
         }
 
-        for( PCB_POINT* point : m_points )
+        if( !aPhysicalLayersOnly )
         {
-            bbox.Merge( point->GetBoundingBox() );
+            for( PCB_POINT* point : m_points )
+                bbox.Merge( point->GetBoundingBox() );
         }
     }
 
@@ -2677,6 +2712,7 @@ INSPECT_RESULT BOARD::Visit( INSPECTOR inspector, void* testData, const std::vec
         case PCB_TEXTBOX_T:
         case PCB_TABLE_T:
         case PCB_DRILL_CHART_T:
+        case PCB_STACKUP_TABLE_T:
         case PCB_DRILL_MAP_T:
         case PCB_TABLECELL_T:
         case PCB_DIM_ALIGNED_T:
@@ -2810,6 +2846,17 @@ NETINFO_ITEM* BOARD::FindNet( int aNetcode ) const
 NETINFO_ITEM* BOARD::FindNet( const wxString& aNetname ) const
 {
     return m_NetInfo.GetNetItem( aNetname );
+}
+
+
+NETINFO_ITEM* BOARD::FindOrAddNet( const wxString& aNetName, int aNetCode, ADD_MODE aMode, bool aSkipConnectivity )
+{
+    if( NETINFO_ITEM* existing = FindNet( aNetName ) )
+        return existing;
+
+    NETINFO_ITEM* net = new NETINFO_ITEM( this, aNetName, aNetCode );
+    Add( net, aMode, aSkipConnectivity );
+    return net;
 }
 
 
@@ -4160,6 +4207,7 @@ void BOARD::ConvertBrdLayerToPolygonalContours( PCB_LAYER_ID aLayer, SHAPE_POLY_
 
         case PCB_TABLE_T:
         case PCB_DRILL_CHART_T:
+        case PCB_STACKUP_TABLE_T:
         {
             const PCB_TABLE* table = static_cast<const PCB_TABLE*>( item );
             table->TransformGraphicItemsToPolySet( aOutlines, maxError, ERROR_INSIDE, aRenderSettings );
@@ -4367,13 +4415,14 @@ void BOARD::SaveToHistory( const wxString& aProjectPath, std::vector<HISTORY_FIL
         return;
     }
 
-    wxString boardPath = GetFileName();
-
-    if( boardPath.IsEmpty() )
+    if( GetFileName().IsEmpty() )
         return; // unsaved board
 
+    // A loaded board's name uses forward slashes, which never prefix a Windows project path
+    wxString boardPath = wxFileName( GetFileName() ).GetFullPath();
+
     // Derive relative path from project root.
-    if( !boardPath.StartsWith( projPath ) )
+    if( !boardPath.Left( projPath.length() ).IsSameAs( projPath, wxFileName::IsCaseSensitive() ) )
     {
         wxLogTrace( traceAutoSave, wxS( "[history] pcb saver skipping - board not under project: %s" ), boardPath );
         return; // not under project
@@ -4403,6 +4452,7 @@ void BOARD::SaveToHistory( const wxString& aProjectPath, std::vector<HISTORY_FIL
     }
     catch( const IO_ERROR& ioe )
     {
-        wxLogTrace( traceAutoSave, wxS( "[history] pcb saver serialize failed: %s" ), wxString::FromUTF8( ioe.What() ) );
+        wxLogTrace( traceAutoSave, wxS( "[history] pcb saver serialize failed: %s" ),
+                    wxString::FromUTF8( ioe.What() ) );
     }
 }

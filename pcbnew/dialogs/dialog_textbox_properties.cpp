@@ -245,6 +245,7 @@ bool DIALOG_TEXTBOX_PROPERTIES::TransferDataToWindow()
     }
 
     m_mirrored->Check( m_textBox->IsMirrored() );
+    m_knockout->SetValue( m_textBox->IsKnockout() );
 
     EDA_ANGLE orientation = m_textBox->GetTextAngle();
     m_orientation.SetAngleValue( orientation.Normalize180() );
@@ -374,7 +375,7 @@ bool DIALOG_TEXTBOX_PROPERTIES::TransferDataFromWindow()
 
     m_textBox->SetText( EscapeString( txt, CTX_QUOTED_STR ) );
     m_textBox->SetLocked( m_cbLocked->GetValue() );
-    m_textBox->SetLayer( ToLAYER_ID( m_LayerSelectionCtrl->GetLayerSelection() ) );
+    m_textBox->SetLayer( m_LayerSelectionCtrl->GetLayerIDSelection() );
 
     if( m_fontCtrl->HaveFontSelection() )
     {
@@ -402,6 +403,7 @@ bool DIALOG_TEXTBOX_PROPERTIES::TransferDataFromWindow()
         }
     }
 
+    m_textBox->SetIsKnockout( m_knockout->GetValue() );
     m_textBox->SetTextAngle( m_orientation.GetAngleValue().Normalize() );
     m_textBox->SetBoldFlag( m_bold->IsChecked() );
     m_textBox->SetItalicFlag( m_italic->IsChecked() );

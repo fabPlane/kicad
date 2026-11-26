@@ -18,6 +18,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <dialogs/dialog_export_older_version.h>
+#include <jobs/job_sym_downgrade.h>
 #include <sch_edit_frame.h>
 #include <settings/common_settings.h>
 #include <tools/sch_selection_tool.h>
@@ -54,11 +56,7 @@
 #include <dialogs/dialog_kicad_diff.h>
 #include <diff_merge/sym_lib_differ.h>
 #include <diff_merge/sym_diff_canvas_context.h>
-#include <widgets/widget_diff_canvas.h>
 #include <lib_symbol.h>
-#include <symbol_edit_frame.h>
-
-#include <map>
 
 
 bool SYMBOL_EDITOR_CONTROL::Init()
@@ -880,6 +878,57 @@ int SYMBOL_EDITOR_CONTROL::ExportSymbol( const TOOL_EVENT& aEvent )
 }
 
 
+int SYMBOL_EDITOR_CONTROL::ExportForOlderVersion( const TOOL_EVENT& aEvent )
+{
+    SYMBOL_EDIT_FRAME* editFrame = getEditFrame<SYMBOL_EDIT_FRAME>();
+
+    if( !editFrame )
+        return 0;
+
+    const wxString          title = _( "Export for Older KiCad Version" );
+    wxString                libName = editFrame->GetTargetLibId().GetLibNickname();
+    SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &editFrame->Prj() );
+
+    std::optional<LIBRARY_TABLE_ROW*> row = adapter ? adapter->GetRow( libName ) : std::nullopt;
+
+    if( !row )
+    {
+        wxMessageBox( _( "Select a library first." ), title, wxOK | wxICON_ERROR, editFrame );
+        return 0;
+    }
+
+    const wxString library = LIBRARY_MANAGER::ExpandURI( row.value()->URI(), editFrame->Prj() );
+
+    // The export reads the file on disk, which the editor has not written yet.
+    if( editFrame->IsContentModified()
+        && wxMessageBox( _( "A library editor has unsaved changes. The export uses the last saved "
+                            "library files. Continue?" ),
+                         title, wxYES_NO | wxICON_WARNING, editFrame )
+                   != wxYES )
+    {
+        return 0;
+    }
+
+    RunExportForOlderVersion( editFrame,
+                              [&]( const DOWNGRADE_EXPORT_PASS& aPass, DOWNGRADE_EXPORT_RESULT& aResult ) -> bool
+                              {
+                                  JOB_SYM_DOWNGRADE job;
+                                  job.m_libraryPath = library;
+
+                                  if( !aPass.m_dryRun )
+                                  {
+                                      wxFileName out( aPass.m_folder, wxFileName( library ).GetName() );
+                                      out.SetExt( FILEEXT::KiCadSymbolLibFileExtension );
+                                      job.m_outputLibraryPath = out.GetFullPath();
+                                  }
+
+                                  return RunDowngradeJob( editFrame->Kiway(), KIWAY::FACE_SCH, job, aPass, aResult );
+                              } );
+
+    return 0;
+}
+
+
 int SYMBOL_EDITOR_CONTROL::ExportSymbolAsSVG( const TOOL_EVENT& aEvent )
 {
     if( !m_isSymbolEditor )
@@ -1205,50 +1254,11 @@ int SYMBOL_EDITOR_CONTROL::CompareLibraryWithFile( const TOOL_EVENT& aEvent )
     KICAD_DIFF::SYM_LIB_DIFFER differ( beforeMap, afterMap, otherPath );
     KICAD_DIFF::DOCUMENT_DIFF  result = differ.Diff();
 
-    auto cloneHolder = std::make_shared<std::vector<std::unique_ptr<LIB_SYMBOL>>>();
-
     DIALOG_KICAD_DIFF dlgDiff( editFrame, currentLib, otherPath, result );
-
-    std::map<KIID_PATH, const KICAD_DIFF::ITEM_CHANGE*> changesById;
-
-    for( const KICAD_DIFF::ITEM_CHANGE& c : result.changes )
-        changesById[c.id] = &c;
-
-    dlgDiff.SetChangeSelectedHandler(
-            [&, cloneHolder]( const KIID_PATH& aId )
+    dlgDiff.DrawChosenLibraryItem(
+            [&]( WIDGET_DIFF_CANVAS& aCanvas, const wxString& aName )
             {
-                WIDGET_DIFF_CANVAS* canvas = dlgDiff.DiffCanvas();
-
-                if( !canvas )
-                    return;
-
-                auto it = changesById.find( aId );
-
-                if( it == changesById.end() || !it->second->refdes )
-                {
-                    KICAD_DIFF::ConfigureSymDiffCanvasContext( *canvas, nullptr, nullptr );
-                    cloneHolder->clear();
-                    return;
-                }
-
-                const wxString& name = *it->second->refdes;
-                auto            beforeIt = beforeMap.find( name );
-                auto            afterIt = afterMap.find( name );
-
-                std::unique_ptr<LIB_SYMBOL> beforeClone =
-                        beforeIt != beforeMap.end() ? beforeIt->second->Flatten() : nullptr;
-                std::unique_ptr<LIB_SYMBOL> afterClone =
-                        afterIt != afterMap.end() ? afterIt->second->Flatten() : nullptr;
-
-                KICAD_DIFF::ConfigureSymDiffCanvasContext( *canvas, beforeClone.get(), afterClone.get() );
-
-                cloneHolder->clear();
-
-                if( beforeClone )
-                    cloneHolder->push_back( std::move( beforeClone ) );
-
-                if( afterClone )
-                    cloneHolder->push_back( std::move( afterClone ) );
+                KICAD_DIFF::ShowSymbolPair( aCanvas, beforeMap, afterMap, aName );
             } );
 
     dlgDiff.ShowModal();
@@ -1259,6 +1269,7 @@ int SYMBOL_EDITOR_CONTROL::CompareLibraryWithFile( const TOOL_EVENT& aEvent )
 
 void SYMBOL_EDITOR_CONTROL::setTransitions()
 {
+    Go( &SYMBOL_EDITOR_CONTROL::ExportForOlderVersion, ACTIONS::exportForOlderVersion.MakeEvent() );
     Go( &SYMBOL_EDITOR_CONTROL::AddLibrary,            ACTIONS::newLibrary.MakeEvent() );
     Go( &SYMBOL_EDITOR_CONTROL::AddLibrary,            ACTIONS::addLibrary.MakeEvent() );
     Go( &SYMBOL_EDITOR_CONTROL::AddSymbol,             SCH_ACTIONS::newSymbol.MakeEvent() );

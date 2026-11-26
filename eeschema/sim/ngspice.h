@@ -26,6 +26,7 @@
 #include <sim/spice_simulator.h>
 #include <sim/sim_model.h>
 #include <sim/sim_value.h>
+#include <widgets/report_severity.h>
 
 #include <wx/dynlib.h>
 
@@ -196,6 +197,9 @@ private:
     // Restore original signal handlers
     void restoreSignalHandlers();
 
+    /// Start a run with no warning for unprefixed stderr lines to continue.
+    void resetStderrSeverity();
+
     // Signal handler for crashes
     static void signalHandler( int aSignal );
 
@@ -206,6 +210,9 @@ private:
 
 private:
     bool        m_error;            ///< Error flag indicating that ngspice needs to be reloaded.
+
+    /// Severity continuation lines inherit.  Guarded by m_reporterMutex.
+    SEVERITY m_lastStderrSeverity;
 
     static bool m_initialized;      ///< Ngspice should be initialized only once.
 

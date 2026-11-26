@@ -29,6 +29,7 @@
 #include <callback_gal.h>
 #include <component_classes/component_class.h>
 #include <confirm.h>
+#include <core/leak_at_exit.h>
 #include <convert_basic_shapes_to_polygon.h> // for enum RECT_CHAMFER_POSITIONS definition
 #include <fmt/format.h>
 #include <font/fontconfig.h>
@@ -111,26 +112,19 @@ void FP_CACHE::Save( FOOTPRINT* aFootprintFilter )
         if( aFootprintFilter && footprint.get() != aFootprintFilter )
             continue;
 
-        // If we've requested to embed the fonts in the footprint, do so.  Otherwise, clear the
-        // embedded fonts from the footprint.  Embedded fonts will be used if available.
-        if( footprint->GetAreFontsEmbedded() )
-            footprint->EmbedFonts();
-        else
-            footprint->GetEmbeddedFiles()->ClearEmbeddedFonts();
-
         WX_FILENAME fn = fpCacheEntry->GetFileName();
         wxString    fileName = fn.GetFullPath();
 
         // Allow file output stream to go out of scope to close the file stream before
         // renaming the file.
         {
-            wxLogTrace( traceKicadPcbPlugin, wxT( "Writing library file '%s'." ),
-                        fileName );
+            wxLogTrace( traceKicadPcbPlugin, wxT( "Writing library file '%s'." ), fileName );
 
             PRETTIFIED_FILE_OUTPUTFORMATTER formatter( fileName );
 
             m_owner->SetOutputFormatter( &formatter );
-            m_owner->Format( footprint.get() );
+
+            m_owner->FormatFootprintLibFile( footprint.get() );
             formatter.Finish();
         }
 
@@ -169,19 +163,32 @@ void FP_CACHE::Load()
 
         do
         {
+            // A library of thousands of files would otherwise hold up an abort, such as on quit
+            if( m_owner->m_loadCancelled.load() )
+            {
+                // Left empty and dirty so the next validation reads the whole library again
+                m_footprints.clear();
+                m_cache_dirty = true;
+                THROW_IO_ERRORF( _( "Loading footprint library '%s' was cancelled." ), m_lib_raw_path );
+            }
+
             fn.SetFullName( fullName );
 
             // Queue I/O errors so only files that fail to parse don't get loaded.
             try
             {
+                boost::ptr_map<wxString, FP_CACHE_ENTRY> tmp;
                 FILE_LINE_READER reader( fn.GetFullPath() );
-                PCB_IO_KICAD_SEXPR_PARSER       parser( &reader, nullptr, nullptr );
+                PCB_IO_KICAD_SEXPR_PARSER parser( &reader, nullptr, nullptr );
 
-                FOOTPRINT* footprint = dynamic_cast<FOOTPRINT*>( parser.Parse() );
+                parser.ParseFootprintLib( tmp );
                 wxString fpName = fn.GetName();
 
-                if( !footprint )
+                if( tmp.empty() )
                     THROW_IO_ERROR( wxEmptyString );   // caught locally, just below...
+
+                // The parser's entry has no file name, and saving uses the one cached here
+                FOOTPRINT* footprint = tmp.release( tmp.begin() )->GetFootprint().release();
 
                 footprint->SetFPID( LIB_ID( wxEmptyString, fpName ) );
                 m_footprints.insert( fpName, new FP_CACHE_ENTRY( footprint, fn ) );
@@ -354,6 +361,32 @@ BOARD_ITEM* PCB_IO_KICAD_SEXPR::Parse( const wxString& aClipboardSourceInput )
 }
 
 
+void PCB_IO_KICAD_SEXPR::SyncEmbeddedFonts( FOOTPRINT* aFootprint )
+{
+    // If we've requested to embed the fonts in the footprint, do so.  Otherwise, clear the
+    // embedded fonts from the footprint.  Embedded fonts will be used if available.
+    if( aFootprint->GetAreFontsEmbedded() )
+        aFootprint->EmbedFonts();
+    else
+        aFootprint->GetEmbeddedFiles()->ClearEmbeddedFonts();
+}
+
+
+void PCB_IO_KICAD_SEXPR::FormatFootprintLibFile( FOOTPRINT* aFootprint ) const
+{
+    SyncEmbeddedFonts( aFootprint );
+
+    formatInitialComments( aFootprint );
+
+    m_out->Print( "(kicad_footprint_lib (version %d) (generator \"kicad_footprint_editor\")"
+                  " (generator_version \"%s\")\n",
+                  SEXPR_FOOTPRINT_LIB_FILE_VERSION,
+                  GetMajorMinorVersion().c_str().AsChar() );
+    format( aFootprint, true );
+    m_out->Print( ")\n" );
+}
+
+
 void PCB_IO_KICAD_SEXPR::Format( const BOARD_ITEM* aItem ) const
 {
     switch( aItem->Type() )
@@ -419,6 +452,7 @@ void PCB_IO_KICAD_SEXPR::Format( const BOARD_ITEM* aItem ) const
         break;
 
     case PCB_DRILL_CHART_T:
+    case PCB_STACKUP_TABLE_T:
         format( static_cast<const PCB_GENERATED_TABLE*>( aItem ) );
         break;
 
@@ -1431,7 +1465,7 @@ void PCB_IO_KICAD_SEXPR::format( const PCB_GRID_ITEM* aGridItem ) const
 }
 
 
-void PCB_IO_KICAD_SEXPR::format( const FOOTPRINT* aFootprint ) const
+void PCB_IO_KICAD_SEXPR::formatInitialComments( const FOOTPRINT* aFootprint ) const
 {
     if( !( m_ctl & CTL_OMIT_INITIAL_COMMENTS ) )
     {
@@ -1443,6 +1477,13 @@ void PCB_IO_KICAD_SEXPR::format( const FOOTPRINT* aFootprint ) const
                 m_out->Print( "%s\n", TO_UTF8( (*initial_comments)[i] ) );
         }
     }
+}
+
+
+void PCB_IO_KICAD_SEXPR::format( const FOOTPRINT* aFootprint, bool aInLibFile ) const
+{
+    if( !aInLibFile )
+        formatInitialComments( aFootprint );
 
     if( m_ctl & CTL_OMIT_LIBNAME )
     {
@@ -1455,7 +1496,7 @@ void PCB_IO_KICAD_SEXPR::format( const FOOTPRINT* aFootprint ) const
                       m_out->Quotes( aFootprint->GetFPID().Format() ).c_str() );
     }
 
-    if( !( m_ctl & CTL_OMIT_FOOTPRINT_VERSION ) )
+    if( !aInLibFile && !( m_ctl & CTL_OMIT_FOOTPRINT_VERSION ) )
     {
         m_out->Print( "(version %d) (generator \"pcbnew\") (generator_version %s)", SEXPR_BOARD_FILE_VERSION,
                       m_out->Quotew( GetMajorMinorVersion() ).c_str() );
@@ -1967,14 +2008,15 @@ void PCB_IO_KICAD_SEXPR::format( const PAD* aPad ) const
             }
         };
 
-    const char* type;
+    const char* type = nullptr;
 
     switch( aPad->GetAttribute() )
     {
-    case PAD_ATTRIB::PTH:    type = "thru_hole";      break;
-    case PAD_ATTRIB::SMD:    type = "smd";            break;
-    case PAD_ATTRIB::CONN:   type = "connect";        break;
-    case PAD_ATTRIB::NPTH:   type = "np_thru_hole";   break;
+    case PAD_ATTRIB::PTH:           type = "thru_hole";      break;
+    case PAD_ATTRIB::SMD:           type = "smd";            break;
+    case PAD_ATTRIB::CONN:          type = "connect";        break;
+    case PAD_ATTRIB::NON_COMPONENT: type = "non_component";  break;
+    case PAD_ATTRIB::NPTH:          type = "np_thru_hole";   break;
 
     default:
         THROW_IO_ERRORF( _( "unknown pad attribute: %d" ), aPad->GetAttribute() );
@@ -2062,7 +2104,7 @@ void PCB_IO_KICAD_SEXPR::format( const PAD* aPad ) const
     }
 
 
-    if( aPad->Padstack().SecondaryDrill().size.x > 0 )
+    if( aPad->Padstack().SecondaryDrill().size.x > 0 && aPad->Padstack().SecondaryDrill().start != UNDEFINED_LAYER )
     {
         m_out->Print( "(backdrill (size %s) (layers %s %s))",
                         formatInternalUnits( aPad->Padstack().SecondaryDrill().size.x ).c_str(),
@@ -2070,7 +2112,7 @@ void PCB_IO_KICAD_SEXPR::format( const PAD* aPad ) const
                         m_out->Quotew( LSET::Name( aPad->Padstack().SecondaryDrill().end ) ).c_str() );
     }
 
-    if( aPad->Padstack().TertiaryDrill().size.x > 0 )
+    if( aPad->Padstack().TertiaryDrill().size.x > 0 && aPad->Padstack().TertiaryDrill().start != UNDEFINED_LAYER )
     {
         m_out->Print( "(tertiary_drill (size %s) (layers %s %s))",
                         formatInternalUnits( aPad->Padstack().TertiaryDrill().size.x ).c_str(),
@@ -2227,28 +2269,28 @@ void PCB_IO_KICAD_SEXPR::format( const PAD* aPad ) const
                       formatInternalUnits( aPad->GetLocalClearance().value() ).c_str() );
     }
 
-    if( aPad->GetLocalZoneConnection() != ZONE_CONNECTION::INHERITED )
+    if( aPad->GetLocalZoneConnection( F_Cu ) != ZONE_CONNECTION::INHERITED )
     {
         m_out->Print( "(zone_connect %d)",
-                      static_cast<int>( aPad->GetLocalZoneConnection() ) );
+                      static_cast<int>( aPad->GetLocalZoneConnection( F_Cu ) ) );
     }
 
-    if( aPad->GetLocalThermalSpokeWidthOverride().has_value() )
+    if( aPad->GetLocalThermalSpokeWidthOverride( F_Cu ).has_value() )
     {
         m_out->Print( "(thermal_bridge_width %s)",
-                      formatInternalUnits( aPad->GetLocalThermalSpokeWidthOverride().value() ).c_str() );
+                      formatInternalUnits( aPad->GetLocalThermalSpokeWidthOverride( F_Cu ).value() ).c_str() );
     }
 
-    if( aPad->GetThermalSpokeAngle() != aPad->Padstack().DefaultThermalSpokeAngleForShape() )
+    if( aPad->GetThermalSpokeAngle( F_Cu ) != aPad->Padstack().DefaultThermalSpokeAngleForShape( F_Cu ) )
     {
         m_out->Print( "(thermal_bridge_angle %s)",
-                      EDA_UNIT_UTILS::FormatAngle( aPad->GetThermalSpokeAngle() ).c_str() );
+                      EDA_UNIT_UTILS::FormatAngle( aPad->GetThermalSpokeAngle( F_Cu ) ).c_str() );
     }
 
-    if( aPad->GetLocalThermalGapOverride().has_value() )
+    if( aPad->GetLocalThermalGapOverride( F_Cu ).has_value() )
     {
         m_out->Print( "(thermal_gap %s)",
-                      formatInternalUnits( aPad->GetLocalThermalGapOverride().value() ).c_str() );
+                      formatInternalUnits( aPad->GetLocalThermalGapOverride( F_Cu ).value() ).c_str() );
     }
 
     auto anchorShape =
@@ -2440,9 +2482,9 @@ void PCB_IO_KICAD_SEXPR::format( const PAD* aPad ) const
 
                 EDA_ANGLE defaultLayerAngle = ANGLE_90;
 
-                if( aPad->GetShape( aLayer ) == PAD_SHAPE::CIRCLE ||
-                    ( aPad->GetShape( aLayer ) == PAD_SHAPE::CUSTOM
-                      && aPad->GetAnchorPadShape( aLayer ) == PAD_SHAPE::CIRCLE ) )
+                if( aPad->GetShape( aLayer ) == PAD_SHAPE::CIRCLE
+                    || (   aPad->GetShape( aLayer ) == PAD_SHAPE::CUSTOM
+                        && aPad->GetAnchorPadShape( aLayer ) == PAD_SHAPE::CIRCLE ) )
                 {
                     defaultLayerAngle = ANGLE_45;
                 }
@@ -2839,7 +2881,8 @@ void PCB_IO_KICAD_SEXPR::format( const PCB_GENERATED_TABLE* aTable ) const
 
     switch( aTable->Type() )
     {
-    case PCB_DRILL_CHART_T: m_out->Print( "(drill_chart " ); break;
+    case PCB_DRILL_CHART_T:   m_out->Print( "(drill_chart " );   break;
+    case PCB_STACKUP_TABLE_T: m_out->Print( "(stackup_table " ); break;
 
     default:
         wxFAIL_MSG( wxT( "Unhandled generated table type " ) + aTable->GetClass() );
@@ -2863,7 +2906,7 @@ void PCB_IO_KICAD_SEXPR::format( const PCB_GENERATED_TABLE* aTable ) const
     if( aTable->GetPrecision() != schema.DefaultPrecision() )
         m_out->Print( "(precision %d)", aTable->GetPrecision() );
 
-    for( const GENERATED_TABLE_COLUMN& col : aTable->Columns() )
+    for( const GENERATED_TABLE_COLUMN& col : aTable->AllColumns() )
     {
         const GENERATED_TABLE_COLUMN_DEF* def = schema.Find( col.m_Id );
 
@@ -2879,6 +2922,9 @@ void PCB_IO_KICAD_SEXPR::format( const PCB_GENERATED_TABLE* aTable ) const
 
         if( col.m_Width > 0 )
             m_out->Print( "(width %s)", formatInternalUnits( col.m_Width ).c_str() );
+
+        if( !col.m_Visible )
+            KICAD_FORMAT::FormatBool( m_out, "hide", true );
 
         m_out->Print( ")" );
     }
@@ -3258,7 +3304,7 @@ void PCB_IO_KICAD_SEXPR::format( const PCB_TRACK* aTrack ) const
         else
             m_out->Print( "(drill %s)", formatInternalUnits( via->GetDrillValue() ).c_str() );
 
-        if( via->Padstack().SecondaryDrill().size.x > 0 )
+        if( via->Padstack().SecondaryDrill().size.x > 0 && via->Padstack().SecondaryDrill().start != UNDEFINED_LAYER )
         {
             m_out->Print( "(backdrill (size %s) (layers %s %s))",
                           formatInternalUnits( via->Padstack().SecondaryDrill().size.x ).c_str(),
@@ -3266,7 +3312,7 @@ void PCB_IO_KICAD_SEXPR::format( const PCB_TRACK* aTrack ) const
                           m_out->Quotew( LSET::Name( via->Padstack().SecondaryDrill().end ) ).c_str() );
         }
 
-        if( via->Padstack().TertiaryDrill().size.x > 0 )
+        if( via->Padstack().TertiaryDrill().size.x > 0 && via->Padstack().TertiaryDrill().start != UNDEFINED_LAYER )
         {
             m_out->Print( "(tertiary_drill (size %s) (layers %s %s))",
                           formatInternalUnits( via->Padstack().TertiaryDrill().size.x ).c_str(),
@@ -3772,7 +3818,10 @@ PCB_IO_KICAD_SEXPR::PCB_IO_KICAD_SEXPR( int aControlFlags ) :
 
 PCB_IO_KICAD_SEXPR::~PCB_IO_KICAD_SEXPR()
 {
-    delete m_cache;
+    if( m_leakCacheAtExit )
+        LSAN_IGNORE( m_cache );
+    else
+        delete m_cache;
 }
 
 
@@ -4015,20 +4064,26 @@ std::unique_ptr<FOOTPRINT> PCB_IO_KICAD_SEXPR::ImportFootprint( const wxString& 
                                                                 wxString&                          aFootprintNameOut,
                                                                 const std::map<std::string, UTF8>* aProperties )
 {
-    wxString fcontents;
-    wxFFile  f( aFootprintPath );
+    boost::ptr_map<wxString, FP_CACHE_ENTRY> footprints;
 
     // Suppress font substitution warnings (RAII - automatically restored on scope exit)
     FONTCONFIG_REPORTER_SCOPE fontconfigScope( nullptr );
+    FILE_LINE_READER          reader( aFootprintPath );
+    PCB_IO_KICAD_SEXPR_PARSER parser( &reader, nullptr, nullptr );
 
-    if( !f.IsOpened() )
+    parser.ParseFootprintLib( footprints );
+
+    if( footprints.empty() )
         return nullptr;
 
-    f.ReadAll( &fcontents );
+    auto it = footprints.begin();
 
     aFootprintNameOut = wxFileName( aFootprintPath ).GetName();
+    FOOTPRINT* fp = it->second->GetFootprint().release();
+    std::unique_ptr<FOOTPRINT> retv;
+    retv.reset( fp );
 
-    return std::unique_ptr<FOOTPRINT>( dynamic_cast<FOOTPRINT*>( Parse( fcontents ) ) );
+    return retv;
 }
 
 

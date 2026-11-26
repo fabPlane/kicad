@@ -49,10 +49,14 @@ PROJECT_FILE::PROJECT_FILE( const wxString& aFullPath ) :
         m_topLevelSheets(),
         m_boards(),
         m_project( nullptr ),
-        m_wasMigrated( false )
+        m_wasMigrated( false ),
+        m_topLevelSheetsChanged( false )
 {
     // Keep old files around
     m_deleteLegacyAfterMigration = false;
+
+    // A shared project file changes only with the user's own edits
+    m_writeImplicitly = false;
 
     m_params.emplace_back( new PARAM_LIST<FILE_INFO_PAIR>( "sheets", &m_sheets, {} ) );
 
@@ -628,11 +632,14 @@ bool PROJECT_FILE::MigrateFromLegacy( wxConfigBase* aCfg )
     fromLegacy<int>( aCfg, "DimensionUnits",     bp + "defaults.dimension_units" );
     fromLegacy<int>( aCfg, "DimensionPrecision", bp + "defaults.dimension_precision" );
 
-    std::string sev = bp + "rule_severities";
+    std::string sev = bp + "rule_severities.";
 
     fromLegacy<bool>( aCfg, "RequireCourtyardDefinitions", sev + "legacy_no_courtyard_defined" );
 
     fromLegacy<bool>( aCfg, "ProhibitOverlappingCourtyards", sev + "legacy_courtyards_overlap" );
+
+    // 5.1 and earlier always kept external zone fillets
+    Set( bp + "zones_allow_external_fillets", true );
 
     {
         int      idx     = 1;
@@ -821,7 +828,10 @@ bool PROJECT_FILE::MigrateFromLegacy( wxConfigBase* aCfg )
 
 bool PROJECT_FILE::LoadFromFile( const wxString& aDirectory )
 {
+    std::vector<TOP_LEVEL_SHEET_INFO> previousSheets = m_topLevelSheets;
     bool success = JSON_SETTINGS::LoadFromFile( aDirectory );
+
+    m_topLevelSheetsChanged = false;
 
     if( success )
     {
@@ -838,7 +848,8 @@ bool PROJECT_FILE::LoadFromFile( const wxString& aDirectory )
 
             m_topLevelSheets.push_back( std::move( defaultSheet ) );
 
-            // Mark as migrated so it will be saved with the new format
+            // Like a schema migration, this reaches the file with the next real change
+            Set( "schematic.top_level_sheets", nlohmann::json( m_topLevelSheets ) );
             m_wasMigrated = true;
 
             wxLogTrace( traceSettings, wxT( "PROJECT_FILE: Migrated old single-root format to top_level_sheets" ) );
@@ -878,6 +889,9 @@ bool PROJECT_FILE::LoadFromFile( const wxString& aDirectory )
                 }
             }
         }
+
+        // A first read, or one over a list never written, has nothing to differ from
+        m_topLevelSheetsChanged = !previousSheets.empty() && m_topLevelSheets != previousSheets;
     }
 
     return success;
@@ -896,24 +910,27 @@ bool PROJECT_FILE::Store()
 
 bool PROJECT_FILE::SaveToFile( const wxString& aDirectory, bool aForce )
 {
-    wxASSERT( m_project );
+    wxCHECK( m_project, false );
 
     Set( "meta.filename", m_project->GetProjectName() + "." + FILEEXT::ProjectFileExtension );
-
-    // Even if parameters were not modified, we should resave after migration
-    bool force = aForce || m_wasMigrated;
 
     // If we're actually going ahead and doing the save, the flag that keeps code from doing the
     // save should be cleared at this.
     m_wasMigrated = false;
 
-    return JSON_SETTINGS::SaveToFile( aDirectory, force );
+    bool saved = JSON_SETTINGS::SaveToFile( aDirectory, aForce );
+
+    // The file now holds the list in memory, so a change read before is settled
+    if( saved )
+        m_topLevelSheetsChanged = false;
+
+    return saved;
 }
 
 
 std::string PROJECT_FILE::SerializeToString()
 {
-    wxASSERT( m_project );
+    wxCHECK( m_project, "" );
 
     Set( "meta.filename", m_project->GetProjectName() + "." + FILEEXT::ProjectFileExtension );
 

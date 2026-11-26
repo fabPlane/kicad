@@ -125,10 +125,10 @@ protected:
         {
             wxString filter = _( "Symbol Library Tables" );
 #ifndef __WXOSX__
-            filter << wxString::Format( _( " (%s)|%s" ), FILEEXT::SymbolLibraryTableFileName,
+            filter << wxString::Format( wxS( " (%s)|%s" ), FILEEXT::SymbolLibraryTableFileName,
                                         FILEEXT::SymbolLibraryTableFileName );
 #else
-            filter << wxString::Format( _( " (%s)|%s" ), wxFileSelectorDefaultWildcardStr,
+            filter << wxString::Format( wxS( " (%s)|%s" ), wxFileSelectorDefaultWildcardStr,
                                         wxFileSelectorDefaultWildcardStr );
 #endif
             return filter;
@@ -364,11 +364,12 @@ PANEL_SYM_LIB_TABLE::PANEL_SYM_LIB_TABLE( DIALOG_EDIT_LIBRARY_TABLES* aParent, P
             m_pluginChoices.Add( SCH_IO_MGR::ShowType( type ) );
     }
 
+    Pgm().GetLibraryManager().ReloadChangedTables( LIBRARY_TABLE_TYPE::SYMBOL );
+
     std::optional<LIBRARY_TABLE*> table = Pgm().GetLibraryManager().Table( LIBRARY_TABLE_TYPE::SYMBOL,
                                                                            LIBRARY_TABLE_SCOPE::GLOBAL );
-    wxASSERT( table.has_value() );
-
-    AddTable( table.value(), _( "Global Libraries" ), false /* closable */ );
+    if( table.has_value() )
+        AddTable( table.value(), _( "Global Libraries" ), false /* closable */ );
 
     std::optional<LIBRARY_TABLE*> projectTable = Pgm().GetLibraryManager().Table( LIBRARY_TABLE_TYPE::SYMBOL,
                                                                                   LIBRARY_TABLE_SCOPE::PROJECT );
@@ -781,7 +782,7 @@ void PANEL_SYM_LIB_TABLE::onReset( wxCommandEvent& event )
 
     std::optional<LIBRARY_TABLE*> newTable = Pgm().GetLibraryManager().Table( LIBRARY_TABLE_TYPE::SYMBOL,
                                                                               LIBRARY_TABLE_SCOPE::GLOBAL );
-    wxASSERT( newTable );
+    wxCHECK2( newTable, return );
 
     SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &m_parent->Kiway().Prj() );
 
@@ -960,10 +961,13 @@ bool PANEL_SYM_LIB_TABLE::TransferDataFromWindow()
 
     if( globalTable.has_value() && get_model( 0 )->Table() != *globalTable.value() )
     {
+        if( !m_parent->ConfirmOverwrite( *globalTable.value() ) )
+            return false;
+
         m_parent->m_GlobalTableChanged = true;
         *globalTable.value() = get_model( 0 )->Table();
 
-        globalTable.value()->Save().map_error(
+        globalTable.value()->Save( true ).map_error(
                 [&success]( const LIBRARY_ERROR& aError )
                 {
                     wxMessageBox( _( "Error saving global library table:\n\n" ) + aError.message,
@@ -981,10 +985,13 @@ bool PANEL_SYM_LIB_TABLE::TransferDataFromWindow()
 
         if( get_model( 1 )->Table() != *projectTable.value() )
         {
+            if( !m_parent->ConfirmOverwrite( *projectTable.value() ) )
+                return false;
+
             m_parent->m_ProjectTableChanged = true;
             *projectTable.value() = get_model( 1 )->Table();
 
-            projectTable.value()->Save().map_error(
+            projectTable.value()->Save( true ).map_error(
                     [&success]( const LIBRARY_ERROR& aError )
                     {
                         wxMessageBox( _( "Error saving project library table:\n\n" ) + aError.message,

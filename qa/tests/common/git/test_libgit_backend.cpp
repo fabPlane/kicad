@@ -40,10 +40,13 @@
 #include <git/git_push_handler.h>
 #include <git/git_commit_handler.h>
 #include <git/git_clone_handler.h>
+#include <git/kigit_transport.h>
+#include <qa_utils/file_utils.h>
 #include <qa_utils/git_test_fixture.h>
 
 #include <git2.h>
 
+#include <local_history.h>
 #include <project.h>
 #include <project/project_local_settings.h>
 #include <settings/settings_manager.h>
@@ -55,6 +58,7 @@
 
 #include <fstream>
 #include <future>
+#include <optional>
 #include <set>
 #include <thread>
 
@@ -67,6 +71,39 @@
 
 static const char* TEST_AUTHOR_NAME = "Test Author";
 static const char* TEST_AUTHOR_EMAIL = "test@kicad.example";
+
+static const char* CAMPAIGN_PRO = "ctrl-board.kicad_pro";
+static const char* CAMPAIGN_SCH = "pic_sockets.kicad_sch";
+static const char* CAMPAIGN_ROOT_SCH = "ctrl-board.kicad_sch";
+static const wxString CTRL_BOARD_PREFIX = wxS( "ctrl-board/" );
+
+// A pathspec that matches its twin unless paths are matched literally
+static const char* PATTERN_SCH = "pic_sockets[1].kicad_sch";
+static const char* PATTERN_TWIN_SCH = "pic_sockets1.kicad_sch";
+
+
+static std::string readBytes( const wxString& aPath )
+{
+    std::ifstream in( aPath.fn_str(), std::ios::binary );
+    BOOST_REQUIRE( in );
+    return std::string( ( std::istreambuf_iterator<char>( in ) ), std::istreambuf_iterator<char>() );
+}
+
+
+static std::string campaignFile( const char* aName )
+{
+    return readBytes( wxString::FromUTF8( KI_TEST::GetTestDataRootDir() ) + wxS( "common/git/mdw_ctrl_board/" )
+                      + aName );
+}
+
+
+/// aText with its single occurrence of aFrom replaced by aTo
+static std::string replaced( std::string aText, const std::string& aFrom, const std::string& aTo )
+{
+    size_t at = aText.find( aFrom );
+    BOOST_REQUIRE( at != std::string::npos );
+    return aText.replace( at, aFrom.size(), aTo );
+}
 
 
 /**
@@ -108,26 +145,38 @@ struct GIT_BACKEND_FIXTURE : KI_TEST::GIT_TEST_FIXTURE
     }
 
 
-    /// Create a commit on top of aParentOid setting aFile to aContent, without moving HEAD.
+    /// Create a commit on top of aParentOid setting aFile to aContent, or removing it when there
+    /// is no content, without moving HEAD. A zero parent starts an unrelated history
     git_oid createDetachedCommit( git_repository* aRepo, const git_oid& aParentOid, const wxString& aFile,
-                                  const std::string& aContent, const char* aMessage )
+                                  const std::optional<std::string>& aContent, const char* aMessage )
     {
         git_oid result = {};
 
         git_commit* parentCommit = nullptr;
-        BOOST_REQUIRE_EQUAL( git_commit_lookup( &parentCommit, aRepo, &aParentOid ), GIT_OK );
+        git_tree*   parentTree = nullptr;
 
-        git_oid blobOid;
-        BOOST_REQUIRE_EQUAL( git_blob_create_from_buffer( &blobOid, aRepo, aContent.data(), aContent.size() ), GIT_OK );
-
-        git_tree* parentTree = nullptr;
-        BOOST_REQUIRE_EQUAL( git_commit_tree( &parentTree, parentCommit ), GIT_OK );
+        if( !git_oid_is_zero( &aParentOid ) )
+        {
+            BOOST_REQUIRE_EQUAL( git_commit_lookup( &parentCommit, aRepo, &aParentOid ), GIT_OK );
+            BOOST_REQUIRE_EQUAL( git_commit_tree( &parentTree, parentCommit ), GIT_OK );
+        }
 
         git_treebuilder* builder = nullptr;
         BOOST_REQUIRE_EQUAL( git_treebuilder_new( &builder, aRepo, parentTree ), GIT_OK );
-        BOOST_REQUIRE_EQUAL(
-                git_treebuilder_insert( nullptr, builder, aFile.ToUTF8().data(), &blobOid, GIT_FILEMODE_BLOB ),
-                GIT_OK );
+
+        if( aContent )
+        {
+            git_oid blobOid;
+            BOOST_REQUIRE_EQUAL( git_blob_create_from_buffer( &blobOid, aRepo, aContent->data(), aContent->size() ),
+                                 GIT_OK );
+            BOOST_REQUIRE_EQUAL(
+                    git_treebuilder_insert( nullptr, builder, aFile.ToUTF8().data(), &blobOid, GIT_FILEMODE_BLOB ),
+                    GIT_OK );
+        }
+        else
+        {
+            BOOST_REQUIRE_EQUAL( git_treebuilder_remove( builder, aFile.ToUTF8().data() ), GIT_OK );
+        }
 
         git_oid treeOid;
         BOOST_REQUIRE_EQUAL( git_treebuilder_write( &treeOid, builder ), GIT_OK );
@@ -141,14 +190,151 @@ struct GIT_BACKEND_FIXTURE : KI_TEST::GIT_TEST_FIXTURE
         BOOST_REQUIRE_EQUAL( git_signature_now( &sig, TEST_AUTHOR_NAME, TEST_AUTHOR_EMAIL ), GIT_OK );
 
         const git_commit* parents[1] = { parentCommit };
-        BOOST_REQUIRE_EQUAL(
-                git_commit_create( &result, aRepo, nullptr, sig, sig, nullptr, aMessage, tree, 1, parents ), GIT_OK );
+        BOOST_REQUIRE_EQUAL( git_commit_create( &result, aRepo, nullptr, sig, sig, nullptr, aMessage, tree,
+                                                parentCommit ? 1 : 0, parents ),
+                             GIT_OK );
 
         git_signature_free( sig );
         git_tree_free( tree );
         git_commit_free( parentCommit );
         return result;
     }
+
+    /// Move the remote's master to a new commit that sets aFile to aContent, or removes it.
+    /// An unrelated commit holds only aFile and shares no history
+    void advanceRemote( const wxString& aFile, const std::optional<std::string>& aContent, const char* aMessage,
+                        bool aUnrelated = false )
+    {
+        git_repository* rawRemote = nullptr;
+        BOOST_REQUIRE_EQUAL( git_repository_open( &rawRemote, m_remotePath.utf8_str() ), GIT_OK );
+        KIGIT::GitRepositoryPtr remote( rawRemote );
+
+        git_oid remoteHead = {};
+
+        if( !aUnrelated )
+            BOOST_REQUIRE_EQUAL( git_reference_name_to_id( &remoteHead, remote.get(), "refs/heads/master" ), GIT_OK );
+
+        git_oid        ahead = createDetachedCommit( remote.get(), remoteHead, aFile, aContent, aMessage );
+        git_reference* ref = nullptr;
+        BOOST_REQUIRE_EQUAL( git_reference_create( &ref, remote.get(), "refs/heads/master", &ahead, 1, nullptr ),
+                             GIT_OK );
+        git_reference_free( ref );
+    }
+
+
+    /// Bring the campaign's ctrl-board files in through a pull, so both sides share that history
+    void pullCampaignProject( git_repository* aRepo )
+    {
+        advanceRemote( CAMPAIGN_PRO, campaignFile( CAMPAIGN_PRO ), "Import the project file" );
+        advanceRemote( CAMPAIGN_SCH, campaignFile( CAMPAIGN_SCH ), "Import the sheet" );
+        addOrigin( aRepo );
+        setUpstreamConfig( aRepo, wxT( "master" ) );
+
+        KIGIT_COMMON     common( aRepo );
+        GIT_PULL_HANDLER handler( &common );
+
+        BOOST_REQUIRE_EQUAL( static_cast<int>( handler.PerformPull() ), static_cast<int>( PullResult::FastForward ) );
+    }
+
+
+    /// Bump aSheet's revision locally and differently on the remote, so the next pull conflicts on it
+    git_oid divergeSheet( git_repository* aRepo, const wxString& aSheet )
+    {
+        advanceRemote( aSheet, sheetRevision( "5" ), "Remote bumps the sheet revision" );
+        KI_TEST::WriteGitFile( m_repoPath, aSheet, sheetRevision( "4" ) );
+        return KI_TEST::CommitGitFile( aRepo, aSheet, wxT( "Local bumps the sheet revision" ) );
+    }
+
+
+    static std::string sheetRevision( const char* aRevision )
+    {
+        return replaced( campaignFile( CAMPAIGN_SCH ), "(rev \"3\")", std::string( "(rev \"" ) + aRevision + "\")" );
+    }
+
+
+    /// Leave an uncommitted edit in the project file and return its bytes
+    std::string dirtyProjectFile()
+    {
+        std::string edited = replaced( campaignFile( CAMPAIGN_PRO ), "\"text_variables\": {}",
+                                       "\"text_variables\": { \"STAGE\": \"local\" }" );
+        KI_TEST::WriteGitFile( m_repoPath, CAMPAIGN_PRO, edited );
+        return edited;
+    }
+
+
+    /// Commit the campaign's ctrl-board files in their own project folder and return its path
+    wxString commitCtrlBoard( git_repository* aRepo )
+    {
+        for( const char* name : { CAMPAIGN_PRO, CAMPAIGN_ROOT_SCH, CAMPAIGN_SCH } )
+            KI_TEST::WriteGitFile( m_repoPath, CTRL_BOARD_PREFIX + wxString::FromUTF8( name ), campaignFile( name ) );
+
+        KI_TEST::CommitAllGitFiles( aRepo, wxS( "Import the ctrl-board project" ) );
+        return m_repoPath + wxS( "/" ) + CTRL_BOARD_PREFIX;
+    }
+
+
+    static std::vector<FILE_CHECKLIST_ENTRY> changeEntries( git_repository* aRepo, const wxString& aProjectPath )
+    {
+        KIGIT_COMMON                 common( aRepo, aProjectPath );
+        KIGIT::ACTION_LOCK lock = common.LockAction();
+        return BuildGitChangeEntries( common, aProjectPath, false );
+    }
+
+
+    /// The uncommitted edit in aFile is still there, still unstaged
+    void checkEditKept( git_repository* aRepo, const wxString& aFile, const std::string& aBytes )
+    {
+        BOOST_CHECK( workingFile( aFile ) == aBytes );
+
+        unsigned int status = 0;
+        BOOST_REQUIRE_EQUAL( git_status_file( &status, aRepo, aFile.utf8_str() ), GIT_OK );
+        BOOST_CHECK_EQUAL( status, static_cast<unsigned int>( GIT_STATUS_WT_MODIFIED ) );
+    }
+
+
+    git_oid head( git_repository* aRepo )
+    {
+        git_oid oid;
+        BOOST_REQUIRE_EQUAL( git_reference_name_to_id( &oid, aRepo, "HEAD" ), GIT_OK );
+        return oid;
+    }
+
+
+    /// Resolve the single conflict of the last pull to the given side and finish the merge
+    MergeCommitResult resolveSingleConflict( KIGIT_COMMON& aCommon, bool aTheirs, KIGIT_ERROR_MESSAGE& aError )
+    {
+        wxString                          stageDir = TempPath() + wxFileName::GetPathSeparator() + wxT( "stages" );
+        wxString                          headOid, theirsOid, conflictsError;
+        std::vector<KIGIT_CONFLICT_SIDES> conflicts;
+
+        if( wxFileName::DirExists( stageDir ) )
+            wxFileName::Rmdir( stageDir, wxPATH_RMDIR_RECURSIVE );
+
+        BOOST_REQUIRE_MESSAGE( aCommon.GetMergeConflicts( stageDir, headOid, theirsOid, conflicts, conflictsError ),
+                               conflictsError.utf8_string() );
+        BOOST_REQUIRE_EQUAL( conflicts.size(), 1u );
+
+        const KIGIT_CONFLICT_SIDES& sides = conflicts[0];
+        return aCommon.CreateMergedCommit( headOid, theirsOid,
+                                           { { sides.path, aTheirs ? sides.theirsFile : sides.oursFile } }, aError );
+    }
+
+
+    void stageFile( git_repository* aRepo, const wxString& aFile )
+    {
+        git_index* index = nullptr;
+        BOOST_REQUIRE_EQUAL( git_repository_index( &index, aRepo ), GIT_OK );
+        KIGIT::GitIndexPtr indexPtr( index );
+        BOOST_REQUIRE_EQUAL( git_index_add_bypath( index, aFile.utf8_str() ), GIT_OK );
+        BOOST_REQUIRE_EQUAL( git_index_write( index ), GIT_OK );
+    }
+
+
+    std::string workingFile( const wxString& aFile ) const
+    {
+        return readBytes( m_repoPath + wxFileName::GetPathSeparator() + aFile );
+    }
+
 
     /// Write .git/FETCH_HEAD naming aOid, as a fetch would leave it.
     void writeFetchHead( const git_oid& aOid )
@@ -437,16 +623,36 @@ BOOST_AUTO_TEST_CASE( PushProgressStopsWhenTheOperationIsCancelled )
     BOOST_TEST_REQUIRE( repo );
     KIGIT::GitRepositoryPtr repoPtr( repo );
 
-    KIGIT_COMMON     common( repo );
-    GIT_PUSH_HANDLER handler( &common );
+    BOOST_REQUIRE( addOrigin( repo ) );
 
-    // Running normally, the push carries on.
-    BOOST_CHECK_EQUAL( push_transfer_progress_cb( 1, 10, 128, &handler ), 0 );
+    git_oid  local = createCommit( repo, wxT( "pushed.txt" ), wxT( "new\n" ), wxT( "Push me" ) );
+    wxString refspec = wxString::FromUTF8( git_oid_tostr_s( &local ) ) + wxS( ":refs/heads/master" );
 
-    handler.CancelThisOperation();
+    git_remote* remote = nullptr;
+    BOOST_REQUIRE_EQUAL( git_remote_lookup( &remote, repo, "origin" ), GIT_OK );
+    KIGIT::GitRemotePtr remotePtr( remote );
 
-    BOOST_CHECK_MESSAGE( push_transfer_progress_cb( 2, 10, 256, &handler ) != 0,
+    KIGIT_COMMON            common( repo );
+    GIT_PUSH_HANDLER        handler( &common );
+    KIGIT::REMOTE_TRANSPORT transport( &handler, remote );
+
+    // Cancelled once connected, so only a transfer tick is left to notice
+    BOOST_CHECK_MESSAGE( transport.Push(
+                                 [&]()
+                                 {
+                                     handler.CancelThisOperation();
+                                     return refspec;
+                                 } )
+                                 != GIT_OK,
                          "a cancelled push should stop at its next progress tick" );
+
+    git_repository* bare = nullptr;
+    BOOST_REQUIRE_EQUAL( git_repository_open( &bare, remotePath().ToUTF8().data() ), GIT_OK );
+    KIGIT::GitRepositoryPtr barePtr( bare );
+
+    git_oid remoteHead;
+    BOOST_REQUIRE_EQUAL( git_reference_name_to_id( &remoteHead, bare, "refs/heads/master" ), GIT_OK );
+    BOOST_CHECK( !git_oid_equal( &remoteHead, &local ) );
 }
 
 
@@ -755,7 +961,8 @@ BOOST_AUTO_TEST_CASE( Push_ReportsNonFastForwardWhenRemoteIsAhead )
 // A refusal the client-side check let through arrives only on the per-reference callback. A
 // read-only refs directory provokes one, which directory permissions cannot do on Windows.
 #ifndef __WINDOWS__
-BOOST_AUTO_TEST_CASE( Push_ReportsErrorWhenRemoteRefusesTheUpdate )
+BOOST_AUTO_TEST_CASE( Push_ReportsErrorWhenRemoteRefusesTheUpdate,
+                      *boost::unit_test::precondition( KI_TEST::WriteBitsBind ) )
 {
     BOOST_TEST_REQUIRE( ready() );
 
@@ -769,10 +976,6 @@ BOOST_AUTO_TEST_CASE( Push_ReportsErrorWhenRemoteRefusesTheUpdate )
                         + wxT( "heads" );
 
     BOOST_REQUIRE( wxFileName::DirExists( headsDir ) );
-
-    // Directory permissions do not bind root, so there the refusal cannot be staged.
-    if( geteuid() == 0 )
-        return;
 
     // Put the permissions back however the test ends, or the fixture cannot remove its directory.
     struct WRITABLE_AGAIN
@@ -1146,7 +1349,7 @@ BOOST_AUTO_TEST_CASE( PerformPull_ExplainsWhenActionLockHeld )
     KIGIT_COMMON     common( repo );
     GIT_PULL_HANDLER handler( &common );
 
-    std::unique_lock<std::mutex> held = common.LockAction();
+    KIGIT::ACTION_LOCK held = common.LockAction();
 
     PullResult result = std::async( std::launch::async,
                                     [&handler]()
@@ -1571,58 +1774,411 @@ BOOST_AUTO_TEST_CASE( AbandonOperation_ClearsInterruptedRebase )
 }
 
 
-// A fast-forward over a locally modified file must refuse, not move the branch past a change
-// it could not apply. Otherwise the local edit reads as reverting the remote change.
-BOOST_AUTO_TEST_CASE( PerformPull_FastForwardRefusesOverDirtyTrackedFile )
+// As git does, a pull refuses only when the incoming commits touch a file with uncommitted changes
+BOOST_AUTO_TEST_CASE( PullKeepsUncommittedEditsTheIncomingCommitsDoNotTouch )
 {
     BOOST_TEST_REQUIRE( ready() );
 
-    git_repository* repo = openRepo();
+    KIGIT::GitRepositoryPtr repo( openRepo() );
     BOOST_TEST_REQUIRE( repo );
 
-    {
-        git_repository* remote = nullptr;
-        BOOST_REQUIRE_EQUAL( git_repository_open( &remote, remotePath().ToUTF8().data() ), GIT_OK );
+    pullCampaignProject( repo.get() );
 
-        git_oid remoteHead;
-        BOOST_REQUIRE_EQUAL( git_reference_name_to_id( &remoteHead, remote, "refs/heads/master" ), GIT_OK );
+    // Staged and then edited again, so both kinds of uncommitted change are in play
+    KI_TEST::WriteGitFile( repoPath(), CAMPAIGN_PRO,
+                           replaced( campaignFile( CAMPAIGN_PRO ), "\"text_variables\": {}",
+                                     "\"text_variables\": { \"STAGE\": \"staged\" }" ) );
+    stageFile( repo.get(), CAMPAIGN_PRO );
 
-        git_oid ahead = createDetachedCommit( remote, remoteHead, wxT( "file.txt" ), "remote\n", "Remote change" );
+    std::string localPro = replaced( campaignFile( CAMPAIGN_PRO ), "\"text_variables\": {}",
+                                     "\"text_variables\": { \"STAGE\": \"local\" }" );
+    KI_TEST::WriteGitFile( repoPath(), CAMPAIGN_PRO, localPro );
 
-        git_reference* ref = nullptr;
-        BOOST_REQUIRE_EQUAL( git_reference_create( &ref, remote, "refs/heads/master", &ahead, 1, nullptr ), GIT_OK );
-        git_reference_free( ref );
-        git_repository_free( remote );
-    }
+    std::string remoteSch = replaced( campaignFile( CAMPAIGN_SCH ), "(rev \"3\")", "(rev \"4\")" );
+    advanceRemote( CAMPAIGN_SCH, remoteSch, "Remote bumps the sheet revision" );
 
-    wxString filePath = repoPath() + wxFileName::GetPathSeparator() + wxT( "file.txt" );
-    {
-        std::ofstream f( filePath.ToStdString() );
-        f << "local edit\n";
-    }
-
-    addOrigin( repo );
-    setUpstreamConfig( repo, wxT( "master" ) );
-
-    git_oid headBefore;
-    BOOST_REQUIRE_EQUAL( git_reference_name_to_id( &headBefore, repo, "HEAD" ), GIT_OK );
-
-    KIGIT_COMMON     common( repo );
+    KIGIT_COMMON     common( repo.get() );
     GIT_PULL_HANDLER handler( &common );
 
-    PullResult result = handler.PerformPull();
+    BOOST_CHECK_EQUAL( static_cast<int>( handler.PerformPull() ), static_cast<int>( PullResult::FastForward ) );
+    BOOST_CHECK( workingFile( CAMPAIGN_PRO ) == localPro );
+    BOOST_CHECK( workingFile( CAMPAIGN_SCH ) == remoteSch );
 
-    BOOST_CHECK_EQUAL( static_cast<int>( result ), static_cast<int>( PullResult::DirtyWorkdir ) );
+    unsigned int status = 0;
+    BOOST_REQUIRE_EQUAL( git_status_file( &status, repo.get(), CAMPAIGN_PRO ), GIT_OK );
+    BOOST_CHECK_EQUAL( status, static_cast<unsigned int>( GIT_STATUS_INDEX_MODIFIED | GIT_STATUS_WT_MODIFIED ) );
+}
+
+
+// A fast-forward over a locally modified file must refuse, not move the branch past a change
+// it could not apply. Otherwise the local edit reads as reverting the remote change.
+BOOST_AUTO_TEST_CASE( PullRefusesWhenIncomingTouchesDirtyFile )
+{
+    BOOST_TEST_REQUIRE( ready() );
+
+    KIGIT::GitRepositoryPtr repo( openRepo() );
+    BOOST_TEST_REQUIRE( repo );
+
+    pullCampaignProject( repo.get() );
+
+    std::string localPro = replaced( campaignFile( CAMPAIGN_PRO ), "\"text_variables\": {}",
+                                     "\"text_variables\": { \"STAGE\": \"local\" }" );
+    KI_TEST::WriteGitFile( repoPath(), CAMPAIGN_PRO, localPro );
+
+    advanceRemote( CAMPAIGN_PRO,
+                   replaced( campaignFile( CAMPAIGN_PRO ), "\"text_variables\": {}",
+                             "\"text_variables\": { \"STAGE\": \"remote\" }" ),
+                   "Remote edits the project file" );
+
+    git_oid headBefore;
+    BOOST_REQUIRE_EQUAL( git_reference_name_to_id( &headBefore, repo.get(), "HEAD" ), GIT_OK );
+
+    KIGIT_COMMON common( repo.get() );
+
+    auto checkRefused = [&]()
+    {
+        GIT_PULL_HANDLER handler( &common );
+
+        BOOST_CHECK_EQUAL( static_cast<int>( handler.PerformPull() ), static_cast<int>( PullResult::DirtyWorkdir ) );
+        BOOST_CHECK( handler.GetErrorString().Contains( CAMPAIGN_PRO ) );
+
+        git_oid headAfter;
+        BOOST_REQUIRE_EQUAL( git_reference_name_to_id( &headAfter, repo.get(), "HEAD" ), GIT_OK );
+        BOOST_CHECK( git_oid_equal( &headBefore, &headAfter ) );
+        BOOST_CHECK( workingFile( CAMPAIGN_PRO ) == localPro );
+    };
+
+    checkRefused();
+
+    // The same edit once staged, where only the index differs from HEAD
+    stageFile( repo.get(), CAMPAIGN_PRO );
+    checkRefused();
+
+    // Net of both commits the file is deleted, which overlaps the edit just the same
+    advanceRemote( CAMPAIGN_PRO, std::nullopt, "Remote removes the project file" );
+    checkRefused();
+}
+
+
+// libgit2 refuses a merge over a staged change only as a failed merge, so the pull refuses first
+BOOST_AUTO_TEST_CASE( PullMergeRefusesOverStagedChange )
+{
+    BOOST_TEST_REQUIRE( ready() );
+
+    KIGIT::GitRepositoryPtr repo( openRepo() );
+    BOOST_TEST_REQUIRE( repo );
+
+    pullCampaignProject( repo.get() );
+
+    git_oid localHead = createCommit( repo.get(), wxT( "file.txt" ), wxT( "local\n" ), wxT( "Local change" ) );
+
+    std::string stagedPro = replaced( campaignFile( CAMPAIGN_PRO ), "\"text_variables\": {}",
+                                      "\"text_variables\": { \"STAGE\": \"staged\" }" );
+    KI_TEST::WriteGitFile( repoPath(), CAMPAIGN_PRO, stagedPro );
+    stageFile( repo.get(), CAMPAIGN_PRO );
+
+    advanceRemote( CAMPAIGN_SCH, replaced( campaignFile( CAMPAIGN_SCH ), "(rev \"3\")", "(rev \"4\")" ),
+                   "Remote bumps the sheet revision" );
+
+    KIGIT_COMMON     common( repo.get() );
+    GIT_PULL_HANDLER handler( &common );
+
+    BOOST_CHECK_EQUAL( static_cast<int>( handler.PerformPull() ), static_cast<int>( PullResult::DirtyWorkdir ) );
 
     git_oid headAfter;
-    BOOST_REQUIRE_EQUAL( git_reference_name_to_id( &headAfter, repo, "HEAD" ), GIT_OK );
+    BOOST_REQUIRE_EQUAL( git_reference_name_to_id( &headAfter, repo.get(), "HEAD" ), GIT_OK );
+    BOOST_CHECK( git_oid_equal( &localHead, &headAfter ) );
+    BOOST_CHECK( workingFile( CAMPAIGN_PRO ) == stagedPro );
+
+    unsigned int status = 0;
+    BOOST_REQUIRE_EQUAL( git_status_file( &status, repo.get(), CAMPAIGN_PRO ), GIT_OK );
+    BOOST_CHECK_EQUAL( status, static_cast<unsigned int>( GIT_STATUS_INDEX_MODIFIED ) );
+}
+
+
+// Aborting the conflicted merge and finishing it after resolution both touch only the merged paths
+BOOST_AUTO_TEST_CASE( ConflictedMergeAbortKeepsUnrelatedEdit )
+{
+    BOOST_TEST_REQUIRE( ready() );
+
+    KIGIT::GitRepositoryPtr repo( openRepo() );
+    BOOST_TEST_REQUIRE( repo );
+
+    pullCampaignProject( repo.get() );
+
+    git_oid      localHead = divergeSheet( repo.get(), CAMPAIGN_SCH );
+    std::string  localPro = dirtyProjectFile();
+    KIGIT_COMMON common( repo.get() );
+
+    {
+        GIT_PULL_HANDLER handler( &common );
+        BOOST_REQUIRE_EQUAL( static_cast<int>( handler.PerformPull() ), static_cast<int>( PullResult::Conflict ) );
+    }
+
+    git_oid headAfter = head( repo.get() );
+    BOOST_CHECK( git_oid_equal( &localHead, &headAfter ) );
+    BOOST_CHECK_EQUAL( git_repository_state( repo.get() ), GIT_REPOSITORY_STATE_NONE );
+    BOOST_CHECK( workingFile( CAMPAIGN_SCH ) == sheetRevision( "4" ) );
+    checkEditKept( repo.get(), CAMPAIGN_PRO, localPro );
+
+    // Keeping ours leaves the merge nothing to write, which must not become a checkout of every path
+    KIGIT_ERROR_MESSAGE error;
+    BOOST_REQUIRE_MESSAGE( resolveSingleConflict( common, false, error ) == MergeCommitResult::Success,
+                           error.details.utf8_string() );
+
+    git_oid     mergeOid = head( repo.get() );
+    git_commit* rawMerge = nullptr;
+    BOOST_REQUIRE_EQUAL( git_commit_lookup( &rawMerge, repo.get(), &mergeOid ), GIT_OK );
+    KIGIT::GitCommitPtr mergeCommit( rawMerge );
+    BOOST_CHECK_EQUAL( git_commit_parentcount( rawMerge ), 2u );
+    BOOST_CHECK( workingFile( CAMPAIGN_SCH ) == sheetRevision( "4" ) );
+    checkEditKept( repo.get(), CAMPAIGN_PRO, localPro );
+
+    advanceRemote( CAMPAIGN_SCH, sheetRevision( "6" ), "Remote bumps the sheet revision again" );
+
+    {
+        GIT_PULL_HANDLER handler( &common );
+        BOOST_REQUIRE_EQUAL( static_cast<int>( handler.PerformPull() ), static_cast<int>( PullResult::Conflict ) );
+    }
+
+    BOOST_REQUIRE_MESSAGE( resolveSingleConflict( common, true, error ) == MergeCommitResult::Success,
+                           error.details.utf8_string() );
+
+    BOOST_CHECK( workingFile( CAMPAIGN_SCH ) == sheetRevision( "6" ) );
+    checkEditKept( repo.get(), CAMPAIGN_PRO, localPro );
+}
+
+
+// libgit2 reads a restored path as a pattern unless told otherwise, and this one also matches the twin
+BOOST_AUTO_TEST_CASE( ConflictedMergeMatchesPathsLiterally )
+{
+    BOOST_TEST_REQUIRE( ready() );
+
+    KIGIT::GitRepositoryPtr repo( openRepo() );
+    BOOST_TEST_REQUIRE( repo );
+
+    advanceRemote( PATTERN_SCH, campaignFile( CAMPAIGN_SCH ), "Import the sheet" );
+    advanceRemote( PATTERN_TWIN_SCH, campaignFile( CAMPAIGN_SCH ), "Import its twin" );
+    pullCampaignProject( repo.get() );
+
+    divergeSheet( repo.get(), PATTERN_SCH );
+
+    std::string localTwin = sheetRevision( "6" );
+    KI_TEST::WriteGitFile( repoPath(), PATTERN_TWIN_SCH, localTwin );
+
+    KIGIT_COMMON common( repo.get() );
+
+    {
+        GIT_PULL_HANDLER handler( &common );
+        BOOST_REQUIRE_EQUAL( static_cast<int>( handler.PerformPull() ), static_cast<int>( PullResult::Conflict ) );
+    }
+
+    checkEditKept( repo.get(), PATTERN_TWIN_SCH, localTwin );
+
+    KIGIT_ERROR_MESSAGE error;
+    BOOST_REQUIRE_MESSAGE( resolveSingleConflict( common, true, error ) == MergeCommitResult::Success,
+                           error.details.utf8_string() );
+
+    BOOST_CHECK( workingFile( PATTERN_SCH ) == sheetRevision( "5" ) );
+    checkEditKept( repo.get(), PATTERN_TWIN_SCH, localTwin );
+}
+
+
+// Rolling back a fast-forward whose branch cannot move restores by path, which must not reach the twin
+BOOST_AUTO_TEST_CASE( FastForwardRollbackMatchesPathsLiterally )
+{
+    BOOST_TEST_REQUIRE( ready() );
+
+    KIGIT::GitRepositoryPtr repo( openRepo() );
+    BOOST_TEST_REQUIRE( repo );
+
+    advanceRemote( PATTERN_SCH, campaignFile( CAMPAIGN_SCH ), "Import the sheet" );
+    advanceRemote( PATTERN_TWIN_SCH, campaignFile( CAMPAIGN_SCH ), "Import its twin" );
+    pullCampaignProject( repo.get() );
+    advanceRemote( PATTERN_SCH, sheetRevision( "5" ), "Remote bumps the sheet revision" );
+
+    std::string localTwin = sheetRevision( "6" );
+    KI_TEST::WriteGitFile( repoPath(), PATTERN_TWIN_SCH, localTwin );
+
+    wxString refLock = repoPath() + wxFileName::GetPathSeparator() + wxT( ".git" ) + wxFileName::GetPathSeparator()
+                       + wxT( "refs" ) + wxFileName::GetPathSeparator() + wxT( "heads" )
+                       + wxFileName::GetPathSeparator() + wxT( "master.lock" );
+    KI_TEST::WriteGitFile( repoPath(), wxT( ".git/refs/heads/master.lock" ), "locked\n" );
+
+    KIGIT_COMMON     common( repo.get() );
+    GIT_PULL_HANDLER handler( &common );
+
+    BOOST_CHECK_EQUAL( static_cast<int>( handler.PerformPull() ), static_cast<int>( PullResult::Error ) );
+    wxRemoveFile( refLock );
+
+    BOOST_CHECK( workingFile( PATTERN_SCH ) == campaignFile( CAMPAIGN_SCH ) );
+    checkEditKept( repo.get(), PATTERN_TWIN_SCH, localTwin );
+}
+
+
+// A file saved during resolution where the merge adds one must be refused, not overwritten
+BOOST_AUTO_TEST_CASE( MergeResolutionRefusesAnUntrackedFileInTheWay )
+{
+    BOOST_TEST_REQUIRE( ready() );
+
+    KIGIT::GitRepositoryPtr repo( openRepo() );
+    BOOST_TEST_REQUIRE( repo );
+
+    pullCampaignProject( repo.get() );
+    git_oid localHead = divergeSheet( repo.get(), CAMPAIGN_SCH );
+    advanceRemote( CAMPAIGN_ROOT_SCH, campaignFile( CAMPAIGN_ROOT_SCH ), "Remote adds the root sheet" );
+
+    KIGIT_COMMON common( repo.get() );
+
+    {
+        GIT_PULL_HANDLER handler( &common );
+        BOOST_REQUIRE_EQUAL( static_cast<int>( handler.PerformPull() ), static_cast<int>( PullResult::Conflict ) );
+    }
+
+    std::string localRoot = replaced( campaignFile( CAMPAIGN_ROOT_SCH ), "(rev \"2\")", "(rev \"3\")" );
+    KI_TEST::WriteGitFile( repoPath(), CAMPAIGN_ROOT_SCH, localRoot );
+
+    KIGIT_ERROR_MESSAGE error;
+    BOOST_CHECK_EQUAL( static_cast<int>( resolveSingleConflict( common, true, error ) ),
+                       static_cast<int>( MergeCommitResult::FailedCleanly ) );
+    BOOST_CHECK( error.details.Contains( CAMPAIGN_ROOT_SCH ) );
+    BOOST_CHECK( workingFile( CAMPAIGN_ROOT_SCH ) == localRoot );
+
+    git_oid headAfter = head( repo.get() );
+    BOOST_CHECK( git_oid_equal( &localHead, &headAfter ) );
+}
+
+
+// Without shared history every incoming path counts as changed, and git merges such histories too
+BOOST_AUTO_TEST_CASE( MergeOfUnrelatedHistoriesRefusesOnlyOverlap )
+{
+    BOOST_TEST_REQUIRE( ready() );
+
+    KIGIT::GitRepositoryPtr repo( openRepo() );
+    BOOST_TEST_REQUIRE( repo );
+
+    pullCampaignProject( repo.get() );
+    advanceRemote( CAMPAIGN_SCH, sheetRevision( "5" ), "Unrelated history", true );
+
+    std::string  localPro = dirtyProjectFile();
+    git_oid      localHead = head( repo.get() );
+    KIGIT_COMMON common( repo.get() );
+
+    {
+        GIT_PULL_HANDLER handler( &common );
+        BOOST_REQUIRE_EQUAL( static_cast<int>( handler.PerformPull() ), static_cast<int>( PullResult::Conflict ) );
+    }
+
+    git_oid headAfter = head( repo.get() );
+    BOOST_CHECK( git_oid_equal( &localHead, &headAfter ) );
+    BOOST_CHECK( workingFile( CAMPAIGN_SCH ) == campaignFile( CAMPAIGN_SCH ) );
+    checkEditKept( repo.get(), CAMPAIGN_PRO, localPro );
+
+    std::string localSch = sheetRevision( "6" );
+    KI_TEST::WriteGitFile( repoPath(), CAMPAIGN_SCH, localSch );
+
+    GIT_PULL_HANDLER handler( &common );
+
+    BOOST_CHECK_EQUAL( static_cast<int>( handler.PerformPull() ), static_cast<int>( PullResult::DirtyWorkdir ) );
+    BOOST_CHECK( handler.GetErrorString().Contains( CAMPAIGN_SCH ) );
+    BOOST_CHECK( !handler.GetErrorString().Contains( CAMPAIGN_PRO ) );
+    checkEditKept( repo.get(), CAMPAIGN_SCH, localSch );
+    checkEditKept( repo.get(), CAMPAIGN_PRO, localPro );
+}
+
+
+// As git does, a merge leaves uncommitted edits in files the incoming commits do not change
+BOOST_AUTO_TEST_CASE( MergeKeepsUncommittedEditsTheIncomingCommitsDoNotTouch )
+{
+    BOOST_TEST_REQUIRE( ready() );
+
+    KIGIT::GitRepositoryPtr repo( openRepo() );
+    BOOST_TEST_REQUIRE( repo );
+
+    pullCampaignProject( repo.get() );
+
+    // Only the local side changed the project file, so it is not part of the incoming change
+    std::string committedPro = replaced( campaignFile( CAMPAIGN_PRO ), "\"text_variables\": {}",
+                                         "\"text_variables\": { \"STAGE\": \"committed\" }" );
+    KI_TEST::WriteGitFile( repoPath(), CAMPAIGN_PRO, committedPro );
+    git_oid localHead = KI_TEST::CommitGitFile( repo.get(), CAMPAIGN_PRO, wxT( "Local edits the project file" ) );
+
+    std::string localPro = replaced( campaignFile( CAMPAIGN_PRO ), "\"text_variables\": {}",
+                                     "\"text_variables\": { \"STAGE\": \"local\" }" );
+    KI_TEST::WriteGitFile( repoPath(), CAMPAIGN_PRO, localPro );
+
+    std::string remoteSch = replaced( campaignFile( CAMPAIGN_SCH ), "(rev \"3\")", "(rev \"4\")" );
+    advanceRemote( CAMPAIGN_SCH, remoteSch, "Remote bumps the sheet revision" );
+
+    KIGIT_COMMON common( repo.get() );
+
+    {
+        GIT_PULL_HANDLER handler( &common );
+        BOOST_REQUIRE_EQUAL( static_cast<int>( handler.PerformPull() ), static_cast<int>( PullResult::Success ) );
+    }
+
+    BOOST_CHECK( workingFile( CAMPAIGN_SCH ) == remoteSch );
+    BOOST_CHECK( workingFile( CAMPAIGN_PRO ) == localPro );
+
+    unsigned int status = 0;
+    BOOST_REQUIRE_EQUAL( git_status_file( &status, repo.get(), CAMPAIGN_PRO ), GIT_OK );
+    BOOST_CHECK_EQUAL( status, static_cast<unsigned int>( GIT_STATUS_WT_MODIFIED ) );
+
+    git_commit* rawMerge = nullptr;
+    git_oid     mergeOid;
+    BOOST_REQUIRE_EQUAL( git_reference_name_to_id( &mergeOid, repo.get(), "HEAD" ), GIT_OK );
+    BOOST_REQUIRE_EQUAL( git_commit_lookup( &rawMerge, repo.get(), &mergeOid ), GIT_OK );
+    KIGIT::GitCommitPtr mergeCommit( rawMerge );
+    BOOST_CHECK_EQUAL( git_commit_parentcount( rawMerge ), 2u );
+    BOOST_CHECK( git_oid_equal( git_commit_parent_id( rawMerge, 0 ), &localHead ) );
+
+    // Once the incoming commits do change it, the merge refuses and names it
+    advanceRemote( CAMPAIGN_PRO,
+                   replaced( campaignFile( CAMPAIGN_PRO ), "\"text_variables\": {}",
+                             "\"text_variables\": { \"STAGE\": \"remote\" }" ),
+                   "Remote edits the project file" );
+
+    GIT_PULL_HANDLER handler( &common );
+
+    BOOST_CHECK_EQUAL( static_cast<int>( handler.PerformPull() ), static_cast<int>( PullResult::DirtyWorkdir ) );
+    BOOST_CHECK( handler.GetErrorString().Contains( CAMPAIGN_PRO ) );
+    BOOST_CHECK( workingFile( CAMPAIGN_PRO ) == localPro );
+
+    git_oid headAfter;
+    BOOST_REQUIRE_EQUAL( git_reference_name_to_id( &headAfter, repo.get(), "HEAD" ), GIT_OK );
+    BOOST_CHECK( git_oid_equal( &mergeOid, &headAfter ) );
+}
+
+
+// On a case-insensitive file system both names are one file, so the edit would be run over
+BOOST_AUTO_TEST_CASE( PullRefusesACaseOnlyCollisionWithADirtyFile )
+{
+    BOOST_TEST_REQUIRE( ready() );
+
+    KIGIT::GitRepositoryPtr repo( openRepo() );
+    BOOST_TEST_REQUIRE( repo );
+
+    pullCampaignProject( repo.get() );
+
+    git_config* rawConfig = nullptr;
+    BOOST_REQUIRE_EQUAL( git_repository_config( &rawConfig, repo.get() ), GIT_OK );
+    KIGIT::GitConfigPtr config( rawConfig );
+    BOOST_REQUIRE_EQUAL( git_config_set_bool( rawConfig, "core.ignorecase", 1 ), GIT_OK );
+
+    std::string localPro = dirtyProjectFile();
+    git_oid     headBefore = head( repo.get() );
+
+    advanceRemote( wxString( CAMPAIGN_PRO ).Upper(), campaignFile( CAMPAIGN_PRO ), "Remote adds a case twin" );
+
+    KIGIT_COMMON     common( repo.get() );
+    GIT_PULL_HANDLER handler( &common );
+
+    BOOST_CHECK_EQUAL( static_cast<int>( handler.PerformPull() ), static_cast<int>( PullResult::DirtyWorkdir ) );
+    BOOST_CHECK( handler.GetErrorString().Contains( CAMPAIGN_PRO ) );
+    checkEditKept( repo.get(), CAMPAIGN_PRO, localPro );
+
+    git_oid headAfter = head( repo.get() );
     BOOST_CHECK( git_oid_equal( &headBefore, &headAfter ) );
-
-    wxTextFile file( filePath );
-    BOOST_REQUIRE( file.Open() );
-    BOOST_CHECK_EQUAL( file.GetFirstLine(), wxString( "local edit" ) );
-
-    git_repository_free( repo );
 }
 
 
@@ -1759,7 +2315,7 @@ BOOST_AUTO_TEST_CASE( GetFileStatusMatchesPathspecLiterally )
 
 
 // The panel can only say the remote moved on if the session can tell.
-BOOST_AUTO_TEST_CASE( HasUpstreamCommitsSeesTheRemoteMoveOn )
+BOOST_AUTO_TEST_CASE( UpstreamStatusSeesTheRemoteMoveOn )
 {
     BOOST_TEST_REQUIRE( ready() );
 
@@ -1783,14 +2339,18 @@ BOOST_AUTO_TEST_CASE( HasUpstreamCommitsSeesTheRemoteMoveOn )
     BOOST_REQUIRE_EQUAL( git_branch_set_upstream( head, upstreamName.c_str() ), GIT_OK );
 
     // In step with the upstream.
-    BOOST_CHECK( !common.HasUpstreamCommits() );
+    std::optional<KIGIT_UPSTREAM_STATUS> status = common.UpstreamStatus();
+    BOOST_REQUIRE( status && status->hasUpstream );
+    BOOST_CHECK_EQUAL( status->divergence.behind, 0u );
 
     // The upstream moves on.
     git_oid remoteTip = createDetachedCommit( repo, base, wxT( "file.txt" ), "remote\n", "Remote change" );
     BOOST_REQUIRE_EQUAL( git_reference_create( &tracking, repo, trackingRef.c_str(), &remoteTip, 1, nullptr ), GIT_OK );
     git_reference_free( tracking );
 
-    BOOST_CHECK( common.HasUpstreamCommits() );
+    status = common.UpstreamStatus();
+    BOOST_REQUIRE( status );
+    BOOST_CHECK_EQUAL( status->divergence.behind, 1u );
 
     git_reference_free( head );
     git_repository_free( repo );
@@ -1941,7 +2501,7 @@ BOOST_AUTO_TEST_CASE( BusyOperationDoesNotConsumeAnotherCancellation )
         tokenA->store( true );
 
         // A is holding the action lock, so B cannot start.
-        std::unique_lock<std::mutex> heldByA = common.LockAction();
+        KIGIT::ACTION_LOCK heldByA = common.LockAction();
 
         GIT_PUSH_HANDLER           pushB( &common );
         KIGIT_COMMON::CANCEL_TOKEN tokenB = pushB.CancelToken();
@@ -2141,6 +2701,35 @@ BOOST_AUTO_TEST_CASE( Amend_MessageOnlyRewritesHeadKeepsTree )
     git_commit_free( commitAfter );
     git_reference_free( headRefAfter );
     git_repository_free( repo );
+}
+
+
+// A branch lock held for a moment must not fail an amend that is allowed to wait, as it does not fail a commit
+BOOST_AUTO_TEST_CASE( Amend_RetriesWhileBranchLockHeld )
+{
+    BOOST_TEST_REQUIRE( ready() );
+
+    KIGIT::GitRepositoryPtr repo( openRepo() );
+    BOOST_TEST_REQUIRE( repo );
+
+    wxString refLock = repoPath() + wxS( "/.git/refs/heads/master.lock" );
+    KI_TEST::WriteGitFile( repoPath(), wxT( ".git/refs/heads/master.lock" ), "locked\n" );
+
+    std::thread releaser(
+            [&refLock]()
+            {
+                std::this_thread::sleep_for( std::chrono::milliseconds( 300 ) );
+                wxRemoveFile( refLock );
+            } );
+
+    GIT_COMMIT_HANDLER handler( repo.get() );
+    handler.SetLockRetry( std::chrono::milliseconds( 5000 ) );
+
+    CommitResult result = handler.PerformAmend( {}, wxT( "Amended late" ), TEST_AUTHOR_NAME, TEST_AUTHOR_EMAIL );
+    releaser.join();
+    wxRemoveFile( refLock );
+
+    BOOST_CHECK_EQUAL( static_cast<int>( result ), static_cast<int>( CommitResult::Success ) );
 }
 
 
@@ -2618,7 +3207,7 @@ BOOST_AUTO_TEST_CASE( ProjectGitCommon_ReleaseDefersFreeWhileActionMutexHeld )
     std::thread worker(
             [&]()
             {
-                std::unique_lock<std::mutex> lock = common->LockAction();
+                KIGIT::ACTION_LOCK lock = common->LockAction();
                 lockHeld.set_value();
                 allowUnlock.get_future().wait();
             } );
@@ -2749,7 +3338,7 @@ BOOST_AUTO_TEST_CASE( BuildGitChangeEntries_KeepsTrackedAndStagedTransientFiles 
     auto checkEntries = [&repo, &expected]( const wxString& aProjectPath )
     {
         KIGIT_COMMON                 common( repo.get(), aProjectPath );
-        std::unique_lock<std::mutex> lock = common.LockAction();
+        KIGIT::ACTION_LOCK lock = common.LockAction();
         std::set<wxString>           paths;
 
         for( const FILE_CHECKLIST_ENTRY& entry : BuildGitChangeEntries( common, aProjectPath, false ) )
@@ -2765,6 +3354,151 @@ BOOST_AUTO_TEST_CASE( BuildGitChangeEntries_KeepsTrackedAndStagedTransientFiles 
     BOOST_REQUIRE_EQUAL( symlink( projectPath.utf8_str(), alias.utf8_str() ), 0 );
     checkEntries( alias );
 #endif
+}
+
+
+// Git reports a nested repository as one directory entry, never as the files inside it
+BOOST_AUTO_TEST_CASE( BuildGitChangeEntries_HidesLocalHistoryRepository )
+{
+    BOOST_REQUIRE( ready() );
+    KIGIT::GitRepositoryPtr repo( openRepo() );
+    BOOST_REQUIRE( repo );
+    useEmptyGlobalIgnore( repo.get() );
+
+    const wxString projectPath = commitCtrlBoard( repo.get() );
+    LOCAL_HISTORY  history;
+
+    const wxString projectFile = CTRL_BOARD_PREFIX + CAMPAIGN_PRO;
+    KI_TEST::WriteGitFile( repoPath(), projectFile,
+                           replaced( campaignFile( CAMPAIGN_PRO ), "\"text_variables\": {}",
+                                     "\"text_variables\": { \"STAGE\": \"local\" }" ) );
+
+    auto checkHidden = [&]( const char* aState )
+    {
+        wxArrayString paths;
+
+        for( const FILE_CHECKLIST_ENTRY& entry : changeEntries( repo.get(), projectPath ) )
+            paths.Add( entry.path );
+
+        BOOST_CHECK_MESSAGE( paths.size() == 1 && paths[0] == projectFile,
+                             aState << " local history listing is " << wxJoin( paths, ',' ) );
+    };
+
+    BOOST_REQUIRE( history.Init( projectPath ) );
+    BOOST_REQUIRE( wxDirExists( projectPath + wxS( ".history/.git" ) ) );
+    checkHidden( "Unborn" );
+
+    BOOST_REQUIRE( history.CommitFullProjectSnapshot( projectPath, wxS( "Snapshot" ) ) );
+    checkHidden( "Snapshotted" );
+}
+
+
+BOOST_AUTO_TEST_CASE( CommitStopsTrackingCommittedLocalHistory )
+{
+    BOOST_REQUIRE( ready() );
+    KIGIT::GitRepositoryPtr repo( openRepo() );
+    BOOST_REQUIRE( repo );
+    useEmptyGlobalIgnore( repo.get() );
+
+    const wxString projectPath = commitCtrlBoard( repo.get() );
+    const wxString historyPath = CTRL_BOARD_PREFIX + wxS( ".history" );
+    LOCAL_HISTORY  history;
+
+    BOOST_REQUIRE( history.CommitFullProjectSnapshot( projectPath, wxS( "Snapshot" ) ) );
+    KI_TEST::CommitGitFile( repo.get(), historyPath, wxS( "Commit local history as a gitlink" ) );
+
+    std::vector<FILE_CHECKLIST_ENTRY> entries = changeEntries( repo.get(), projectPath );
+    BOOST_REQUIRE_EQUAL( entries.size(), 1u );
+    BOOST_CHECK_EQUAL( entries[0].path, historyPath );
+    BOOST_CHECK_EQUAL( entries[0].status, wxS( "Stop Tracking" ) );
+    BOOST_CHECK( entries[0].checked );
+
+    GIT_COMMIT_HANDLER handler( repo.get() );
+    BOOST_REQUIRE( handler.PerformCommit( { historyPath }, wxS( "Stop tracking local history" ), TEST_AUTHOR_NAME,
+                                          TEST_AUTHOR_EMAIL )
+                   == CommitResult::Success );
+
+    git_index* rawIndex = nullptr;
+    BOOST_REQUIRE_EQUAL( git_repository_index( &rawIndex, repo.get() ), GIT_OK );
+    KIGIT::GitIndexPtr index( rawIndex );
+    BOOST_CHECK( git_index_get_bypath( index.get(), historyPath.utf8_str(), 0 ) == nullptr );
+    BOOST_CHECK( wxDirExists( projectPath + wxS( ".history/.git" ) ) );
+    BOOST_CHECK( changeEntries( repo.get(), projectPath ).empty() );
+}
+
+
+// A registered submodule is project content, even when its name matches a transient pattern
+BOOST_AUTO_TEST_CASE( RealSubmoduleIsNeverStopTracked )
+{
+    BOOST_REQUIRE( ready() );
+    KIGIT::GitRepositoryPtr repo( openRepo() );
+    BOOST_REQUIRE( repo );
+    useEmptyGlobalIgnore( repo.get() );
+
+    const wxString projectPath = commitCtrlBoard( repo.get() );
+    const std::vector<wxString>          subPaths = { CTRL_BOARD_PREFIX + wxS( "lib/sub" ),
+                                                      CTRL_BOARD_PREFIX + wxS( "lib/parts-backups" ) };
+    std::vector<KIGIT::GitRepositoryPtr> subs;
+    std::string                          modules;
+
+    for( const wxString& subPath : subPaths )
+    {
+        const wxString subRoot = repoPath() + wxS( "/" ) + subPath;
+        subs.push_back( KI_TEST::InitGitRepository( subRoot, "master", TEST_AUTHOR_NAME, TEST_AUTHOR_EMAIL ) );
+        KI_TEST::WriteGitFile( subRoot, CAMPAIGN_SCH, campaignFile( CAMPAIGN_SCH ) );
+        KI_TEST::CommitGitFile( subs.back().get(), CAMPAIGN_SCH, wxS( "Add the shared sheet" ) );
+
+        const std::string path = subPath.utf8_string();
+        modules += "[submodule \"" + path + "\"]\n\tpath = " + path + "\n\turl = ../" + path + ".git\n";
+    }
+
+    KI_TEST::WriteGitFile( repoPath(), wxS( ".gitmodules" ), modules );
+
+    {
+        git_index* rawIndex = nullptr;
+        BOOST_REQUIRE_EQUAL( git_repository_index( &rawIndex, repo.get() ), GIT_OK );
+        KIGIT::GitIndexPtr index( rawIndex );
+        BOOST_REQUIRE_EQUAL( git_index_add_bypath( index.get(), ".gitmodules" ), GIT_OK );
+
+        for( const wxString& subPath : subPaths )
+            BOOST_REQUIRE_EQUAL( git_index_add_bypath( index.get(), subPath.utf8_str() ), GIT_OK );
+
+        BOOST_REQUIRE_EQUAL( git_index_write( index.get() ), GIT_OK );
+    }
+
+    KI_TEST::CommitGitIndex( repo.get(), wxS( "Add the submodules" ) );
+
+    // A new submodule commit makes the parent commit record a new gitlink, not leave the old one alone
+    std::vector<git_oid> subHeads;
+
+    for( size_t ii = 0; ii < subPaths.size(); ++ii )
+    {
+        KI_TEST::WriteGitFile( repoPath() + wxS( "/" ) + subPaths[ii], CAMPAIGN_SCH, sheetRevision( "4" ) );
+        subHeads.push_back( KI_TEST::CommitGitFile( subs[ii].get(), CAMPAIGN_SCH, wxS( "Bump the sheet" ) ) );
+    }
+
+    std::vector<FILE_CHECKLIST_ENTRY> entries = changeEntries( repo.get(), projectPath );
+    BOOST_REQUIRE_EQUAL( entries.size(), subPaths.size() );
+
+    for( const FILE_CHECKLIST_ENTRY& entry : entries )
+        BOOST_CHECK_MESSAGE( entry.status == wxS( "Modified" ), entry.path << " reads " << entry.status );
+
+    GIT_COMMIT_HANDLER handler( repo.get() );
+    BOOST_REQUIRE(
+            handler.PerformCommit( subPaths, wxS( "Commit the submodules" ), TEST_AUTHOR_NAME, TEST_AUTHOR_EMAIL )
+            == CommitResult::Success );
+
+    git_index* rawIndex = nullptr;
+    BOOST_REQUIRE_EQUAL( git_repository_index( &rawIndex, repo.get() ), GIT_OK );
+    KIGIT::GitIndexPtr index( rawIndex );
+
+    for( size_t ii = 0; ii < subPaths.size(); ++ii )
+    {
+        const git_index_entry* entry = git_index_get_bypath( index.get(), subPaths[ii].utf8_str(), 0 );
+        BOOST_REQUIRE_MESSAGE( entry, subPaths[ii] << " was dropped from the index" );
+        BOOST_CHECK_EQUAL( entry->mode, GIT_FILEMODE_COMMIT );
+        BOOST_CHECK( git_oid_equal( &entry->id, &subHeads[ii] ) );
+    }
 }
 
 
@@ -2874,7 +3608,7 @@ BOOST_AUTO_TEST_CASE( MergeConflictRoundTrip )
     }
 
     BOOST_CHECK_EQUAL( static_cast<int>( common.CreateMergedCommit(
-                               headOid, theirsOid, { { conflicts[0].path, conflicts[0].oursFile } }, error ) ),
+                               headOid, theirsOid, { { conflicts[0].path, conflicts[0].theirsFile } }, error ) ),
                        static_cast<int>( MergeCommitResult::FailedCleanly ) );
 
     {
@@ -2916,8 +3650,8 @@ BOOST_AUTO_TEST_CASE( MergeConflictRoundTrip )
 #ifndef __WINDOWS__
     // A failure after the checkout, injected here by making the branch ref unwritable, must
     // roll the working files back automatically. The operation required a clean tree, so the
-    // rollback is lossless by construction. Directory permissions do not bind root.
-    if( geteuid() != 0 )
+    // rollback is lossless by construction.
+    if( KI_TEST::WriteBitsBind( {} ) )
     {
         // The ref update writes a lock file next to the ref and renames it into place, so the
         // way to make it fail is denying writes on the containing directory.
@@ -3040,6 +3774,62 @@ BOOST_AUTO_TEST_CASE( MergeConflictFinishesWithAnUntrackedFilePresent )
                     == MergeCommitResult::Success,
             "refused with an untracked file present: " + error.summary.ToStdString() );
 
+    git_repository_free( repo );
+}
+
+
+// Under core.autocrlf a hand-merged file written with CRLF must be committed with LF, as git add would
+BOOST_AUTO_TEST_CASE( MergeConflictResolutionPassesCleanFilters )
+{
+    BOOST_TEST_REQUIRE( ready() );
+
+    git_repository* repo = openRepo();
+    BOOST_TEST_REQUIRE( repo );
+
+    git_config* config = nullptr;
+    BOOST_REQUIRE_EQUAL( git_repository_config( &config, repo ), GIT_OK );
+    BOOST_REQUIRE_EQUAL( git_config_set_bool( config, "core.autocrlf", 1 ), GIT_OK );
+    git_config_free( config );
+
+    git_reference* headRef = nullptr;
+    BOOST_REQUIRE_EQUAL( git_repository_head( &headRef, repo ), GIT_OK );
+    git_oid baseOid = *git_reference_target( headRef );
+    git_reference_free( headRef );
+
+    createCommit( repo, wxT( "file.txt" ), wxT( "mine\n" ), wxT( "Local change" ) );
+    git_oid remoteCommitOid = createDetachedCommit( repo, baseOid, wxT( "file.txt" ), "remote\n", "Remote change" );
+    writeFetchHead( remoteCommitOid );
+
+    KIGIT_COMMON common( repo );
+
+    wxString                          stageDir = tempBase() + wxFileName::GetPathSeparator() + wxT( "stages" );
+    wxString                          headOid, theirsOid, conflictsError;
+    KIGIT_ERROR_MESSAGE               error;
+    std::vector<KIGIT_CONFLICT_SIDES> conflicts;
+
+    BOOST_REQUIRE_MESSAGE( common.GetMergeConflicts( stageDir, headOid, theirsOid, conflicts, conflictsError ),
+                           "GetMergeConflicts failed: " + conflictsError.ToStdString() );
+    BOOST_REQUIRE_EQUAL( conflicts.size(), 1u );
+
+    wxString mergedFile = tempBase() + wxFileName::GetPathSeparator() + wxT( "merged.txt" );
+    {
+        std::ofstream f( mergedFile.ToStdString(), std::ios::binary );
+        f << "mine\r\nremote\r\n";
+    }
+
+    BOOST_REQUIRE_MESSAGE( common.CreateMergedCommit( headOid, theirsOid, { { conflicts[0].path, mergedFile } }, error )
+                                   == MergeCommitResult::Success,
+                           "CreateMergedCommit failed: " + error.summary.ToStdString() );
+
+    git_object* blob = nullptr;
+    BOOST_REQUIRE_EQUAL( git_revparse_single( &blob, repo, "HEAD:file.txt" ), GIT_OK );
+
+    const git_blob* contents = reinterpret_cast<const git_blob*>( blob );
+    BOOST_CHECK_EQUAL( std::string( static_cast<const char*>( git_blob_rawcontent( contents ) ),
+                                    static_cast<size_t>( git_blob_rawsize( contents ) ) ),
+                       "mine\nremote\n" );
+
+    git_object_free( blob );
     git_repository_free( repo );
 }
 

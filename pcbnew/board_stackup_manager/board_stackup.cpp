@@ -573,7 +573,9 @@ void BOARD_STACKUP::Serialize( google::protobuf::Any& aContainer ) const
 {
     kiapi::board::BoardStackup stackup;
     Serialize( stackup );
-    aContainer.PackFrom( stackup );
+
+    if( !aContainer.PackFrom( stackup ) )
+        wxFAIL_MSG( wxT( "Failed to pack BOARD_STACKUP" ) );
 }
 
 
@@ -1166,7 +1168,7 @@ int BOARD_STACKUP::GetDrillDepth( PCB_LAYER_ID aFirstLayer, PCB_LAYER_ID aSecond
                     half = true;
             };
 
-    if( aSecondLayer > aFirstLayer )
+    if( IsCopperLayerLowerThan( aSecondLayer, aFirstLayer ) )
     {
         for( const BOARD_STACKUP_ITEM* item : m_list )
         {

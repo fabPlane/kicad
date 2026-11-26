@@ -75,7 +75,9 @@ void PCB_GROUP::Serialize( google::protobuf::Any &aContainer ) const
         kiapi::common::PackLibId( group.mutable_lib_id(), GetDesignBlockLibId() );
 
     kiapi::common::PackCustomProperties( group.mutable_custom_properties(), *this );
-    aContainer.PackFrom( group );
+
+    if( !aContainer.PackFrom( group ) )
+        wxFAIL_MSG( wxT( "Failed to pack PCB_GROUP" ) );
 }
 
 
@@ -467,25 +469,41 @@ void PCB_GROUP::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
 }
 
 
+static bool groupHasFootprint( const PCB_GROUP* aGroup )
+{
+    bool found = false;
+
+    aGroup->RunOnChildren(
+            [&]( BOARD_ITEM* aChild )
+            {
+                if( aChild->Type() == PCB_FOOTPRINT_T )
+                    found = true;
+            },
+            RECURSE_MODE::RECURSE );
+
+    return found;
+}
+
+
 void PCB_GROUP::Mirror( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
 {
     // Footprints have no mirror, only flip. If the group holds one, leave the whole group alone
     // rather than mirror the rest and tear it apart.
-    bool hasFootprint = false;
-
-    RunOnChildren(
-            [&]( BOARD_ITEM* aChild )
-            {
-                if( aChild->Type() == PCB_FOOTPRINT_T )
-                    hasFootprint = true;
-            },
-            RECURSE_MODE::RECURSE );
-
-    if( hasFootprint )
+    if( groupHasFootprint( this ) )
         return;
 
     for( EDA_ITEM* item : m_items )
         static_cast<BOARD_ITEM*>( item )->Mirror( aCentre, aFlipDirection );
+}
+
+
+void PCB_GROUP::Mirror( const SEG& aAxis )
+{
+    if( groupHasFootprint( this ) )
+        return;
+
+    for( EDA_ITEM* item : m_items )
+        static_cast<BOARD_ITEM*>( item )->Mirror( aAxis );
 }
 
 

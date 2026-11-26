@@ -1689,7 +1689,11 @@ TOOL_ACTION SCH_ACTIONS::navigateNext( TOOL_ACTION_ARGS()
 TOOL_ACTION SCH_ACTIONS::showHierarchy( TOOL_ACTION_ARGS()
         .Name( "eeschema.EditorTool.showHierarchy" )
         .Scope( AS_GLOBAL )
+#if defined( __WXMAC__ )
+        .DefaultHotkey( MD_ALT + 'H' )
+#else
         .DefaultHotkey( MD_CTRL + 'H' )
+#endif
         .FriendlyName( _( "Hierarchy Navigator" ) )
         .Tooltip( _( "Show/hide the schematic sheet hierarchy navigator" ) )
         .ToolbarState( TOOLBAR_STATE::TOGGLE )
@@ -1953,6 +1957,13 @@ TOOL_ACTION SCH_ACTIONS::toggleDarkModePlots( TOOL_ACTION_ARGS()
         .Scope( AS_GLOBAL )
         .FriendlyName( _( "Dark Mode Plots" ) )
         .Tooltip( _( "Draw plots with a black background" ) ) );
+
+TOOL_ACTION SCH_ACTIONS::toggleTrackCursor( TOOL_ACTION_ARGS()
+        .Name( "eeschema.Simulator.toggleTrackCursor" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Track Cursor" ) )
+        .Tooltip( _( "Show a crosshair that follows the mouse and reads out every signal's "
+                      "value" ) ) );
 
 TOOL_ACTION SCH_ACTIONS::simAnalysisProperties( TOOL_ACTION_ARGS()
         .Name( "eeschema.Simulation.simAnalysisProperties" )

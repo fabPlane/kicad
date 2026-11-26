@@ -70,9 +70,10 @@ public:
     int MainLoop( const TOOL_EVENT& aEvent );
     int RouteSelected( const TOOL_EVENT& aEvent );
     int OptimizeSelected( const TOOL_EVENT& aEvent );
+    int SpreadTracks( const TOOL_EVENT& aEvent );
 
     int InlineBreakTrack( const TOOL_EVENT& aEvent );
-    bool CanInlineDrag( int aDragMode );
+    bool CanInlineDrag();
     int InlineDrag( const TOOL_EVENT& aEvent );
 
     int SelectCopperLayerPair( const TOOL_EVENT& aEvent );
@@ -126,6 +127,8 @@ private:
     int onLayerCommand( const TOOL_EVENT& aEvent );
     int onViaCommand( const TOOL_EVENT& aEvent );
     int onViaStackCommand( const TOOL_EVENT& aEvent );
+    int onSpreadTracksSetDistance( const TOOL_EVENT& aEvent );
+    int onSpreadTracksIncDecDistance( const TOOL_EVENT& aEvent, bool aInc );
 
     /// Build and commit a staggered via stack queued during routing (after the PNS world is gone).
     void commitPendingViaStack();
@@ -151,8 +154,6 @@ private:
 
     bool                         m_inRouterTool;         // Re-entrancy guard
     bool                         m_inRouteSelected;
-
-    bool                         m_startWithVia;         // User pressed V before routing started
 
     // A staggered via stack queued mid-route, committed after the PNS world is torn down.
     bool         m_pendingViaStack = false;

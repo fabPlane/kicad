@@ -37,6 +37,7 @@
 #include <wx/window.h>
 
 class PROGRESS_REPORTER;
+class PROJECT;
 
 enum class SNAPSHOT_COMMIT_RESULT
 {
@@ -59,6 +60,7 @@ struct KICOMMON_API HISTORY_FILE_DATA
     wxString    sourcePath;     ///< For file-copy savers (small files like .kicad_pro)
     bool        prettify = false;
     KICAD_FORMAT::FORMAT_MODE formatMode = KICAD_FORMAT::FORMAT_MODE::NORMAL;
+    bool        removed = false; ///< The file no longer exists and leaves the snapshot
 };
 
 struct KICOMMON_API LOCAL_HISTORY_SNAPSHOT_INFO
@@ -109,6 +111,10 @@ public:
             const std::function<void( const wxString&, std::vector<HISTORY_FILE_DATA>& )>& aSaver,
             const std::weak_ptr<void>& aLifetime = {} );
 
+    /** Register \a aProject's own files (project, rules and library tables) for history snapshots.
+     *  Every editor may call this; the project is registered once. */
+    void RegisterProjectSaver( PROJECT* aProject );
+
     /** Unregister a previously registered saver callback.
      *  @param aSaverObject The object pointer that was used to register the saver */
     void UnregisterSaver( const void* aSaverObject );
@@ -148,6 +154,15 @@ public:
      */
     std::vector<std::pair<wxString, wxString>> FindStaleAutosaveFiles( const wxString&              aProjectPath,
                                                                        const std::vector<wxString>& aExtensions ) const;
+
+    /**
+     * Resolve the autosaves a document load must offer for recovery.  A revert discards the
+     * edits the autosaves hold, so the autosaves of @p aExtensions are removed and nothing is
+     * returned; any other load returns FindStaleAutosaveFiles().
+     */
+    std::vector<std::pair<wxString, wxString>> ResolveAutosavesForLoad( const wxString&              aProjectPath,
+                                                                        const std::vector<wxString>& aExtensions,
+                                                                        bool                         aReverting ) const;
 
     /**
      * Enumerate every (autosave, source) pair found under @p aAutosaveRoot for the project

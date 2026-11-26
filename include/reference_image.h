@@ -25,6 +25,7 @@
 #include <core/mirror.h>
 #include <gal/color4d.h>
 #include <geometry/eda_angle.h>
+#include <geometry/seg.h>
 #include <math/box2.h>
 #include <math/vector2d.h>
 
@@ -89,6 +90,14 @@ public:
      * @return false if the flip would put the coordinates out-of-bounds
      */
     bool Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection );
+
+    /**
+     * Mirror the image about an arbitrary axis, keeping its layer.
+     *
+     * @param aAxis is the mirror axis, as the infinite line through its two points.
+     * @return false if the mirror would put the coordinates out-of-bounds
+     */
+    bool Mirror( const SEG& aAxis );
 
     /**
      * Rotate the image about \a aCenter.
@@ -157,7 +166,8 @@ public:
     /**
      * Plot the image on a plotter, turned to its stored orientation.
      *
-     * This may resample the image depending on the orientation.
+     * This may resample the image depending on the orientation and alpha channel
+     * capabilities of the plotter backend.
      *
      * @param aPlotter the plotter to use.
      * @param aPos the position of the center of the image.
@@ -183,6 +193,12 @@ private:
      * @return the size of the axis-aligned bounding box that contains the rotated image.
      */
     VECTOR2I boundingSize() const;
+
+    /**
+     * @return the size of the axis-aligned bounding box that contains the image turned by
+     *         \a aOrientation.
+     */
+    VECTOR2I boundingSize( const EDA_ANGLE& aOrientation ) const;
 
     const EDA_IU_SCALE& m_iuScale;
 

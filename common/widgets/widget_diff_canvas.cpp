@@ -143,8 +143,22 @@ void WIDGET_DIFF_CANVAS::SetScene( KICAD_DIFF::DIFF_SCENE aScene )
 }
 
 
+void WIDGET_DIFF_CANVAS::SetChangeOutlinesShown( bool aShown )
+{
+    if( m_changeOutlinesShown == aShown )
+        return;
+
+    m_changeOutlinesShown = aShown;
+    buildRenderScene();
+    rebuildOverlay();
+}
+
+
 void WIDGET_DIFF_CANVAS::SetWorldUnitLength( double aWorldUnitLength )
 {
+    if( m_gal->GetWorldUnitLength() == aWorldUnitLength )
+        return;
+
     m_gal->SetWorldUnitLength( aWorldUnitLength );
     m_gal->ComputeWorldScreenMatrix();
     ZoomToFit();
@@ -163,7 +177,8 @@ void WIDGET_DIFF_CANVAS::SetContextPainter( std::unique_ptr<KIGFX::PAINTER> aPai
 }
 
 
-void WIDGET_DIFF_CANVAS::SetContextItems( const std::vector<KIGFX::VIEW_ITEM*>& aItems )
+void WIDGET_DIFF_CANVAS::SetContextItems( const std::vector<KIGFX::VIEW_ITEM*>& aItems,
+                                          std::shared_ptr<const void>           aOwner )
 {
     if( !m_contextGroup )
         return;
@@ -174,6 +189,8 @@ void WIDGET_DIFF_CANVAS::SetContextItems( const std::vector<KIGFX::VIEW_ITEM*>& 
             m_view->Remove( item );
     }
 
+    // The old items are out of the view, so whatever kept them alive may go
+    m_contextOwner = std::move( aOwner );
     m_contextGroupItems.clear();
     m_itemCategories.clear();
     m_hasNativeContext = false;
@@ -448,13 +465,8 @@ void WIDGET_DIFF_CANVAS::ZoomToBBox( const BOX2I& aBBox )
     if( !aBBox.GetWidth() || !aBBox.GetHeight() )
         return;
 
-    BOX2D viewport( VECTOR2D( aBBox.GetLeft(), aBBox.GetTop() ), VECTOR2D( aBBox.GetWidth(), aBBox.GetHeight() ) );
-
-    // Inflate slightly so the outermost shape isn't flush with the edge.
-    viewport.Inflate( aBBox.GetWidth() * 0.05, aBBox.GetHeight() * 0.05 );
-
-    m_view->SetViewport( viewport );
-    Refresh();
+    // The base fit is redone on each resize until the view moves, so a fit before layout does not stay small
+    EDA_DRAW_PANEL_GAL::ZoomToFit( aBBox, 1.10 );
 }
 
 
@@ -464,6 +476,18 @@ void WIDGET_DIFF_CANVAS::CenterOnHighlight()
 
     if( !bb || bb->GetWidth() <= 0 || bb->GetHeight() <= 0 )
         return;
+
+    BOX2I focus = *bb;
+    focus.Inflate( std::max( bb->GetWidth(), bb->GetHeight() ) );
+
+    // A part in a sheet-wide fit is too small to read, but a closer zoom the user chose is kept
+    const BOX2D viewport = m_view->GetViewport();
+
+    if( focus.GetWidth() < viewport.GetWidth() && focus.GetHeight() < viewport.GetHeight() )
+    {
+        ZoomToBBox( focus );
+        return;
+    }
 
     const VECTOR2I center = bb->GetCenter();
     m_view->SetCenter( VECTOR2D( center.x, center.y ) );
@@ -475,6 +499,14 @@ void WIDGET_DIFF_CANVAS::CenterOnHighlight()
 void WIDGET_DIFF_CANVAS::buildRenderScene()
 {
     m_renderScene = m_scene;
+
+    if( !m_changeOutlinesShown )
+    {
+        m_renderScene.addedShapes.clear();
+        m_renderScene.removedShapes.clear();
+        m_renderScene.modifiedShapes.clear();
+        m_renderScene.conflictShapes.clear();
+    }
 
     if( m_hasNativeContext )
     {

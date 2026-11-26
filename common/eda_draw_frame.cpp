@@ -319,11 +319,7 @@ void EDA_DRAW_FRAME::ToggleUserUnits()
     }
     else
     {
-        SetUserUnits( GetUserUnits() == EDA_UNITS::INCH ? EDA_UNITS::MM : EDA_UNITS::INCH );
-        unitsChangeRefresh();
-
-        wxCommandEvent e( EDA_EVT_UNITS_CHANGED );
-        ProcessEventLocally( e );
+        ChangeUserUnits( GetUserUnits() == EDA_UNITS::INCH ? EDA_UNITS::MM : EDA_UNITS::INCH );
     }
 }
 
@@ -1142,7 +1138,7 @@ void PrintDrawingSheet( const RENDER_SETTINGS* aSettings, const PAGE_INFO& aPage
                         const wxString& aPageNumber, double aMils2Iu, const PROJECT* aProject,
                         const wxString& aSheetLayer, bool aIsFirstPage )
 {
-    DS_DRAW_ITEM_LIST drawList( unityScale );
+    DS_DRAW_ITEM_LIST drawList( unityScale, FOR_CANVAS );
 
     drawList.SetDefaultPenSize( aSettings->GetDefaultPenWidth() );
     drawList.SetPlotterMilsToIUfactor( aMils2Iu );
@@ -1351,7 +1347,7 @@ void EDA_DRAW_FRAME::setupUIConditions()
     ACTION_MANAGER*   mgr = m_toolManager->GetActionManager();
     EDITOR_CONDITIONS cond( this );
 
-    wxASSERT( mgr );
+    wxCHECK2( mgr, return );
 
     mgr->SetConditions( ACTIONS::millimetersUnits, ACTION_CONDITIONS().Check( cond.Units( EDA_UNITS::MM ) ) );
     mgr->SetConditions( ACTIONS::inchesUnits,      ACTION_CONDITIONS().Check( cond.Units( EDA_UNITS::INCH ) ) );

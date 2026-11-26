@@ -555,7 +555,7 @@ void SETTINGS_MANAGER::SaveColorSettings( COLOR_SETTINGS* aSettings, const std::
 
 wxString SETTINGS_MANAGER::GetPathForSettingsFile( JSON_SETTINGS* aSettings )
 {
-    wxASSERT( aSettings );
+    wxCHECK( aSettings, wxEmptyString );
 
     switch( aSettings->GetLocation() )
     {
@@ -743,7 +743,7 @@ bool SETTINGS_MANAGER::MigrateFromPreviousVersion( const wxString& aSourcePath )
 
 bool SETTINGS_MANAGER::GetPreviousVersionPaths( std::vector<wxString>* aPaths )
 {
-    wxASSERT( aPaths );
+    wxCHECK( aPaths, false );
 
     aPaths->clear();
 
@@ -1029,7 +1029,7 @@ static wxString projectKey( const wxString& aFullPath )
 }
 
 
-bool SETTINGS_MANAGER::LoadProject( const wxString& aFullPath, bool aSetActive )
+bool SETTINGS_MANAGER::LoadProject( const wxString& aFullPath, bool aSetActive, bool aOverrideLock )
 {
     wxString   fullPath = projectKey( aFullPath );
     wxFileName path( fullPath );
@@ -1042,6 +1042,9 @@ bool SETTINGS_MANAGER::LoadProject( const wxString& aFullPath, bool aSetActive )
 
     // A passive load only inspects the lock rather than taking it
     LOCKFILE lockFile = aSetActive ? LOCKFILE( fullPath ) : LOCKFILE::Inspect( fullPath );
+
+    if( !lockFile.Valid() && aSetActive && aOverrideLock )
+        lockFile.OverrideLock();
 
     if( !lockFile.Valid() )
         wxLogTrace( traceSettings, wxT( "Project %s is locked; opening read-only" ), fullPath );
@@ -1079,8 +1082,15 @@ bool SETTINGS_MANAGER::LoadProject( const wxString& aFullPath, bool aSetActive )
         wxSetEnv( PROJECT_VAR_NAME, projectPath.GetPath() );
 
         // set the cwd but don't impact kicad-cli
-        if( !projectPath.GetPath().IsEmpty() && wxTheApp && wxTheApp->IsGUI() )
-            wxSetWorkingDirectory( projectPath.GetPath() );
+        if( wxTheApp && wxTheApp->IsGUI() )
+        {
+            // The null project has no directory, and the one being replaced may be deleted. At
+            // startup there is none, and the launch directory resolves relative command-line paths
+            if( !projectPath.GetPath().IsEmpty() )
+                wxSetWorkingDirectory( projectPath.GetPath() );
+            else if( switching )
+                wxSetWorkingDirectory( PATHS::GetUserSettingsPath() );
+        }
 
         // Anchor text_eval VCS lookups to the project directory. The GUI relies on cwd,
         // which is deliberately left untouched for kicad-cli; an explicit context is
@@ -1118,7 +1128,12 @@ bool SETTINGS_MANAGER::LoadProject( const wxString& aFullPath, bool aSetActive )
 
     wxString fn( path.GetName() );
 
-    PROJECT_LOCAL_SETTINGS* settings = new PROJECT_LOCAL_SETTINGS( m_projects[fullPath], fn );
+    BOARD_OPACITY_DEFAULTS opacityDefaults;
+
+    if( m_common_settings )
+        opacityDefaults = m_common_settings->m_BoardOpacityDefaults;
+
+    PROJECT_LOCAL_SETTINGS* settings = new PROJECT_LOCAL_SETTINGS( m_projects[fullPath], fn, opacityDefaults );
 
     if( aSetActive )
         settings = RegisterSettings( settings );
@@ -1231,13 +1246,12 @@ bool SETTINGS_MANAGER::UnloadProject( PROJECT* aProject, bool aSave )
         // Drop the VCS context so lingering text_eval queries don't probe a stale project dir.
         TEXT_EVAL_VCS::SetContextPath( wxString() );
 
-#ifdef _WIN32
         // On Windows, processes hold a handle to their current working directory, preventing
         // it from being deleted. Reset to the user settings path to release the project
-        // directory. This mirrors the wxSetWorkingDirectory call in LoadProject.
+        // directory. This mirrors the wxSetWorkingDirectory call in LoadProject. Elsewhere a
+        // deleted project directory would leave every later relative path unresolvable.
         if( wxTheApp && wxTheApp->IsGUI() )
             wxSetWorkingDirectory( PATHS::GetUserSettingsPath() );
-#endif
 
         if( m_kiway )
             m_kiway->ProjectChanged();
@@ -1382,7 +1396,7 @@ void SETTINGS_MANAGER::SaveProjectAs( const wxString& aFullPath, PROJECT* aProje
     aProject->GetLocalSettings().SetReadOnly( aProject->IsReadOnly() );
 
     project->SetFilename( fn.GetName() );
-    project->SaveToFile( fn.GetPath() );
+    project->SaveToFile( fn.GetPath(), true );
 
     aProject->GetLocalSettings().SetFilename( fn.GetName() );
     aProject->GetLocalSettings().SaveToFile( fn.GetPath() );
@@ -1408,7 +1422,7 @@ bool SETTINGS_MANAGER::SaveProjectCopy( const wxString& aFullPath, PROJECT* aPro
     project->SetReadOnly( false );
 
     project->SetFilename( fn.GetName() );
-    const bool projectOk = project->SaveToFile( fn.GetPath() );
+    const bool projectOk = project->SaveToFile( fn.GetPath(), true );
     project->SetFilename( oldName );
 
     // PROJECT_LOCAL_SETTINGS save is best-effort: SaveToFile returns false for

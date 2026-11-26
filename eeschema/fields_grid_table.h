@@ -30,17 +30,20 @@ class SCH_BASE_FRAME;
 class DIALOG_SHIM;
 class EMBEDDED_FILES;
 class SCH_LABEL_BASE;
+class SCH_SHEET;
 
 
 wxString BuildFootprintChooserSymbolNetlist( const LIB_SYMBOL* aSymbol );
 wxString BuildFootprintChooserSymbolNetlist( const std::vector<LIB_SYMBOL*>& aSymbols );
 
 
+std::vector<SCH_FIELD> GetSheetFieldsForEditing( const SCH_SHEET& aSheet );
+
+
 class FIELDS_GRID_TRICKS : public GRID_TRICKS
 {
 public:
-    FIELDS_GRID_TRICKS( WX_GRID* aGrid, DIALOG_SHIM* aDialog,
-                        std::vector<EMBEDDED_FILES*> aFilesStack,
+    FIELDS_GRID_TRICKS( WX_GRID* aGrid, DIALOG_SHIM* aDialog, std::vector<EMBEDDED_FILES*> aFilesStack,
                         std::function<void( wxCommandEvent& )> aAddHandler ) :
         GRID_TRICKS( aGrid, std::move( aAddHandler ) ),
         m_dlg( aDialog ),

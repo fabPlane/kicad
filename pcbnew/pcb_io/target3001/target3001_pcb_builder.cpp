@@ -300,6 +300,11 @@ void TARGET3001_PCB_BUILDER::buildAuraRules()
                           "&& B.hasCustomProperty('TARGET3001_AREA')\")\n"
                           "    (constraint zone_connection solid))\n" );
 
+    // Require at least one spoke to match the import
+    m_designRules += wxS( "\n(rule \"TARGET 3001! area spokes\"\n"
+                          "    (condition \"B.hasCustomProperty('TARGET3001_AREA')\")\n"
+                          "    (constraint min_resolved_spokes 1))\n" );
+
     for( int aura : m_auraValues )
     {
         m_designRules += wxString::Format( wxS( "\n(rule \"TARGET 3001! aura %s\"\n"
@@ -560,9 +565,7 @@ void TARGET3001_PCB_BUILDER::buildNets()
         if( m_board->FindNet( name ) )
             name = wxString::Format( wxS( "%s_%zu" ), name, i + 1 );
 
-        NETINFO_ITEM* net = new NETINFO_ITEM( m_board, name, -1 );
-        m_board->Add( net, ADD_MODE::APPEND );
-        m_nets[e.base.signal] = net;
+        m_nets[e.base.signal] = m_board->FindOrAddNet( name, -1, ADD_MODE::APPEND );
     }
 }
 
@@ -637,6 +640,8 @@ void TARGET3001_PCB_BUILDER::addFootprint( const ELEMENT& aComponent )
 
 void TARGET3001_PCB_BUILDER::buildSignalCopper()
 {
+    std::vector<const ELEMENT*> spokes;
+
     for( const ELEMENT& e : m_project.signals )
     {
         if( e.type != ELEMENT_TYPE::SIGNAL || !e.signal )
@@ -667,9 +672,18 @@ void TARGET3001_PCB_BUILDER::buildSignalCopper()
                 continue;
             }
 
+            // Old style areas store their thermal spokes as flat status 0 strokes
+            if( t.type == ELEMENT_TYPE::LINE && t.base.status == 0 && !t.line.roundEnds )
+            {
+                spokes.push_back( &t );
+                continue;
+            }
+
             addItem( t, m_board, nullptr, true );
         }
     }
+
+    buildAreaSpokes( spokes );
 
     for( auto& [key, polys] : m_copperFills )
     {
@@ -689,6 +703,95 @@ void TARGET3001_PCB_BUILDER::buildSignalCopper()
 }
 
 
+void TARGET3001_PCB_BUILDER::buildAreaSpokes( const std::vector<const ELEMENT*>& aSpokes )
+{
+    std::set<std::pair<uint16_t, PCB_LAYER_ID>> areas;
+    std::map<int, std::vector<PAD*>>            padsByNet;
+    std::map<int, std::vector<PCB_VIA*>>        viasByNet;
+
+    for( const POUR_AREA& area : m_pourAreas )
+        areas.emplace( area.signal, area.layer );
+
+    for( FOOTPRINT* fp : m_board->Footprints() )
+    {
+        for( PAD* pad : fp->Pads() )
+            padsByNet[pad->GetNetCode()].push_back( pad );
+    }
+
+    for( PCB_TRACK* track : m_board->Tracks() )
+    {
+        if( track->Type() == PCB_VIA_T )
+            viasByNet[track->GetNetCode()].push_back( static_cast<PCB_VIA*>( track ) );
+    }
+
+    std::map<PAD*, const ELEMENT*> padSpokes;
+    std::set<PCB_VIA*>             spokedVias;
+
+    for( const ELEMENT* spoke : aSpokes )
+    {
+        const ELEMENT_BASE&         b = spoke->base;
+        std::optional<PCB_LAYER_ID> layer = mapLayer( b.layer );
+        NETINFO_ITEM*               item = net( b.signal );
+        VECTOR2I                    start = toKi( b.x, b.y );
+        bool                        relief = false;
+
+        if( layer && IsCopperLayer( *layer ) && item && areas.count( { b.signal, *layer } ) )
+        {
+            for( PAD* pad : padsByNet[item->GetNetCode()] )
+            {
+                if( pad->IsOnLayer( *layer ) && pad->GetEffectiveShape( *layer )->Collide( start ) )
+                {
+                    const ELEMENT*& widest = padSpokes[pad];
+
+                    if( !widest || spoke->line.width > widest->line.width )
+                        widest = spoke;
+
+                    relief = true;
+                    break;
+                }
+            }
+
+            for( PCB_VIA* via : viasByNet[item->GetNetCode()] )
+            {
+                if( !relief && via->IsOnLayer( *layer ) && via->GetEffectiveShape( *layer )->Collide( start ) )
+                {
+                    spokedVias.insert( via );
+                    relief = true;
+                }
+            }
+        }
+
+        if( !relief )
+            addItem( *spoke, m_board, nullptr, true );
+    }
+
+    for( const auto& [pad, spoke] : padSpokes )
+    {
+        VECTOR2I dir = toKi( spoke->line.x2, spoke->line.y2 ) - toKi( spoke->base.x, spoke->base.y );
+        RotatePoint( dir, -pad->GetOrientation() );
+
+        // Pad spokes repeat every 90 degrees starting at the spoke angle
+        double degrees = std::fmod( EDA_ANGLE( VECTOR2D( dir ) ).AsDegrees() + 360.0, 90.0 );
+
+        // Untagged, the pad joins its area and the local connection picks spokes over solid
+        pad->SetCustomProperty( wxS( "TARGET3001_AURA" ), wxS( "0" ) );
+
+        // TARGET 3001! supports only an inflation/deflation value (called "extra addition") per padstack
+        // layer.  Thermal spoke properties are not alterable per layer through the GUI.
+        pad->Padstack().ZoneConnection( PADSTACK::ALL_LAYERS ) = ZONE_CONNECTION::THERMAL;
+        pad->Padstack().ThermalSpokeWidth( PADSTACK::ALL_LAYERS ) = spoke->line.width;
+        pad->Padstack().ThermalSpokeAngle( PADSTACK::ALL_LAYERS ) = EDA_ANGLE( degrees, DEGREES_T );
+
+        if( std::optional<int> aura = pad->GetLocalClearance(); aura && *aura > 0 )
+            pad->Padstack().ThermalGap( PADSTACK::ALL_LAYERS ) = aura;
+    }
+
+    // Vias get no spokes in a solid fill, so a spoked via joins its area solidly
+    for( PCB_VIA* via : spokedVias )
+        via->SetCustomProperty( wxS( "TARGET3001_AURA" ), wxS( "0" ) );
+}
+
+
 void TARGET3001_PCB_BUILDER::buildFreeItems()
 {
     for( const ELEMENT& e : m_project.boardItems )
@@ -701,13 +804,7 @@ void TARGET3001_PCB_BUILDER::buildPourAreas()
     std::map<std::pair<uint16_t, PCB_LAYER_ID>, SHAPE_POLY_SET> pours;
 
     for( POUR_AREA& area : m_pourAreas )
-    {
-        // TARGET 3001! leaves an area unfilled when its anchor lies outside the contour box
-        if( m_contourBox.IsValid() && !m_contourBox.Contains( area.anchor ) )
-            continue;
-
         pours[{ area.signal, area.layer }].Append( area.outline );
-    }
 
     for( auto& [key, outline] : pours )
     {
@@ -931,7 +1028,7 @@ void TARGET3001_PCB_BUILDER::buildThermalGaps()
         }
 
         for( const auto& [pad, gap] : overrides )
-            pad->SetLocalThermalGapOverride( gap );
+            pad->SetLocalThermalGapOverride( PADSTACK::ALL_LAYERS, gap );
     }
 
     if( footprintsByGap.empty() )
@@ -1071,65 +1168,13 @@ bool TARGET3001_PCB_BUILDER::elementOutline( const ELEMENT& aElem, SHAPE_POLY_SE
 }
 
 
-void TARGET3001_PCB_BUILDER::mergeContour( const ELEMENT& aElem )
+void TARGET3001_PCB_BUILDER::noteContour( const ELEMENT& aElem )
 {
-    const ELEMENT_BASE& b = aElem.base;
-
-    m_contourBox.Merge( toKi( b.x, b.y ) );
-
     if( ( aElem.type == ELEMENT_TYPE::LINE && aElem.line.clearance == 0 )
         || ( aElem.type == ELEMENT_TYPE::ARC && aElem.arc.clearance == 0 )
         || ( aElem.type == ELEMENT_TYPE::SPLINE && aElem.spline.clearance == 0 ) )
     {
         m_contourCarvesNothing = true;
-    }
-
-    switch( aElem.type )
-    {
-    case ELEMENT_TYPE::LINE:
-        m_contourBox.Merge( toKi( aElem.line.x2, aElem.line.y2 ) );
-        break;
-
-    case ELEMENT_TYPE::ARC:
-    {
-        const ARC& a = aElem.arc;
-        double     start = std::fmod( double( a.startAngle ), 360.0 );
-        double     end = start + a.Sweep();
-
-        auto onArc = [&]( double aDeg )
-        {
-            return VECTOR2I( a.centerX + KiROUND( a.radius * cos( DEG2RAD( aDeg ) ) ),
-                             a.centerY + KiROUND( a.radius * sin( DEG2RAD( aDeg ) ) ) );
-        };
-
-        // Every axis crossing inside the sweep extends the box
-        for( double axis = std::ceil( start / 90.0 ) * 90.0; axis <= end; axis += 90.0 )
-        {
-            VECTOR2I p = onArc( axis );
-            m_contourBox.Merge( toKi( p.x, p.y ) );
-        }
-
-        VECTOR2I p0 = onArc( start );
-        VECTOR2I p1 = onArc( end );
-        m_contourBox.Merge( toKi( p0.x, p0.y ) );
-        m_contourBox.Merge( toKi( p1.x, p1.y ) );
-        m_contourBox.Merge( toKi( a.endX, a.endY ) );
-        break;
-    }
-
-    case ELEMENT_TYPE::TRIANGLE:
-    case ELEMENT_TYPE::RECTANGLE:
-    {
-        SHAPE_POLY_SET outline;
-
-        if( elementOutline( aElem, outline ) )
-            m_contourBox.Merge( outline.BBox() );
-
-        break;
-    }
-
-    default:
-        break;
     }
 }
 
@@ -1140,7 +1185,7 @@ void TARGET3001_PCB_BUILDER::addItem( const ELEMENT& aElem, BOARD_ITEM_CONTAINER
     const ELEMENT_BASE& b = aElem.base;
 
     if( b.layer == m_contourLayer && b.flags == 0 && aElem.type != ELEMENT_TYPE::TEXT )
-        mergeContour( aElem );
+        noteContour( aElem );
 
     // Hidden board elements are not drawn; hidden text is kept as invisible text
     if( ( b.flags & 1 ) && aElem.type != ELEMENT_TYPE::TEXT )
@@ -1185,7 +1230,7 @@ void TARGET3001_PCB_BUILDER::addItem( const ELEMENT& aElem, BOARD_ITEM_CONTAINER
 
         // Flagged areas take no part in the fill
         if( isArea && b.signal && b.flags == 0 )
-            m_pourAreas.push_back( { b.signal, *pourLayer, toKi( b.x, b.y ), std::move( outline ) } );
+            m_pourAreas.push_back( { b.signal, *pourLayer, std::move( outline ) } );
         else if( !isArea )
             m_pourKeepouts[*pourLayer].Append( outline );
 
@@ -1482,6 +1527,10 @@ void TARGET3001_PCB_BUILDER::addPad( const ELEMENT& aElem, FOOTPRINT* aFootprint
     VECTOR2I            size( std::max( 1, src.width ), std::max( 1, src.height ) );
     std::optional<LSET> padstack = padstackLayers( b.layer );
 
+    // TARGET 3001! supports custom margins (called "extra addition") per padstack layer, but that's it.
+    // You can't change shapes or any other properties.
+    // (We could implement the margins by creating inflated/deflated shapes, but we don't at present.)
+    pad->SetPadstackMode( PADSTACK::MODE::NORMAL );
     pad->SetSize( PADSTACK::ALL_LAYERS, size );
 
     switch( TARGET3001::PAD_SHAPE( src.shape ) )
@@ -1651,9 +1700,9 @@ void TARGET3001_PCB_BUILDER::addPadstackCuts( const BOARD_ITEM& aItem, int aPads
     {
         LAYER_FUNCTION f = LayerFunction( layer );
 
-        if( !def.onLayer[layer]
-            || ( f != LAYER_FUNCTION::DELETION_BOTTOM && f != LAYER_FUNCTION::DELETION_INSIDE
-                 && f != LAYER_FUNCTION::DELETION_TOP ) )
+        if( !def.onLayer[layer] || (   f != LAYER_FUNCTION::DELETION_BOTTOM
+                                    && f != LAYER_FUNCTION::DELETION_INSIDE
+                                    && f != LAYER_FUNCTION::DELETION_TOP ) )
         {
             continue;
         }
@@ -1707,8 +1756,11 @@ void TARGET3001_PCB_BUILDER::addVia( const ELEMENT& aElem )
 
     // Copper without a hole is a pad-shaped piece of copper; a hole larger than its copper is unplated.
     // Slots, oval or rectangular copper and padstacks missing a copper layer have no via equivalent.
-    if( src.drill <= 0 || std::max( src.width, src.height ) < src.drill || slotted
-        || shape == TARGET3001::PAD_SHAPE::OVAL || shape == TARGET3001::PAD_SHAPE::RECTANGLE
+    if( src.drill <= 0
+        || std::max( src.width, src.height ) < src.drill
+        || slotted
+        || shape == TARGET3001::PAD_SHAPE::OVAL
+        || shape == TARGET3001::PAD_SHAPE::RECTANGLE
         || ( padstack && ( *padstack & allCopper ) != allCopper ) )
     {
         addPad( aElem, nullptr );
@@ -1717,7 +1769,13 @@ void TARGET3001_PCB_BUILDER::addVia( const ELEMENT& aElem )
 
     PCB_VIA* via = new PCB_VIA( m_board );
     via->SetPosition( toKi( b.x, b.y ) );
+
+    // TARGET 3001! supports custom margins (called "extra addition") per padstack layer, but that's it.
+    // You can't change shapes or any other properties.
+    // (We could implement the margins by creating inflated/deflated shapes, but we don't at present.)
+    via->SetPadstackMode( PADSTACK::MODE::NORMAL );
     via->SetWidth( PADSTACK::ALL_LAYERS, std::max( src.width, src.height ) );
+
     via->SetDrill( src.drill );
     via->SetViaType( VIATYPE::THROUGH );
     via->SetLayerPair( F_Cu, B_Cu );
@@ -1762,8 +1820,8 @@ void TARGET3001_PCB_BUILDER::configureText( PCB_TEXT* aText, const ELEMENT& aEle
 }
 
 
-void TARGET3001_PCB_BUILDER::addText( const ELEMENT& aElem, BOARD_ITEM_CONTAINER* aParent,
-                                      FOOTPRINT* aFootprint, PCB_LAYER_ID aLayer )
+void TARGET3001_PCB_BUILDER::addText( const ELEMENT& aElem, BOARD_ITEM_CONTAINER* aParent, FOOTPRINT* aFootprint,
+                                      PCB_LAYER_ID aLayer )
 {
     const TEXT& t = aElem.text;
 

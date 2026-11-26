@@ -21,10 +21,12 @@
 #include <dialogs/dialog_rc_job.h>
 #include <jobs/job_pcb_drc.h>
 
+class PCB_EDIT_FRAME;
+
 class DIALOG_DRC_JOB_CONFIG : public DIALOG_RC_JOB
 {
 public:
-    DIALOG_DRC_JOB_CONFIG( wxWindow* parent, JOB_PCB_DRC* aJob );
+    DIALOG_DRC_JOB_CONFIG( wxWindow* parent, JOB_PCB_DRC* aJob, PCB_EDIT_FRAME* aEditFrame );
 
     bool TransferDataToWindow() override;
     bool TransferDataFromWindow() override;

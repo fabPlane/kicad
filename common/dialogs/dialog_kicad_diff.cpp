@@ -30,6 +30,7 @@
 #include <eda_draw_frame.h>
 #include <layer_ids.h>
 #include <lseq.h>
+#include <property_holder.h>
 #include <set>
 #include <wx/bmpbuttn.h>
 #include <wx/button.h>
@@ -56,6 +57,10 @@ DIALOG_KICAD_DIFF::DIALOG_KICAD_DIFF( wxWindow* aParent, const wxString& aRefere
         m_currentCanvasSheet( std::move( aInitialSheet ) )
 {
     SetEscapeId( wxID_OK );
+
+    // The base class resets the sash on the first idle event, after the saved one is restored
+    m_splitter->Disconnect( wxEVT_IDLE, wxIdleEventHandler( DIALOG_KICAD_DIFF_BASE::m_splitterOnIdle ), nullptr, this );
+    m_splitter->SetSashPosition( FromDIP( 280 ) );
 
     m_treeChanges->Bind( wxEVT_TREE_ITEM_MENU, &DIALOG_KICAD_DIFF::OnTreeItemMenu, this );
 
@@ -126,18 +131,9 @@ DIALOG_KICAD_DIFF::DIALOG_KICAD_DIFF( wxWindow* aParent, const wxString& aRefere
         scene.comparisonGeometry = std::move( aComparisonGeometry );
         KICAD_DIFF::ExpandBBoxToGeometry( scene );
 
-        const LSET geometryLayers = KICAD_DIFF::GeometryLayerSet( scene.referenceGeometry )
-                                    | KICAD_DIFF::GeometryLayerSet( scene.comparisonGeometry );
-
-        std::map<PCB_LAYER_ID, wxString> layerNames = scene.referenceGeometry.layerNames;
-
-        for( const auto& [layer, name] : scene.comparisonGeometry.layerNames )
-            layerNames[layer] = name;
-
-        m_filterSizer = new wxBoxSizer( wxHORIZONTAL );
-
-        // A board can have dozens of layers, so the checkboxes wrap rather than widen the dialog
-        wxWrapSizer* checkboxSizer = new wxWrapSizer( wxHORIZONTAL );
+        // A board can have dozens of layers, so the checkboxes wrap rather than widen the dialog. The wrap
+        // sizer sits directly in the vertical detail sizer, the only parent that tells it its width
+        m_filterSizer = new wxWrapSizer( wxHORIZONTAL );
 
         const std::array<std::pair<KICAD_DIFF::CATEGORY, wxString>, 4> categories{ {
                 { KICAD_DIFF::CATEGORY::ADDED, _( "Added" ) },
@@ -149,6 +145,9 @@ DIALOG_KICAD_DIFF::DIALOG_KICAD_DIFF( wxWindow* aParent, const wxString& aRefere
         for( const auto& [cat, label] : categories )
         {
             wxCheckBox* cb = new wxCheckBox( m_panelDetail, wxID_ANY, label );
+
+            // A restored value never reaches the canvas, and position-based keys shift between documents
+            OptOut( cb );
             cb->SetValue( true );
             cb->Bind( wxEVT_CHECKBOX,
                       [this, cat]( wxCommandEvent& aEvent )
@@ -156,34 +155,16 @@ DIALOG_KICAD_DIFF::DIALOG_KICAD_DIFF( wxWindow* aParent, const wxString& aRefere
                           m_canvas->SetCategoryVisible( cat, aEvent.IsChecked() );
                           buildTree();
                       } );
-            checkboxSizer->Add( cb, wxSizerFlags().Border( wxRIGHT, 8 ).Centre() );
+            m_filterSizer->Add( cb, wxSizerFlags().Border( wxRIGHT, 8 ).Centre() );
         }
 
-        if( geometryLayers.any() )
-        {
-            checkboxSizer->Add( new wxStaticText( m_panelDetail, wxID_ANY, _( "Layers:" ) ),
-                                wxSizerFlags().Border( wxLEFT | wxRIGHT, 4 ).Centre() );
-
-            for( PCB_LAYER_ID layer : geometryLayers.UIOrder() )
-            {
-                auto           nameIt = layerNames.find( layer );
-                const wxString label = nameIt != layerNames.end() ? nameIt->second : LayerName( layer );
-                wxCheckBox*    cb = new wxCheckBox( m_panelDetail, wxID_ANY, label );
-                cb->SetValue( true );
-                cb->Bind( wxEVT_CHECKBOX,
-                          [this, layer]( wxCommandEvent& aEvent )
-                          {
-                              m_canvas->SetLayerVisible( layer, aEvent.IsChecked() );
-                          } );
-                checkboxSizer->Add( cb, wxSizerFlags().Border( wxRIGHT, 8 ).Centre() );
-            }
-        }
-
-        m_filterSizer->Add( checkboxSizer, wxSizerFlags( 1 ).Centre() );
+        m_layerControlsIndex = m_filterSizer->GetItemCount();
+        buildLayerControls( scene );
 
         // Toggle the property list so the board can use the full detail panel.
 
         wxCheckBox* propsToggle = new wxCheckBox( m_panelDetail, wxID_ANY, _( "Properties" ) );
+        OptOut( propsToggle );
         propsToggle->SetValue( true );
         propsToggle->Bind( wxEVT_CHECKBOX,
                            [this, detailSplitter]( wxCommandEvent& aEvent )
@@ -229,14 +210,17 @@ DIALOG_KICAD_DIFF::DIALOG_KICAD_DIFF( wxWindow* aParent, const wxString& aRefere
     }
 
     buildTree();
+    Layout();
+}
 
+
+void DIALOG_KICAD_DIFF::showDiffSummary()
+{
     if( m_diff.Empty() )
         m_labelSummary->SetLabel( _( "No differences detected." ) );
     else
         m_labelSummary->SetLabel( wxString::Format(
                 wxPLURAL( "%zu change detected.", "%zu changes detected.", m_diff.Size() ), m_diff.Size() ) );
-
-    Layout();
 }
 
 
@@ -274,21 +258,22 @@ void DIALOG_KICAD_DIFF::OnTreeSelectionChanged( wxTreeEvent& aEvent )
 }
 
 
-void DIALOG_KICAD_DIFF::buildTree()
+std::optional<KIID_PATH> DIALOG_KICAD_DIFF::selectedChangeId() const
 {
-    // Snapshot the selected change so it can be restored after rebuild —
-    // wxTreeItemIds don't survive DeleteAllItems, so we re-find the node
-    // by its underlying KIID_PATH below.
-    std::optional<KIID_PATH> selectedId;
-
     if( wxTreeItemId sel = m_treeChanges->GetSelection(); sel.IsOk() )
     {
         auto it = m_changeByTreeId.find( reinterpret_cast<wxUIntPtr>( sel.GetID() ) );
 
         if( it != m_changeByTreeId.end() && it->second )
-            selectedId = it->second->id;
+            return it->second->id;
     }
 
+    return std::nullopt;
+}
+
+
+void DIALOG_KICAD_DIFF::buildTree( const std::optional<KIID_PATH>& aSelect )
+{
     wxWindowUpdateLocker updateLock( m_treeChanges );
 
     m_treeChanges->DeleteAllItems();
@@ -324,7 +309,7 @@ void DIALOG_KICAD_DIFF::buildTree()
         m_treeChanges->Expand( groupNode );
     }
 
-    if( selectedId && !selectChangeById( *selectedId ) )
+    if( !aSelect || !selectChangeById( *aSelect ) )
         showChange( nullptr );
 
     applyHiddenToTree();
@@ -445,6 +430,9 @@ void DIALOG_KICAD_DIFF::SetRevisionChooser( const std::vector<wxString>& aLabels
 
     m_revisionChoice = new wxChoice( this, wxID_ANY, wxDefaultPosition, wxDefaultSize, choices );
     m_revisionChoice->SetSelection( aSelected );
+
+    // The caller loads the revision it selects, so a restored choice would disagree with the diff
+    OptOut( m_revisionChoice );
     row->Add( m_revisionChoice, wxSizerFlags( 1 ).Centre() );
 
     wxButton* olderBtn = new wxButton( this, wxID_ANY, _( "Older" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT );
@@ -524,6 +512,9 @@ void DIALOG_KICAD_DIFF::Reload( const wxString& aReferencePath, const wxString& 
     m_pathReference->SetLabel( aReferencePath );
     m_pathComparison->SetLabel( aComparisonPath );
 
+    // The tree rows point into the diff being replaced
+    const std::optional<KIID_PATH> selected = selectedChangeId();
+    m_changeByTreeId.clear();
     m_diff = std::move( aDiff );
 
     // Outlives the canvas reconfigure below: it owns cloned items the view still references.
@@ -552,6 +543,8 @@ void DIALOG_KICAD_DIFF::Reload( const wxString& aReferencePath, const wxString& 
             scene.comparisonGeometry = std::move( aComparisonGeometry );
             KICAD_DIFF::ExpandBBoxToGeometry( scene );
 
+            // Another revision can have other layers
+            buildLayerControls( scene );
             m_canvas->SetScene( std::move( scene ) );
         }
         catch( ... )
@@ -563,34 +556,12 @@ void DIALOG_KICAD_DIFF::Reload( const wxString& aReferencePath, const wxString& 
         m_canvas->EndUpdate();
     }
 
-    buildTree();
+    buildTree( selected );
 
-    if( m_diff.Empty() )
-        m_labelSummary->SetLabel( _( "No differences detected." ) );
-    else
-        m_labelSummary->SetLabel( wxString::Format(
-                wxPLURAL( "%zu change detected.", "%zu changes detected.", m_diff.Size() ), m_diff.Size() ) );
-
-    showChange( nullptr );
     Layout();
-}
 
-
-void DIALOG_KICAD_DIFF::SwitchCanvasToSheet( const KIID_PATH& aSheetPath )
-{
-    if( !m_canvas || !m_sheetSwitcher )
-        return;
-
-    if( aSheetPath == m_currentCanvasSheet )
-        return;
-
-    m_currentCanvasSheet = aSheetPath;
-    m_sheetSwitcher( *m_canvas, aSheetPath );
-
-    if( m_treeChanges )
-        m_treeChanges->UnselectAll();
-
-    showChange( nullptr );
+    // The detail panel sits in a splitter, so the dialog Layout() skips it at an unchanged size
+    m_panelDetail->Layout();
 }
 
 
@@ -598,12 +569,23 @@ void DIALOG_KICAD_DIFF::showChange( const KICAD_DIFF::ITEM_CHANGE* aChange )
 {
     m_listProperties->DeleteAllItems();
 
-    if( m_changeSelectedFn )
-        m_changeSelectedFn( aChange ? aChange->id : KIID_PATH() );
+    // Library differs name each change after its item
+    if( m_drawLibraryItem && m_canvas )
+    {
+        // Every library item sits at the origin, so only the one on show may be picked
+        KICAD_DIFF::DOCUMENT_DIFF shown;
+        shown.docType = m_diff.docType;
+
+        if( aChange )
+            shown.changes.push_back( *aChange );
+
+        m_canvas->SetScene( KICAD_DIFF::BuildScene( shown, KICAD_DIFF::DIFF_COLOR_THEME{} ) );
+        m_drawLibraryItem( *m_canvas, aChange && aChange->refdes ? *aChange->refdes : wxString() );
+    }
 
     if( !aChange )
     {
-        m_labelSummary->SetLabel( _( "Select a change in the tree to view details" ) );
+        showDiffSummary();
 
         if( m_canvas )
             m_canvas->HighlightChange( std::nullopt );
@@ -683,6 +665,91 @@ void DIALOG_KICAD_DIFF::showChange( const KICAD_DIFF::ITEM_CHANGE* aChange )
             };
 
     walkChildren( wxEmptyString, *aChange );
+}
+
+
+void DIALOG_KICAD_DIFF::DrawChosenLibraryItem( LIBRARY_ITEM_DRAWER aDraw )
+{
+    m_drawLibraryItem = std::move( aDraw );
+
+    // The whole-library geometry only seeds the layer checkboxes, drawn together it piles up
+    if( m_canvas )
+    {
+        m_canvas->SetChangeOutlinesShown( false );
+        m_canvas->SetScene( KICAD_DIFF::BuildScene( m_diff, KICAD_DIFF::DIFF_COLOR_THEME{} ) );
+    }
+
+    // A canvas configured before it is shown keeps a black background, so select once it is
+    CallAfter(
+            [this]()
+            {
+                wxTreeItemIdValue groupCookie;
+                wxTreeItemId      root = m_treeChanges->GetRootItem();
+
+                for( wxTreeItemId group = m_treeChanges->GetFirstChild( root, groupCookie ); group.IsOk();
+                     group = m_treeChanges->GetNextChild( root, groupCookie ) )
+                {
+                    wxTreeItemIdValue itemCookie;
+                    wxTreeItemId      item = m_treeChanges->GetFirstChild( group, itemCookie );
+
+                    if( item.IsOk() )
+                    {
+                        m_treeChanges->SelectItem( item );
+                        return;
+                    }
+                }
+            } );
+}
+
+
+void DIALOG_KICAD_DIFF::buildLayerControls( const KICAD_DIFF::DIFF_SCENE& aScene )
+{
+    for( wxWindow* control : m_layerControls )
+    {
+        // The dialog frees opt-out markers only on its own close
+        delete PROPERTY_HOLDER::SafeCast( control->GetClientData() );
+        control->Destroy();
+    }
+
+    m_layerControls.clear();
+
+    const LSET layers = KICAD_DIFF::GeometryLayerSet( aScene.referenceGeometry )
+                        | KICAD_DIFF::GeometryLayerSet( aScene.comparisonGeometry );
+
+    if( layers.none() )
+        return;
+
+    std::map<PCB_LAYER_ID, wxString> layerNames = aScene.referenceGeometry.layerNames;
+
+    for( const auto& [layer, name] : aScene.comparisonGeometry.layerNames )
+        layerNames[layer] = name;
+
+    size_t index = m_layerControlsIndex;
+
+    auto add = [&]( wxWindow* aControl, const wxSizerFlags& aFlags )
+    {
+        OptOut( aControl );
+        m_filterSizer->Insert( index++, aControl, aFlags );
+        m_layerControls.push_back( aControl );
+    };
+
+    add( new wxStaticText( m_panelDetail, wxID_ANY, _( "Layers:" ) ),
+         wxSizerFlags().Border( wxLEFT | wxRIGHT, 4 ).Centre() );
+
+    for( PCB_LAYER_ID layer : layers.UIOrder() )
+    {
+        auto           nameIt = layerNames.find( layer );
+        const wxString label = nameIt != layerNames.end() ? nameIt->second : LayerName( layer );
+        wxCheckBox*    cb = new wxCheckBox( m_panelDetail, wxID_ANY, label );
+
+        cb->SetValue( m_canvas->IsLayerVisible( layer ) );
+        cb->Bind( wxEVT_CHECKBOX,
+                  [this, layer]( wxCommandEvent& aEvent )
+                  {
+                      m_canvas->SetLayerVisible( layer, aEvent.IsChecked() );
+                  } );
+        add( cb, wxSizerFlags().Border( wxRIGHT, 8 ).Centre() );
+    }
 }
 
 

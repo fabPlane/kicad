@@ -835,7 +835,7 @@ void PCB_BASE_FRAME::LoadSettings( APP_SETTINGS_BASE* aCfg )
     if( PCBNEW_SETTINGS* pcbnew_cfg = dynamic_cast<PCBNEW_SETTINGS*>( aCfg ) )
         m_polarCoords = pcbnew_cfg->m_PolarCoords;
 
-    wxASSERT( GetCanvas() );
+    wxCHECK2( GetCanvas(), return );
 
     if( GetCanvas() )
     {
@@ -1093,7 +1093,7 @@ void PCB_BASE_FRAME::setFPWatcher( FOOTPRINT* aFootprint )
 
     if( m_watcher )
     {
-    wxLogTrace( traceLibWatch, "Remove watch" );
+        wxLogTrace( traceLibWatch, "Remove watch" );
         m_watcher->RemoveAll();
         m_watcher->SetOwner( nullptr );
         m_watcher.reset();

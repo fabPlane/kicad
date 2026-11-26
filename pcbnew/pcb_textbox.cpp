@@ -24,6 +24,7 @@
 #include <bitmaps.h>
 #include <board.h>
 #include <board_design_settings.h>
+#include <core/mirror.h>
 #include <footprint.h>
 #include <pcb_textbox.h>
 #include <pcb_painter.h>
@@ -121,7 +122,9 @@ void PCB_TEXTBOX::Serialize( google::protobuf::Any& aContainer ) const
 {
     kiapi::board::types::BoardTextBox boardText;
     Serialize( boardText );
-    aContainer.PackFrom( boardText );
+
+    if( !aContainer.PackFrom( boardText ) )
+        wxFAIL_MSG( wxT( "Failed to pack PCB_TEXTBOX" ) );
 }
 
 
@@ -680,13 +683,37 @@ void PCB_TEXTBOX::Rotate( const VECTOR2I& aRotCentre, const EDA_ANGLE& aAngle )
 
 void PCB_TEXTBOX::Mirror( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
 {
-    // the position and angle are mirrored, but not the text (or its justification)
-    PCB_SHAPE::Mirror( aCentre, aFlipDirection );
+    Mirror( MIRROR_AXIS( aCentre, aFlipDirection ) );
+}
 
-    if( aFlipDirection == FLIP_DIRECTION::LEFT_RIGHT )
-        m_libTextAngle = ANGLE_180 - m_libTextAngle;
+
+void PCB_TEXTBOX::Mirror( const SEG& aAxis )
+{
+    // the position and justification are mirrored, but not the text itself
+
+    if( GetShape() == SHAPE_T::RECTANGLE )
+    {
+        const VECTOR2I centre( ( m_start.x + m_end.x ) / 2, ( m_start.y + m_end.y ) / 2 );
+        const VECTOR2I delta = aAxis.ReflectPoint( centre ) - centre;
+
+        PCB_SHAPE::SetStart( m_start + delta );
+        PCB_SHAPE::SetEnd( m_end + delta );
+
+        syncLibCoords();
+    }
     else
-        m_libTextAngle = -m_libTextAngle;
+    {
+        // A polygon is the drawn box already, so its vertices are what gets mirrored.
+        PCB_SHAPE::Mirror( aAxis );
+    }
+
+    const EDA_ANGLE axisAngle = -EDA_ANGLE( aAxis.B - aAxis.A );
+    const EDA_ANGLE newAngle = GetTextAngle().Reflect( axisAngle );
+
+    if( const FOOTPRINT* fp = GetParentFootprint() )
+        SetLibTextAngle( newAngle - fp->GetOrientation() );
+    else
+        SetLibTextAngle( newAngle );
 
     EDA_TEXT::SetTextAngle( GetTextAngle() );
 }
@@ -696,10 +723,9 @@ void PCB_TEXTBOX::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
 {
     PCB_SHAPE::Flip( aCentre, aFlipDirection );
 
-    if( aFlipDirection == FLIP_DIRECTION::LEFT_RIGHT )
-        m_libTextAngle = -m_libTextAngle;
-    else
-        m_libTextAngle = ANGLE_180 - m_libTextAngle;
+    // A flip changes the side it is read from, so add a half turn on top of the reflection.
+    const EDA_ANGLE axis = MIRROR_AXIS( aFlipDirection );
+    m_libTextAngle = m_libTextAngle.Reflect( axis ) + ANGLE_180;
 
     EDA_TEXT::SetTextAngle( GetTextAngle() );
 
@@ -1023,7 +1049,8 @@ bool PCB_TEXTBOX::operator==( const BOARD_ITEM& aBoardItem ) const
 
 bool PCB_TEXTBOX::operator==( const PCB_TEXTBOX& aOther ) const
 {
-    return m_borderEnabled == aOther.m_borderEnabled && EDA_TEXT::operator==( aOther );
+    return m_borderEnabled == aOther.m_borderEnabled && EDA_TEXT::operator==( aOther )
+           && PCB_SHAPE::operator==( static_cast<const PCB_SHAPE&>( aOther ) );
 }
 
 
@@ -1101,7 +1128,8 @@ static struct PCB_TEXTBOX_DESC
 
         propMgr.AddProperty( new PROPERTY<PCB_TEXTBOX, bool, BOARD_ITEM>( _HKI( "Knockout" ),
                     &BOARD_ITEM::SetIsKnockout, &BOARD_ITEM::IsKnockout ),
-                    _HKI( "Text Properties" ) ).SetIsCopyable();
+                    _HKI( "Text Properties" ) )
+                .SetIsCopyable();
 
         const wxString borderProps = _( "Border Properties" );
 
@@ -1110,30 +1138,37 @@ static struct PCB_TEXTBOX_DESC
 
         propMgr.AddProperty( new PROPERTY<PCB_TEXTBOX, bool>( _HKI( "Border" ),
                     &PCB_TEXTBOX::SetBorderEnabled, &PCB_TEXTBOX::IsBorderEnabled ),
-                    borderProps ).SetIsCopyable();
+                    borderProps )
+                .SetIsCopyable();
 
         propMgr.AddProperty( new PROPERTY_ENUM<PCB_TEXTBOX, LINE_STYLE>( _HKI( "Border Style" ),
                     lineStyleSetter, lineStyleGetter ),
-                    borderProps ).SetIsCopyable();
+                    borderProps )
+            .SetIsCopyable();
 
         propMgr.AddProperty( new PROPERTY<PCB_TEXTBOX, int>( _HKI( "Border Width" ),
                     &PCB_TEXTBOX::SetBorderWidth, &PCB_TEXTBOX::GetBorderWidth, PROPERTY_DISPLAY::PT_SIZE ),
-                    borderProps ).SetIsCopyable();
+                    borderProps )
+                .SetIsCopyable();
 
         const wxString marginProps = _( "Margins" );
 
         propMgr.AddProperty( new PROPERTY<PCB_TEXTBOX, int>( _HKI( "Margin Left" ),
                     &PCB_TEXTBOX::SetMarginLeft, &PCB_TEXTBOX::GetMarginLeft, PROPERTY_DISPLAY::PT_SIZE ),
-                    marginProps ).SetIsCopyable();
+                    marginProps )
+                .SetIsCopyable();
         propMgr.AddProperty( new PROPERTY<PCB_TEXTBOX, int>( _HKI( "Margin Top" ),
                     &PCB_TEXTBOX::SetMarginTop, &PCB_TEXTBOX::GetMarginTop, PROPERTY_DISPLAY::PT_SIZE ),
-                    marginProps ).SetIsCopyable();
+                    marginProps )
+                .SetIsCopyable();
         propMgr.AddProperty( new PROPERTY<PCB_TEXTBOX, int>( _HKI( "Margin Right" ),
                     &PCB_TEXTBOX::SetMarginRight, &PCB_TEXTBOX::GetMarginRight, PROPERTY_DISPLAY::PT_SIZE ),
-                    marginProps ).SetIsCopyable();
+                    marginProps )
+                .SetIsCopyable();
         propMgr.AddProperty( new PROPERTY<PCB_TEXTBOX, int>( _HKI( "Margin Bottom" ),
                     &PCB_TEXTBOX::SetMarginBottom, &PCB_TEXTBOX::GetMarginBottom, PROPERTY_DISPLAY::PT_SIZE ),
-                    marginProps ).SetIsCopyable();
+                    marginProps )
+                .SetIsCopyable();
 
         propMgr.Mask( TYPE_HASH( PCB_TEXTBOX ), TYPE_HASH( EDA_TEXT ), _HKI( "Hyperlink" ) );
     }

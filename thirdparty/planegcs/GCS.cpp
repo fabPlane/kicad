@@ -4529,22 +4529,20 @@ void System::extractSubsystem(SubSystem* subsys, bool isRedundantsolving)
 // treating the first of them as of higher priority than the second
 int System::solve(SubSystem* subsysA, SubSystem* subsysB, bool /*isFine*/, bool isRedundantsolving)
 {
-    int xsizeA = subsysA->pSize();
-    int xsizeB = subsysB->pSize();
     int csizeA = subsysA->cSize();
 
-    VEC_pD plistAB(xsizeA + xsizeB);
+    VEC_pD plistAB;
     {
         VEC_pD plistA, plistB;
         subsysA->getParamList(plistA);
         subsysB->getParamList(plistB);
 
-        std::sort(plistA.begin(), plistA.end());
-        std::sort(plistB.begin(), plistB.end());
+        SET_pD subsysParams(plistA.begin(), plistA.end());
+        subsysParams.insert(plistB.begin(), plistB.end());
+        plistAB.assign(subsysParams.begin(), subsysParams.end());
 
-        VEC_pD::const_iterator it;
-        it = std::set_union(plistA.begin(), plistA.end(), plistB.begin(), plistB.end(), plistAB.begin());
-        plistAB.resize(it - plistAB.begin());
+        // Declared order, since address order would tie the rounding to heap layout
+        std::ranges::sort(plistAB, {}, [this](double* param) { return pIndex.at(param); });
     }
     int xsize = plistAB.size();
 
@@ -4567,10 +4565,25 @@ int System::solve(SubSystem* subsysA, SubSystem* subsysB, bool /*isFine*/, bool 
     subsysB->getParams(plistAB, x);
     subsysA->getParams(plistAB, x);
     subsysB->setParams(plistAB, x);  // just to ensure that A and B are synchronized
+    Eigen::VectorXd xStart = x;
 
     subsysB->calcGrad(plistAB, grad);
     subsysA->calcJacobi(plistAB, JA);
     subsysA->calcResidual(resA);
+
+    // Seed BFGS with the soft objective's own curvature, since the identity overstates a weak pin's so far
+    // that the step test stops the solve short of the optimum and the unknown order picks where
+    {
+        Eigen::MatrixXd JB;
+        subsysB->calcJacobi(plistAB, JB);
+        Eigen::MatrixXd gaussNewton = JB.transpose() * JB;
+        double scale = xsize > 0 ? gaussNewton.diagonal().maxCoeff() : 0.0;
+
+        if (scale > 0) {
+            // A sliver of the largest curvature keeps directions no soft constraint sees bounded
+            B = gaussNewton + 1e-10 * scale * Eigen::MatrixXd::Identity(xsize, xsize);
+        }
+    }
 
     // double convergence = isFine ? XconvergenceFine : XconvergenceRough;
     int maxIterNumber
@@ -4581,8 +4594,14 @@ int System::solve(SubSystem* subsysA, SubSystem* subsysB, bool /*isFine*/, bool 
     double divergingLim = 1e6 * subsysA->error() + 1e12;
 
     double mu = 0;
+    auto derivativesFinite = [&] { return grad.allFinite() && JA.allFinite(); };
     lambda.setZero();
     for (int iter = 1; iter < maxIterNumber; iter++) {
+        // Degenerate geometry, at the start or after a step, can take a derivative to 0/0 and make the step NaN
+        if (!derivativesFinite()) {
+            break;
+        }
+
         int status = qp_eq(B, grad, JA, resA, xdir, Y, Z);
         if (status) {
             break;
@@ -4601,12 +4620,14 @@ int System::solve(SubSystem* subsysA, SubSystem* subsysB, bool /*isFine*/, bool 
             double alpha = 1;
             alpha = std::min(alpha, subsysA->maxStep(plistAB, xdir));
 
-            // Eq. 18.36
-            mu = std::max(
-                mu,
-                (grad.dot(xdir) + std::max(0., 0.5 * xdir.dot(B * xdir)))
-                    / ((1. - rho) * resA.lpNorm<1>())
-            );
+            // Eq. 18.36, which divides by zero on a feasible iterate and would turn the merit into inf * 0
+            if (resA.lpNorm<1>() > 0) {
+                mu = std::max(
+                    mu,
+                    (grad.dot(xdir) + std::max(0., 0.5 * xdir.dot(B * xdir)))
+                        / ((1. - rho) * resA.lpNorm<1>())
+                );
+            }
 
             // Eq. 18.27
             double f0 = subsysB->error() + mu * resA.lpNorm<1>();
@@ -4657,6 +4678,7 @@ int System::solve(SubSystem* subsysA, SubSystem* subsysB, bool /*isFine*/, bool 
             subsysA->calcJacobi(plistAB, JA);
             subsysA->calcResidual(resA);
         }
+
         y = grad - JA.transpose() * lambda - y;  // Eq. 18.13
 
         if (iter > 1) {
@@ -4679,7 +4701,15 @@ int System::solve(SubSystem* subsysA, SubSystem* subsysB, bool /*isFine*/, bool 
     }
 
     int ret;
-    if (subsysA->error() <= smallF) {
+
+    // Judged on the final derivatives, since the convergence test or the last iteration can exit past the check above
+    if (!derivativesFinite()) {
+        // Hand back the start, since an iterate that met a 0/0 is degenerate yet can satisfy every hard constraint
+        subsysA->setParams(plistAB, xStart);
+        subsysB->setParams(plistAB, xStart);
+        ret = Failed;
+    }
+    else if (subsysA->error() <= smallF) {
         ret = Success;
     }
     else if (h.norm() <= (isRedundantsolving ? convergenceRedundant : convergence)) {

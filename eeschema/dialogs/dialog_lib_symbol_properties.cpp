@@ -53,6 +53,26 @@
 #include "pin_numbers.h"
 
 
+/// Reports whether a symbol sets its own value for some inheritable property.
+using HAS_OWN_VALUE = bool ( * )( const LIB_SYMBOL& );
+
+
+/**
+ * Return the nearest ancestor of \a aSymbol that sets its own value, as reported by
+ * \a aHasOwn, or nullptr when the whole chain leaves it unset.
+ */
+static std::shared_ptr<LIB_SYMBOL> ancestorDefining( const LIB_SYMBOL* aSymbol, HAS_OWN_VALUE aHasOwn )
+{
+    std::shared_ptr<LIB_SYMBOL> source = aSymbol->GetParent().lock();
+    std::set<LIB_SYMBOL*>       visited;
+
+    while( source && !aHasOwn( *source ) && visited.insert( source.get() ).second )
+        source = source->GetParent().lock();
+
+    return source && aHasOwn( *source ) ? source : nullptr;
+}
+
+
 int DIALOG_LIB_SYMBOL_PROPERTIES::m_lastOpenedPage = 0;
 DIALOG_LIB_SYMBOL_PROPERTIES::LAST_LAYOUT DIALOG_LIB_SYMBOL_PROPERTIES::m_lastLayout =
         DIALOG_LIB_SYMBOL_PROPERTIES::LAST_LAYOUT::NONE;
@@ -70,15 +90,7 @@ DIALOG_LIB_SYMBOL_PROPERTIES::DIALOG_LIB_SYMBOL_PROPERTIES( SYMBOL_EDIT_FRAME* a
         m_delayedFocusPage( -1 )
 {
     std::vector<EMBEDDED_FILES*> embeddedFilesStack;
-
-    if( std::shared_ptr<LIB_SYMBOL> parent = m_libEntry->GetParent().lock() )
-    {
-        while( parent )
-        {
-            embeddedFilesStack.push_back( parent->GetEmbeddedFiles() );
-            parent = parent->GetParent().lock();
-        }
-    }
+    m_libEntry->AppendParentEmbeddedFiles( embeddedFilesStack );
 
     m_embeddedFiles = new PANEL_EMBEDDED_FILES( m_NoteBook, m_libEntry->GetEmbeddedFiles(), 0, embeddedFilesStack );
     m_NoteBook->AddPage( m_embeddedFiles, _( "Embedded Files" ) );
@@ -329,13 +341,14 @@ bool DIALOG_LIB_SYMBOL_PROPERTIES::TransferDataToWindow()
     m_KeywordCtrl->ChangeValue( m_libEntry->GetRawKeyWords() );
 
     // Keywords are not a field, so the inherited value is shown as a hint
-    std::shared_ptr<LIB_SYMBOL> source = m_libEntry->GetParent().lock();
-    std::set<LIB_SYMBOL*>       visited;
+    auto hasOwnKeyWords = []( const LIB_SYMBOL& aSymbol )
+    {
+        return !aSymbol.GetRawKeyWords().IsEmpty();
+    };
 
-    while( source && source->GetRawKeyWords().IsEmpty() && visited.insert( source.get() ).second )
-        source = source->GetParent().lock();
+    std::shared_ptr<LIB_SYMBOL> source = ancestorDefining( m_libEntry, hasOwnKeyWords );
 
-    if( source && !source->GetRawKeyWords().IsEmpty() )
+    if( source )
     {
         m_keywordsSource = UnescapeString( source->GetName() );
         m_KeywordCtrl->SetHint( source->GetRawKeyWords() );
@@ -403,7 +416,25 @@ bool DIALOG_LIB_SYMBOL_PROPERTIES::TransferDataToWindow()
     m_PinsNameInsideButt->SetValue( m_libEntry->GetPinNameOffset() != 0 );
     m_pinNameOffset.ChangeValue( m_libEntry->GetPinNameOffset() );
 
-    m_fpFiltersPanel->SetFilters( m_libEntry->GetFPFilters() );
+    wxArrayString fpFilters = m_libEntry->GetFPFilters();
+    wxString      fpFiltersSource;
+
+    if( m_libEntry->GetRawFPFilters().IsEmpty() )
+    {
+        m_inheritedFpFilters = fpFilters;
+
+        auto hasOwnFilters = []( const LIB_SYMBOL& aSymbol )
+        {
+            return !aSymbol.GetRawFPFilters().IsEmpty();
+        };
+
+        std::shared_ptr<LIB_SYMBOL> fpSource = ancestorDefining( m_libEntry, hasOwnFilters );
+
+        if( fpSource )
+            fpFiltersSource = UnescapeString( fpSource->GetName() );
+    }
+
+    m_fpFiltersPanel->SetFilters( fpFilters, fpFiltersSource );
 
     m_cbDuplicatePinsAreJumpers->SetValue( m_libEntry->GetDuplicatePinNumbersAreJumpers() );
 
@@ -441,7 +472,7 @@ bool DIALOG_LIB_SYMBOL_PROPERTIES::TransferDataToWindow()
             // Sort the list of symbols for easier search
             symbolNames.Sort( []( const wxString& a, const wxString& b ) -> int
                               {
-                                  return StrNumCmp( a, b, true );
+                                  return StrNumCmp( a, b, CMP_T::IGNORE_CASE );
                               } );
 
             // Don't allow a symbol to be derived from itself
@@ -828,7 +859,9 @@ bool DIALOG_LIB_SYMBOL_PROPERTIES::TransferDataFromWindow()
         m_libEntry->SetPinNameOffset( 0 );   // pin text outside the body (name is on the pin)
     }
 
-    m_libEntry->SetFPFilters( m_fpFiltersPanel->GetFilters() );
+    wxArrayString fpFilters = m_fpFiltersPanel->GetFilters();
+
+    m_libEntry->SetFPFilters( fpFilters == m_inheritedFpFilters ? wxArrayString() : fpFilters );
 
     m_libEntry->SetDuplicatePinNumbersAreJumpers( m_cbDuplicatePinsAreJumpers->GetValue() );
 

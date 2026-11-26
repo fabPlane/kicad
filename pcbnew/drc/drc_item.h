@@ -76,6 +76,7 @@ enum PCB_DRC_CODE
     DRCE_MICROVIA_STACK_DEPTH,           // Microvia stack exceeds the maximum depth
     DRCE_HOLE_ASPECT_RATIO,              // Hole is too deep for its diameter
     DRCE_MICROVIA_CROSSES_CORE,          // Microvia crosses core rather than build-up material
+    DRCE_MICROVIA_SPANS_DIELECTRICS,     // Microvia spans more than the one dielectric a laser can drill
     DRCE_OVERLAPPING_FOOTPRINTS,         // footprint courtyards overlap
     DRCE_MISSING_COURTYARD,              // footprint has no courtyard defined
     DRCE_MALFORMED_COURTYARD,            // footprint has a courtyard but malformed
@@ -113,7 +114,7 @@ enum PCB_DRC_CODE
     DRCE_SILK_EDGE_CLEARANCE,
     DRCE_SILK_CLEARANCE, // silk-to-silk or silk-to-other clearance error
     DRCE_TEXT_HEIGHT,
-    DRCE_TEXT_THICKNESS,
+    DRCE_LINE_WIDTH,
 
     DRCE_LENGTH_OUT_OF_RANGE,
     DRCE_NET_CHAIN_STUB_TOO_LONG,     // Routed stub on a net chain exceeds the (stub_length max) constraint
@@ -251,6 +252,7 @@ private:
     static DRC_ITEM microviaStackDepth;
     static DRC_ITEM holeAspectRatio;
     static DRC_ITEM microviaCrossesCore;
+    static DRC_ITEM microviaSpansDielectrics;
     static DRC_ITEM courtyardsOverlap;
     static DRC_ITEM missingCourtyard;
     static DRC_ITEM malformedCourtyard;
@@ -276,7 +278,7 @@ private:
     static DRC_ITEM solderMaskBridge;
     static DRC_ITEM silkClearance;
     static DRC_ITEM textHeightOutOfRange;
-    static DRC_ITEM textThicknessOutOfRange;
+    static DRC_ITEM lineWidthOutOfRange;
     static DRC_ITEM lengthOutOfRange;
     static DRC_ITEM netChainStubTooLong;
     static DRC_ITEM netChainReturnPathBreak;

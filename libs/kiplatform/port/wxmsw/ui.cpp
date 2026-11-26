@@ -23,6 +23,7 @@
 #include <kiplatform/ui.h>
 
 #include <wx/cursor.h>
+#include <wx/dataview.h>
 #include <wx/dialog.h>
 #include <wx/display.h>
 #include <wx/nonownedwnd.h>
@@ -84,15 +85,33 @@ bool KIPLATFORM::UI::IsWindowActive( wxWindow* aWindow )
 }
 
 
-void KIPLATFORM::UI::EnsureVisible( wxWindow* aWindow )
+void KIPLATFORM::UI::RunWhenActive( wxWindow* aWindow, std::function<void()> aFunction )
 {
-    // Not needed on this platform
+    aFunction();
+}
+
+
+void KIPLATFORM::UI::SetFocusWhenActive( wxWindow* aWindow )
+{
+    aWindow->SetFocus();
+}
+
+
+bool KIPLATFORM::UI::ActivateWithoutPresenting( wxWindow* aWindow )
+{
+    return false;
 }
 
 
 void KIPLATFORM::UI::StabilizeWindowPosition( wxWindow* aWindow )
 {
     // Not needed on this platform
+}
+
+
+wxPoint KIPLATFORM::UI::GetRestorablePosition( wxWindow* aWindow )
+{
+    return aWindow->GetPosition();
 }
 
 
@@ -183,6 +202,18 @@ bool KIPLATFORM::UI::SupportsKeyState()
 }
 
 
+wxKeyEvent KIPLATFORM::UI::GetNativePopupDismissalEvent()
+{
+    return wxKeyEvent();
+}
+
+
+bool KIPLATFORM::UI::PrepareChoicePopup( wxWindow* )
+{
+    return true;
+}
+
+
 wxPoint KIPLATFORM::UI::GetMousePosition()
 {
     return wxGetMousePosition();
@@ -245,6 +276,12 @@ void KIPLATFORM::UI::AllowNetworkFileSystems( wxDialog* aDialog )
 }
 
 
+int KIPLATFORM::UI::GetColumnWidth( const wxDataViewColumn* aColumn )
+{
+    return aColumn->WXGetSpecifiedWidth();
+}
+
+
 void KIPLATFORM::UI::CancelPendingScroll( wxDataViewCtrl* aCtrl )
 {
     // Not needed on this platform; the native control does not race on model resets.
@@ -281,4 +318,10 @@ void KIPLATFORM::UI::PrepareForExternalRendering( wxWindow* aWindow )
 void KIPLATFORM::UI::KeepAboveExternalRendering( wxWindow* aChild )
 {
     // Child windows are native and clip their parent's surface
+}
+
+
+void KIPLATFORM::UI::RebindOnRealize( wxWindow* aWindow )
+{
+    // Win32 windows keep their HWND when reparented
 }

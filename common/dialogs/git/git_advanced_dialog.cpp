@@ -19,6 +19,7 @@
 
 #include <dialogs/git/git_advanced_dialog.h>
 
+#include <bitmap_store.h>
 #include <bitmaps.h>
 #include <dialogs/git/git_file_diff_area.h>
 #include <dialogs/git/git_status_entries.h>
@@ -53,6 +54,7 @@
 #include <project/project_local_settings.h>
 #include <settings/common_settings.h>
 #include <thread>
+#include <utility>
 #include <widgets/git_commit_pane.h>
 #include <widgets/ui_common.h>
 #include <widgets/wx_treebook.h>
@@ -89,18 +91,11 @@ GIT_ADVANCED_DIALOG::GIT_ADVANCED_DIALOG( EDA_BASE_FRAME* aParent, GIT_COMMIT_PA
     m_book->SetFont( KIUI::GetControlFont( this ) );
 
     m_repoName->SetFont( KIUI::GetControlFont( this ).Bold() );
-    m_book->SetFitToCurrentPage( true );
 
-    // One icon per page, in page order, as the About dialog does for its tabs.
-    wxVector<wxBitmapBundle> pageIcons;
-    pageIcons.push_back( KiBitmapBundleDef( BITMAPS::git_changes, 16 ) );
-    pageIcons.push_back( KiBitmapBundleDef( BITMAPS::git_history, 16 ) );
-    pageIcons.push_back( KiBitmapBundleDef( BITMAPS::git_branches, 16 ) );
-    pageIcons.push_back( KiBitmapBundleDef( BITMAPS::git_remotes, 16 ) );
-    pageIcons.push_back( KiBitmapBundleDef( BITMAPS::git_stashes, 16 ) );
-    pageIcons.push_back( KiBitmapBundleDef( BITMAPS::git_tags, 16 ) );
-    pageIcons.push_back( KiBitmapBundleDef( BITMAPS::git_repository, 16 ) );
-    m_book->SetImages( pageIcons );
+    // The window's minimum must fit every page, not only the one open when it is built
+    m_book->SetFitToCurrentPage( false );
+
+    setIcons();
 
     m_book->AddPage( buildChangesPage( m_book ), _( "Changes" ), true, 0 );
     m_historyPage = new PANEL_GIT_HISTORY( m_book, this, m_parent );
@@ -122,13 +117,10 @@ GIT_ADVANCED_DIALOG::GIT_ADVANCED_DIALOG( EDA_BASE_FRAME* aParent, GIT_COMMIT_PA
     m_book->AddPage( m_repositoryPage, _( "Repository" ), false, 6 );
 
     // Pull and Push run through the docked panel, which owns the merge and its conflict handling.
-    m_fetchButton->SetBitmap( KiBitmapBundle( BITMAPS::git_fetch ) );
-    m_pullButton->SetBitmap( KiBitmapBundle( BITMAPS::git_pull ) );
-    m_pushButton->SetBitmap( KiBitmapBundle( BITMAPS::git_push ) );
-
     m_fetchButton->Bind( wxEVT_BUTTON,
                          [this]( wxCommandEvent& )
                          {
+                             m_credentialPrompts = 0;
                              onFetch();
                          } );
     // The choice is empty until the repository is read, so without a floor the top bar lays
@@ -186,8 +178,12 @@ GIT_ADVANCED_DIALOG::GIT_ADVANCED_DIALOG( EDA_BASE_FRAME* aParent, GIT_COMMIT_PA
     m_book->GetTreeCtrl()->SetMinSize( treeSize );
 
     // A page is a bare list whose natural size is a few rows, so without a floor the first
-    // open is a stamp. A saved size still wins once there is one.
-    m_book->SetMinSize( FromDIP( wxSize( 800, 600 ) ) );
+    // open is a stamp. A saved size still wins once there is one. The fitted size keeps the
+    // widest page's right-hand controls inside the window.
+    wxSize bookMin = FromDIP( wxSize( 800, 600 ) );
+    m_book->InvalidateBestSize();
+    bookMin.IncTo( m_book->GetBestSize() );
+    m_book->SetMinSize( bookMin );
     m_book->Layout();
 
     Bind(
@@ -202,6 +198,13 @@ GIT_ADVANCED_DIALOG::GIT_ADVANCED_DIALOG( EDA_BASE_FRAME* aParent, GIT_COMMIT_PA
 
     // A commit, push or pull from any surface broadcasts a change, so the window never goes stale.
     syncListener();
+
+    Bind( wxEVT_SYS_COLOUR_CHANGED,
+          [this]( wxSysColourChangedEvent& aEvent )
+          {
+              setIcons();
+              aEvent.Skip();
+          } );
 
     finishDialogSettings();
 }
@@ -298,6 +301,10 @@ GIT_ADVANCED_DIALOG::~GIT_ADVANCED_DIALOG()
         m_pane->SetMessageChangedHandler( nullptr );
     }
 
+    // A transfer's completion finds this window gone, so release its holds before the panels'
+    // Cancel can reach it
+    m_fetchBusy.Release();
+
     if( activeDialog() == this )
         setActiveDialog( nullptr );
 
@@ -331,17 +338,6 @@ void GIT_ADVANCED_DIALOG::syncListener()
                                 } );
     m_listenerSession = common;
     m_listenerAttached = true;
-}
-
-
-void GIT_ADVANCED_DIALOG::SetPaneTransferBusy( bool aBusy, const wxString& aStatus )
-{
-    // Two forms on one project, so both follow the transfer.
-    if( m_changesPane )
-        m_changesPane->SetTransferBusy( aBusy, aStatus );
-
-    if( m_pane )
-        m_pane->SetTransferBusy( aBusy, aStatus );
 }
 
 
@@ -392,6 +388,25 @@ void GIT_ADVANCED_DIALOG::ShowAmend( const wxString& aCommitHash )
 
     selectPage( GIT_ADVANCED_PAGE::CHANGES );
     m_changesPane->BeginAmend( aCommitHash );
+}
+
+
+void GIT_ADVANCED_DIALOG::setIcons()
+{
+    // One icon per page, in page order, as the About dialog does for its tabs.
+    wxVector<wxBitmapBundle> pageIcons;
+    pageIcons.push_back( KiBitmapBundleDef( BITMAPS::git_changes, 16 ) );
+    pageIcons.push_back( KiBitmapBundleDef( BITMAPS::git_history, 16 ) );
+    pageIcons.push_back( KiBitmapBundleDef( BITMAPS::git_branches, 16 ) );
+    pageIcons.push_back( KiBitmapBundleDef( BITMAPS::git_remotes, 16 ) );
+    pageIcons.push_back( KiBitmapBundleDef( BITMAPS::git_stashes, 16 ) );
+    pageIcons.push_back( KiBitmapBundleDef( BITMAPS::git_tags, 16 ) );
+    pageIcons.push_back( KiBitmapBundleDef( BITMAPS::git_repository, 16 ) );
+    m_book->SetImages( pageIcons );
+
+    m_fetchButton->SetBitmap( KiBitmapBundle( BITMAPS::git_fetch ) );
+    m_pullButton->SetBitmap( KiBitmapBundle( BITMAPS::git_pull ) );
+    m_pushButton->SetBitmap( KiBitmapBundle( BITMAPS::git_push ) );
 }
 
 
@@ -544,7 +559,7 @@ void GIT_ADVANCED_DIALOG::onFetch( bool aRetriedAfterTrust )
     if( !SessionStillCurrent() )
         return;
 
-    if( m_fetch.IsBusy() || m_fetchQuery.IsBusy() )
+    if( m_fetch.IsBusy() || m_fetchQuery.IsBusy() || m_fetchPreflight )
     {
         KIGIT::ShowBusyMessage( this );
         return;
@@ -555,9 +570,16 @@ void GIT_ADVANCED_DIALOG::onFetch( bool aRetriedAfterTrust )
 
     m_fetchButton->SetLabel( _( "Fetching..." ) );
     m_fetchButton->Disable();
-    SetPaneTransferBusy( true, _( "Fetching..." ) );
+    m_fetchBusy.Begin( common, _( "Fetching..." ),
+                       [this]()
+                       {
+                           if( !abandonFetchPreflight() )
+                               m_fetch.Cancel();
+                       } );
     Layout();
 
+    m_fetchPreflight = true;
+    ++m_fetchRequest;
     m_fetchQuery.Run(
             common,
             [hasRemote]( KIGIT_COMMON& aCommon )
@@ -571,8 +593,7 @@ void GIT_ADVANCED_DIALOG::onFetch( bool aRetriedAfterTrust )
 
                 if( !*hasRemote )
                 {
-                    m_fetchButton->SetLabel( _( "Fetch" ) );
-                    m_fetchButton->Enable();
+                    abandonFetchPreflight();
                     Layout();
                     DisplayInfoMessage( this, _( "No remote is configured to get changes from." ) );
                     return;
@@ -583,8 +604,46 @@ void GIT_ADVANCED_DIALOG::onFetch( bool aRetriedAfterTrust )
 }
 
 
+bool GIT_ADVANCED_DIALOG::abandonFetchPreflight()
+{
+    if( !std::exchange( m_fetchPreflight, false ) )
+        return false;
+
+    // The cancelled check never completes, so its reset of the button and the panes happens here
+    m_fetchQuery.Cancel();
+    endFetch( wxEmptyString );
+    return true;
+}
+
+
+void GIT_ADVANCED_DIALOG::endFetch( const wxString& aStatus )
+{
+    m_fetchButton->SetLabel( _( "Fetch" ) );
+    m_fetchButton->Enable();
+    m_fetchBusy.Release();
+    Layout();
+
+    // After the release, whose restore of the panels clears their status line
+    if( !aStatus.IsEmpty() )
+        ShowTransferProgress( aStatus );
+}
+
+
 void GIT_ADVANCED_DIALOG::startFetch( std::shared_ptr<KIGIT_COMMON> aCommon, bool aRetriedAfterTrust )
 {
+    // Read the keyring here, where an unlock prompt can show. The preflight stays open so Cancel still ends it
+    if( KIGIT_COMMON::DeferForSecret( aCommon, m_fetch.Alive(),
+                                      [this, aCommon, aRetriedAfterTrust, request = m_fetchRequest]()
+                                      {
+                                          // A fetch cancelled and started again meanwhile is another request
+                                          if( request == m_fetchRequest && m_fetchPreflight && SessionStillCurrent() )
+                                              startFetch( aCommon, aRetriedAfterTrust );
+                                      } ) )
+    {
+        return;
+    }
+
+    m_fetchPreflight = false;
     m_fetchButton->SetLabel( _( "Fetching..." ) );
     m_fetchButton->Disable();
     Layout();
@@ -642,31 +701,40 @@ void GIT_ADVANCED_DIALOG::startFetch( std::shared_ptr<KIGIT_COMMON> aCommon, boo
                 if( !SessionStillCurrent() )
                     return;
 
-                m_fetchButton->SetLabel( _( "Fetch" ) );
-                m_fetchButton->Enable();
-                SetPaneTransferBusy( false );
-                Layout();
-
                 if( outcome->fetched && !outcome->cancelled )
                     KIGIT::ClearSyncWarnings( aCommon.get() );
 
-                if( outcome->cancelled || outcome->fetched )
-                    return;
-
-                if( outcome->hostKey )
+                if( outcome->fetched || outcome->cancelled )
                 {
-                    if( KIGIT::PromptToTrustHost( this, *outcome->hostKey, aRetriedAfterTrust ) )
-                        onFetch( true );
-
+                    m_credentialPrompts = 0;
+                    endFetch( outcome->fetched ? wxString() : wxString( _( "Cancelled." ) ) );
                     return;
                 }
 
-                if( outcome->authFailure
-                    && KIGIT::PromptForCredentials( this, aCommon.get(), &m_parent->Prj(), outcome->error ) )
+                KIGIT::TRANSFER_FAILURE failure;
+                failure.authFailure = outcome->authFailure;
+                failure.hostKey = outcome->hostKey;
+                failure.error = outcome->error;
+
+                // The Fetch button and the panels stay busy until the prompt is answered
+                switch( KIGIT::AnswerTransferFailure( this, m_fetch.Alive(), aCommon.get(), &m_parent->Prj(), failure,
+                                                      aRetriedAfterTrust, m_credentialPrompts ) )
                 {
-                    onFetch( aRetriedAfterTrust );
-                    return;
+                case KIGIT::TRANSFER_RETRY::RETRY: onFetch( aRetriedAfterTrust ); return;
+
+                case KIGIT::TRANSFER_RETRY::RETRY_TRUSTED: onFetch( true ); return;
+
+                // Declining a prompt is the user's answer, not an error
+                case KIGIT::TRANSFER_RETRY::CANCELLED: endFetch( _( "Cancelled." ) ); return;
+
+                case KIGIT::TRANSFER_RETRY::HOST_DECLINED: endFetch( wxEmptyString ); return;
+
+                case KIGIT::TRANSFER_RETRY::GONE: return;
+
+                case KIGIT::TRANSFER_RETRY::REPORT: break;
                 }
+
+                endFetch( wxEmptyString );
 
                 wxString error = outcome->error;
 
@@ -678,10 +746,7 @@ void GIT_ADVANCED_DIALOG::startFetch( std::shared_ptr<KIGIT_COMMON> aCommon, boo
 
     if( !started )
     {
-        m_fetchButton->SetLabel( _( "Fetch" ) );
-        m_fetchButton->Enable();
-        SetPaneTransferBusy( false );
-        Layout();
+        endFetch( wxEmptyString );
         DisplayInfoMessage( this, _( "Could not start the fetch." ) );
     }
 }
@@ -776,7 +841,7 @@ void GIT_ADVANCED_DIALOG::RunGitAction( const std::function<bool( KIGIT_COMMON&,
 
     {
         // Release the lock before reloading editors and refreshing other Git views.
-        std::unique_lock<std::mutex> lock = KIGIT::WaitForActionLock( *common, this );
+        KIGIT::ACTION_LOCK lock = KIGIT::WaitForActionLock( *common, this );
 
         if( !lock.owns_lock() )
             return;

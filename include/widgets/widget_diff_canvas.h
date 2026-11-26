@@ -84,6 +84,10 @@ public:
     /// Replace the displayed scene. Pass an empty scene to clear the canvas.
     void SetScene( KICAD_DIFF::DIFF_SCENE aScene );
 
+    /// Draw the scene's change outlines or keep them for picking only. A library compare draws its items one at a
+    /// time at the origin, where the outlines of every item would pile up.
+    void SetChangeOutlinesShown( bool aShown );
+
     void SetWorldUnitLength( double aWorldUnitLength );
 
     /// Install the native painter used for drawing source document context.
@@ -91,10 +95,11 @@ public:
     /// forced neutral color. The diff overlay remains owned by this widget.
     void SetContextPainter( std::unique_ptr<KIGFX::PAINTER> aPainter );
 
-    /// Replace source document context items. Items are not owned by the
-    /// widget; callers must keep the source documents alive while the dialog
-    /// is open.
-    void SetContextItems( const std::vector<KIGFX::VIEW_ITEM*>& aItems );
+    /// Replace source document context items. The widget holds aOwner until the items are
+    /// replaced or the widget is destroyed, so items made only for display can live there.
+    /// Without an owner the caller keeps the source documents alive while they are shown.
+    void SetContextItems( const std::vector<KIGFX::VIEW_ITEM*>& aItems,
+                          std::shared_ptr<const void>           aOwner = nullptr );
 
     /// Tag context items by change category so SetCategoryVisible can hide /
     /// show them in lockstep with the diff-category checkboxes.
@@ -146,8 +151,8 @@ public:
     /// Zoom and center on a specific document-space bbox with a small margin.
     void ZoomToBBox( const BOX2I& aBBox );
 
-    /// Pan so the currently highlighted change is at
-    /// the center of the canvas. No-op when nothing is highlighted.
+    /// Pan so the currently highlighted change is at the center of the canvas, zooming in first
+    /// when it would be too small to read. No-op when nothing is highlighted.
     void CenterOnHighlight();
 
     /// Register a callback to fire when the user left-clicks the canvas.
@@ -198,13 +203,14 @@ private:
     void onChar( wxKeyEvent& aEvent );
     void onSize( wxSizeEvent& aEvent );
 
+private:
     struct HIGHLIGHT_BOX_ITEM;
 
-    KICAD_DIFF::DIFF_SCENE   m_scene;
+    KICAD_DIFF::DIFF_SCENE              m_scene;
     KICAD_DIFF::DIFF_SCENE              m_renderScene;
-    std::optional<KIID_PATH> m_highlight;
+    std::optional<KIID_PATH>            m_highlight;
     std::optional<KIID_PATH>            m_hover;
-    PICK_HANDLER             m_pickHandler;
+    PICK_HANDLER                        m_pickHandler;
     ITEM_HANDLER                        m_dclickHandler;
     DIMMER                              m_itemDimmer;
     ITEM_ID_GETTER                      m_itemIdGetter;
@@ -216,27 +222,30 @@ private:
     std::set<KIID_PATH> m_hiddenChanges;
 
     /// While true, rebuildOverlay()/ZoomToFit() are held so a batch renders once.
-    bool m_holdRebuild = false;
+    bool                m_holdRebuild = false;
 
-    LSET m_layerVisible;
+    bool                m_changeOutlinesShown = true;
+
+    LSET                m_layerVisible;
 
     bool m_hasNativeContext = false;
-    std::unique_ptr<KIGFX::VIEW_GROUP> m_contextGroup;
+    std::unique_ptr<KIGFX::VIEW_GROUP>                m_contextGroup;
     std::vector<KIGFX::VIEW_ITEM*>                    m_contextGroupItems;
+    std::shared_ptr<const void>                       m_contextOwner;
     std::map<KIGFX::VIEW_ITEM*, KICAD_DIFF::CATEGORY> m_itemCategories;
-    std::shared_ptr<KIGFX::VIEW_OVERLAY> m_overlay;
+    std::shared_ptr<KIGFX::VIEW_OVERLAY>              m_overlay;
 
     /// EDA_DRAW_PANEL_GAL keeps a reference to the options struct, so it
     /// must outlive the panel. Per-instance so siblings can vary if needed.
-    std::unique_ptr<KIGFX::GAL_DISPLAY_OPTIONS> m_galOptions;
+    std::unique_ptr<KIGFX::GAL_DISPLAY_OPTIONS>       m_galOptions;
 
     /// True when a ZoomToFit was requested before the canvas had a real
     /// size — the next onSize will retry the fit and clear this.
-    bool m_zoomToFitPending = false;
+    bool                 m_zoomToFitPending = false;
 
-    bool     m_leftDragPans = false;
-    bool     m_leftPanning = false;
-    VECTOR2D m_leftPanLast;
+    bool                 m_leftDragPans = false;
+    bool                 m_leftPanning = false;
+    VECTOR2D             m_leftPanLast;
 
     std::optional<BOX2I> m_focusBox;
 };

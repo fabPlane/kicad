@@ -25,6 +25,7 @@
 #include <settings/common_settings.h>
 
 #include <memory>
+#include <optional>
 #include <wx/string.h>
 
 class EDA_BASE_FRAME;
@@ -34,6 +35,13 @@ class PROJECT;
 
 namespace KIGIT
 {
+
+enum class PROMPT_ANSWER
+{
+    ACCEPTED,
+    DECLINED,
+    ABANDONED ///< The parent closed while the prompt was up, so the caller must not touch it
+};
 
 /**
  * Ask the user for the credentials of the session's remote and apply them to the session.
@@ -45,19 +53,52 @@ namespace KIGIT
  * @param aProject When given, the corrected username and key are also written to the project's
  *                 stored settings, so a later repository attach does not revert them.
  * @param aExplanation Why the last attempt failed, shown above the fields. Nothing is shown when empty.
- * @return True when the user confirmed and credentials were applied.
+ * @return ACCEPTED when the user confirmed and credentials were applied.
  */
-bool PromptForCredentials( wxWindow* aParent, KIGIT_COMMON* aCommon, PROJECT* aProject = nullptr,
-                           const wxString& aExplanation = wxEmptyString );
+PROMPT_ANSWER PromptForCredentials( wxWindow* aParent, KIGIT_COMMON* aCommon, PROJECT* aProject = nullptr,
+                                    const wxString& aExplanation = wxEmptyString );
 
 /**
  * Ask whether to trust a server seen for the first time, and remember its key when the user agrees.
  * A changed or revoked key is refused with an explanation and no way to accept it.
  *
  * @param aRetriedAfterTrust The operation already ran again after a trust, so it is refused instead.
- * @return True when the key was saved and the operation should be tried again.
+ * @return ACCEPTED when the key was saved and the operation should be tried again.
  */
-bool PromptToTrustHost( wxWindow* aParent, const HOST_KEY_FAILURE& aFailure, bool aRetriedAfterTrust );
+PROMPT_ANSWER PromptToTrustHost( wxWindow* aParent, const HOST_KEY_FAILURE& aFailure, bool aRetriedAfterTrust );
+
+/// Keyring reads and credential prompts that may follow a request's failures before one is reported instead.
+/// The read before the first transfer is not counted
+constexpr int MAX_CREDENTIAL_PROMPTS = 3;
+
+/// Why a transfer to a remote failed
+struct TRANSFER_FAILURE
+{
+    bool                            cancelled = false;   ///< The user cancelled the transfer
+    bool                            authFailure = false; ///< The remote refused every credential offered
+    std::optional<HOST_KEY_FAILURE> hostKey;             ///< The server's key is unknown or has changed
+    wxString                        error;               ///< Shown above the credential fields
+};
+
+/// What a window does after AnswerTransferFailure
+enum class TRANSFER_RETRY
+{
+    RETRY,         ///< Run the transfer again
+    RETRY_TRUSTED, ///< Run it again, now that the server's key is trusted
+    CANCELLED,     ///< Stop and say so, the user cancelled the transfer or a prompt
+    HOST_DECLINED, ///< Stop without a message, the user chose not to trust the server
+    GONE,          ///< The window closed during a prompt, so the caller must not touch it
+    REPORT         ///< Show the failure
+};
+
+/**
+ * Answer a failed transfer the way every window does. A host key is trusted or refused first, then a
+ * credential failure reads the keyring or prompts, at most MAX_CREDENTIAL_PROMPTS times in a row as
+ * counted in aPrompts. aAlive expiring during a prompt reads as GONE.
+ */
+TRANSFER_RETRY AnswerTransferFailure( wxWindow* aParent, const std::weak_ptr<bool>& aAlive, KIGIT_COMMON* aCommon,
+                                      PROJECT* aProject, const TRANSFER_FAILURE& aFailure, bool aRetriedAfterTrust,
+                                      int& aPrompts );
 
 /// The status bar source under which background fetch failures are listed.
 inline constexpr const wxChar* SYNC_WARNING_SOURCE = wxS( "git" );
@@ -69,19 +110,19 @@ void ClearSyncWarnings( wxWindow* aWindow );
 /// open on the project whose session \a aCommon is.
 void ClearSyncWarnings( const KIGIT_COMMON* aCommon );
 
-/// Repository values and whether Git can use them to record a commit.
+/// The author values the repository's own config and the global config hold
 struct GIT_IDENTITY
 {
-    GitUserConfig config;
-    bool          configured = false;
+    GitUserConfig local;
+    GitUserConfig global;
 };
 
 /// Read on a worker while holding the session's action lock.
 GIT_IDENTITY ReadGitIdentity( KIGIT_COMMON& aCommon );
 
-/// Fill missing values from custom preferences, then use the OS user name if needed.
-GitUserConfig ResolveGitIdentity( const GIT_IDENTITY& aIdentity, const COMMON_SETTINGS::GIT& aPreferences,
-                                  const wxString& aUserName );
+/// The author to show in the editor. It falls back to the OS user name for the name, which is never recorded
+/// unless the user saves it. UI thread only.
+GitUserConfig PrefillAuthor( const GIT_IDENTITY& aIdentity );
 
 /// Edit the repository's author and refresh Git views after saving. UI thread only.
 /// Refuse to save if the frame changes project while the dialog is open.

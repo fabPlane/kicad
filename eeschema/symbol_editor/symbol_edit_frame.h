@@ -488,9 +488,6 @@ public:
     /// Return true if \a aLibId is an alias for the editor screen symbol.
     bool IsCurrentSymbol( const LIB_ID& aLibId ) const;
 
-    /// Restore the empty editor screen, without any symbol or library selected.
-    void emptyScreen();
-
     void ClearToolbarControl( int aId ) override;
 
 protected:
@@ -505,6 +502,8 @@ protected:
     }
 
     void updateSelectionFilterVisbility() override;
+
+    bool hasUnsavedLibraryEdits( const wxString& aLibNickname ) const override;
 
     void onPluginAvailabilityChanged( wxCommandEvent& aEvt );
 
@@ -688,16 +687,18 @@ private:
     bool hasDirtyInactiveInstanceTabs() const;
 
     /**
-     * Close every tab without prompting and return the frame to the empty state. Used by the paths
-     * that leave the tab model. The caller handles any unsaved-change prompting.
-     */
-    void closeAllSymbolTabsSilently();
-
-    /**
      * Close the open tab for aLibId, if any, without prompting and leaving the other tabs open. The
      * panel selects a successor when the closed tab was active.
      */
     void closeSymbolTab( const LIB_ID& aLibId );
+
+    /**
+     * Close the library tabs of aLibrary, or of every library when it is empty, limited to aSymbol
+     * when given. Schematic instance tabs stay open.
+     *
+     * @return the closed active tab's symbol, or an empty LIB_ID.
+     */
+    LIB_ID closeLibraryTabs( const wxString& aLibrary, const wxString& aSymbol );
 
     /**
      * Capture the current view zoom/center for the active tab's snapshot.

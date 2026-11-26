@@ -319,13 +319,13 @@ void DIALOG_CREATE_NET_CHAIN::OnFindPathClicked( wxCommandEvent& aEvent )
 
     for( const SCH_REFERENCE& ref : refs )
     {
-        if( ref.GetRef() == fromRef && ref.GetSymbol() )
+        if( ref.GetSymbol() && ref.GetComposedRef() == fromRef )
         {
             fromSym = ref.GetSymbol();
             fromSheet = ref.GetSheetPath();
         }
 
-        if( ref.GetRef() == toRef && ref.GetSymbol() )
+        if( ref.GetSymbol() && ref.GetComposedRef() == toRef )
         {
             toSym = ref.GetSymbol();
             toSheet = ref.GetSheetPath();
@@ -548,7 +548,7 @@ void DIALOG_CREATE_NET_CHAIN::populateComponentCombos()
     for( const SCH_REFERENCE& ref : refs )
     {
         if( ref.GetSymbol() )
-            refNames.insert( ref.GetRef() );
+            refNames.insert( ref.GetComposedRef() );
     }
 
     for( const wxString& name : refNames )
@@ -609,8 +609,8 @@ void DIALOG_CREATE_NET_CHAIN::loadPotentials()
 
         // Surface the terminal refs in the row so a ref-keyed filter (e.g. right-click on a
         // single symbol → focus on chains touching that symbol) can match them.
-        wxString terminalA = chain->GetTerminalRef( 0 );
-        wxString terminalB = chain->GetTerminalRef( 1 );
+        wxString terminalA = chain->GetTerminalRefDes( 0 );
+        wxString terminalB = chain->GetTerminalRefDes( 1 );
 
         if( !chain->GetTerminalPinNum( 0 ).IsEmpty() )
             terminalA += wxT( ":" ) + chain->GetTerminalPinNum( 0 );
@@ -942,10 +942,10 @@ const SCH_SHEET_PATH& DIALOG_CREATE_NET_CHAIN::findSheetForRow( POTENTIAL_ROW& a
 
     if( aRow.livePtr )
     {
-        targetRef = aRow.livePtr->GetTerminalRef( 0 );
+        targetRef = aRow.livePtr->GetTerminalRefDes( 0 );
 
         if( targetRef.IsEmpty() )
-            targetRef = aRow.livePtr->GetTerminalRef( 1 );
+            targetRef = aRow.livePtr->GetTerminalRefDes( 1 );
     }
     else
     {
@@ -962,7 +962,7 @@ const SCH_SHEET_PATH& DIALOG_CREATE_NET_CHAIN::findSheetForRow( POTENTIAL_ROW& a
 
         for( const SCH_REFERENCE& ref : refs )
         {
-            if( ref.GetRef() == targetRef && ref.GetSymbol() )
+            if( ref.GetSymbol() && ref.GetComposedRef() == targetRef )
             {
                 aRow.cachedSheet = ref.GetSheetPath();
                 return aRow.cachedSheet;

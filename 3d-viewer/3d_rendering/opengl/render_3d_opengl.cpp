@@ -64,10 +64,10 @@ RENDER_3D_OPENGL::RENDER_3D_OPENGL( EDA_3D_CANVAS* aCanvas, BOARD_ADAPTER& aAdap
     m_offboardPadsFront = nullptr;
     m_offboardPadsBack = nullptr;
 
-    m_outerThroughHoles = nullptr;
+    m_frontOuterThroughHoles = nullptr;
+    m_backOuterThroughHoles = nullptr;
     m_outerThroughHoleRings = nullptr;
-    m_outerViaThroughHoles = nullptr;
-    m_microviaHoles = nullptr;
+    m_complexPlatedHoles = nullptr;
     m_padHoles = nullptr;
     m_viaFrontCover = nullptr;
     m_viaBackCover = nullptr;
@@ -648,16 +648,16 @@ bool RENDER_3D_OPENGL::Redraw( bool aIsMoving )
 
     bool skipThickness = aIsMoving && cfg.opengl_thickness_disableOnMove;
     bool skipRenderHoles = aIsMoving && cfg.opengl_holes_disableOnMove;
-    bool skipRenderMicroVias = aIsMoving && cfg.opengl_microvias_disableOnMove;
+    bool skipRenderComplexHoles = aIsMoving && cfg.opengl_microvias_disableOnMove;
     bool showThickness = !skipThickness;
 
     std::bitset<LAYER_3D_END> layerFlags = m_boardAdapter.GetVisibleLayers();
 
     setLayerMaterial( B_Cu );
 
-    if( !( skipRenderMicroVias || skipRenderHoles ) && m_microviaHoles )
+    if( !( skipRenderComplexHoles || skipRenderHoles ) && m_complexPlatedHoles )
     {
-        if( std::shared_ptr<OPENGL_RENDER_LIST> ogl_disp_list = m_microviaHoles->MakeOrGet() )
+        if( std::shared_ptr<OPENGL_RENDER_LIST> ogl_disp_list = m_complexPlatedHoles->MakeOrGet() )
             ogl_disp_list->DrawAll();
     }
 
@@ -712,7 +712,11 @@ bool RENDER_3D_OPENGL::Redraw( bool aIsMoving )
 
             if( !skipRenderHoles )
             {
-                outerTH = m_outerThroughHoles ? m_outerThroughHoles->MakeOrGet() : nullptr;
+                if( IsFrontLayer( layer ) )
+                    outerTH = m_frontOuterThroughHoles ? m_frontOuterThroughHoles->MakeOrGet() : nullptr;
+                else
+                    outerTH = m_backOuterThroughHoles ? m_backOuterThroughHoles->MakeOrGet() : nullptr;
+
                 viaHoles = m_outerLayerHoles[layer] ? m_outerLayerHoles[layer]->MakeOrGet() : nullptr;
             }
 
@@ -772,8 +776,10 @@ bool RENDER_3D_OPENGL::Redraw( bool aIsMoving )
             {
                 if( isSilkLayer && cfg.clip_silk_on_via_annuli )
                     throughHolesOuter = m_outerThroughHoleRings ? m_outerThroughHoleRings->MakeOrGet() : nullptr;
+                else if( IsFrontLayer( layer ) )
+                    throughHolesOuter = m_frontOuterThroughHoles ? m_frontOuterThroughHoles->MakeOrGet() : nullptr;
                 else
-                    throughHolesOuter = m_outerThroughHoles ? m_outerThroughHoles->MakeOrGet() : nullptr;
+                    throughHolesOuter = m_backOuterThroughHoles ? m_backOuterThroughHoles->MakeOrGet() : nullptr;
             }
 
             if( isSilkLayer && cfg.show_off_board_silk )
@@ -1084,11 +1090,11 @@ void RENDER_3D_OPENGL::freeAllLists()
     DELETE_AND_FREE( m_postMachinePlugs )
     DELETE_AND_FREE( m_antiBoard )
 
-    DELETE_AND_FREE( m_outerThroughHoles )
-    DELETE_AND_FREE( m_outerViaThroughHoles )
+    DELETE_AND_FREE( m_frontOuterThroughHoles )
+    DELETE_AND_FREE( m_backOuterThroughHoles )
     DELETE_AND_FREE( m_outerThroughHoleRings )
 
-    DELETE_AND_FREE( m_microviaHoles )
+    DELETE_AND_FREE( m_complexPlatedHoles )
     DELETE_AND_FREE( m_padHoles )
     DELETE_AND_FREE( m_viaFrontCover )
     DELETE_AND_FREE( m_viaBackCover )
@@ -1119,10 +1125,17 @@ void RENDER_3D_OPENGL::renderSolderMaskLayer( PCB_LAYER_ID aLayerID, float aZPos
     if( m_board )
     {
         std::shared_ptr<OPENGL_RENDER_LIST> board_list = m_board->MakeOrGet();
-        std::shared_ptr<OPENGL_RENDER_LIST> solder_mask =
-                m_layers[aLayerID] ? m_layers[aLayerID]->MakeOrGet() : nullptr;
-        std::shared_ptr<OPENGL_RENDER_LIST> via_holes =
-                !aSkipRenderHoles && m_outerThroughHoles ? m_outerThroughHoles->MakeOrGet() : nullptr;
+        std::shared_ptr<OPENGL_RENDER_LIST> solder_mask = m_layers[aLayerID] ? m_layers[aLayerID]->MakeOrGet()
+                                                                             : nullptr;
+        std::shared_ptr<OPENGL_RENDER_LIST> via_holes;
+
+        if( !aSkipRenderHoles )
+        {
+            if( IsFrontLayer( aLayerID ) )
+                via_holes = m_frontOuterThroughHoles ? m_frontOuterThroughHoles->MakeOrGet() : nullptr;
+            else
+                via_holes = m_backOuterThroughHoles ? m_backOuterThroughHoles->MakeOrGet() : nullptr;
+        }
 
         if( via_holes )
             via_holes->ApplyScalePosition( aZPos, m_boardAdapter.GetNonCopperLayerThickness() );

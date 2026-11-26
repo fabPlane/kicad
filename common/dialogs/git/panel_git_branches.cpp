@@ -19,6 +19,7 @@
 
 #include <dialogs/git/panel_git_branches.h>
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -33,6 +34,7 @@
 #include <eda_base_frame.h>
 #include <git/git_push_handler.h>
 #include <git/kicad_git_common.h>
+#include <git/kigit_failure.h>
 #include <project.h>
 
 
@@ -50,6 +52,8 @@ PANEL_GIT_BRANCHES::PANEL_GIT_BRANCHES( wxWindow* aParent, GIT_ADVANCED_DIALOG* 
 
     KIGIT::MarkDestructive( m_deleteBranchButton );
     KIGIT::MarkDestructive( m_forcePushButton );
+
+    KIGIT::KeepDetailWidth( m_branchesSplitter );
 
     // The detail pane appears once a branch is selected.
     m_branchSashPos = FromDIP( 460 );
@@ -111,6 +115,7 @@ PANEL_GIT_BRANCHES::PANEL_GIT_BRANCHES( wxWindow* aParent, GIT_ADVANCED_DIALOG* 
     m_forcePushButton->Bind( wxEVT_BUTTON,
                              [this]( wxCommandEvent& )
                              {
+                                 m_credentialPrompts = 0;
                                  onForcePush();
                              } );
 }
@@ -125,6 +130,9 @@ PANEL_GIT_BRANCHES::~PANEL_GIT_BRANCHES()
 void PANEL_GIT_BRANCHES::StopTransfer()
 {
     m_push.Cancel();
+
+    // The completion never reaches a closed window to release it
+    m_pushBusy.Release();
 }
 
 
@@ -178,6 +186,13 @@ void PANEL_GIT_BRANCHES::Populate()
                     // Keep the selection where it was, or start on the current branch.
                     if( branch.name == selected || ( selected.IsEmpty() && branch.isCurrent ) )
                         selectRow = idx;
+                }
+
+                // Relative dates vary in length with the language and font, so the column follows its text
+                if( m_branchesList->GetItemCount() > 0 )
+                {
+                    m_branchesList->SetColumnWidth( 3, wxLIST_AUTOSIZE );
+                    m_branchesList->SetColumnWidth( 3, std::max( m_branchesList->GetColumnWidth( 3 ), FromDIP( 90 ) ) );
                 }
 
                 int shown = m_branchesList->GetItemCount();
@@ -421,6 +436,8 @@ void PANEL_GIT_BRANCHES::onForcePush( bool aRetriedAfterTrust )
         wxString branch;
         wxString headOid;
         wxString upstream;
+        wxString remoteName;
+        wxString pushUrl;
         bool     hasRemote = false;
         bool     detached = false;
         bool     checked = false;
@@ -428,6 +445,17 @@ void PANEL_GIT_BRANCHES::onForcePush( bool aRetriedAfterTrust )
 
     std::shared_ptr<KIGIT_COMMON> common = m_frame->Prj().GetGitCommon();
     auto                          outcome = std::make_shared<OUTCOME>();
+
+    // Read the keyring before the confirmation, so no unlock prompt comes between it and the push
+    if( KIGIT_COMMON::DeferForSecret( common, m_push.Alive(),
+                                      [this, aRetriedAfterTrust]()
+                                      {
+                                          // Checks again that nothing started and the session is still this one
+                                          onForcePush( aRetriedAfterTrust );
+                                      } ) )
+    {
+        return;
+    }
 
     m_actionQuery.Run(
             common,
@@ -439,7 +467,9 @@ void PANEL_GIT_BRANCHES::onForcePush( bool aRetriedAfterTrust )
                 outcome->headOid = aCommon.GetHeadCommitId();
 
                 // Push targets the same-named remote ref, even with a differently named upstream.
-                outcome->upstream = aCommon.GetRemoteNameOrDefault() + wxS( "/" ) + outcome->branch;
+                outcome->remoteName = aCommon.GetRemoteNameOrDefault();
+                outcome->pushUrl = aCommon.GetPushUrl( outcome->remoteName );
+                outcome->upstream = outcome->remoteName + wxS( "/" ) + outcome->branch;
                 outcome->checked = true;
             },
             [this, common, outcome, aRetriedAfterTrust]()
@@ -463,20 +493,32 @@ void PANEL_GIT_BRANCHES::onForcePush( bool aRetriedAfterTrust )
 
                 wxRichMessageDialog confirm(
                         this,
-                        wxString::Format( _( "Force push replaces '%s' with your local '%s'.\n\n"
+                        wxString::Format( _( "Force push replaces '%s' at %s with your local '%s'.\n\n"
                                              "Commits that exist only on the remote will be lost." ),
-                                          outcome->upstream, outcome->branch ),
+                                          outcome->upstream, KIGIT::StripEmbeddedUserinfo( outcome->pushUrl ),
+                                          outcome->branch ),
                         _( "Force Push" ), wxYES_NO | wxNO_DEFAULT | wxICON_WARNING | wxCENTER );
                 confirm.SetYesNoLabels( _( "Force &Push" ), _( "Cancel" ) );
 
-                if( confirm.ShowModal() == wxID_YES && m_dialog->SessionStillCurrent() )
-                    startForcePush( common, outcome->branch, outcome->headOid, aRetriedAfterTrust );
+                if( confirm.ShowModal() != wxID_YES || !m_dialog->SessionStillCurrent() )
+                    return;
+
+                // Two clicks during a keyring read each reach a confirmation, and the second must not replace the first
+                if( m_push.IsBusy() )
+                {
+                    KIGIT::ShowBusyMessage( this );
+                    return;
+                }
+
+                startForcePush( common, outcome->branch, outcome->headOid, outcome->remoteName, outcome->pushUrl,
+                                aRetriedAfterTrust );
             } );
 }
 
 
 void PANEL_GIT_BRANCHES::startForcePush( std::shared_ptr<KIGIT_COMMON> aCommon, const wxString& aExpectedBranch,
-                                         const wxString& aExpectedHeadOid, bool aRetriedAfterTrust )
+                                         const wxString& aExpectedHeadOid, const wxString& aRemoteName,
+                                         const wxString& aPushUrl, bool aRetriedAfterTrust )
 {
     // Carried rather than captured by reference, because Start returns before the work runs.
     struct OUTCOME
@@ -492,11 +534,15 @@ void PANEL_GIT_BRANCHES::startForcePush( std::shared_ptr<KIGIT_COMMON> aCommon, 
 
     auto outcome = std::make_shared<OUTCOME>();
 
-    m_dialog->SetPaneTransferBusy( true, _( "Pushing..." ) );
+    m_pushBusy.Begin( aCommon, _( "Pushing..." ),
+                      [this]()
+                      {
+                          m_push.Cancel();
+                      } );
 
     bool started = m_push.Start(
             "git force push",
-            [aCommon, outcome, aExpectedBranch, aExpectedHeadOid, alive = m_push.Alive(),
+            [aCommon, outcome, aExpectedBranch, aExpectedHeadOid, aRemoteName, aPushUrl, alive = m_push.Alive(),
              dialog = m_dialog]( const KIGIT_COMMON::CANCEL_TOKEN& aToken )
             {
                 GIT_PUSH_HANDLER handler( aCommon.get() );
@@ -509,6 +555,7 @@ void PANEL_GIT_BRANCHES::startForcePush( std::shared_ptr<KIGIT_COMMON> aCommon, 
                 handler.SetCancelToken( aToken );
                 handler.SetWaitForActionLock( true );
                 handler.SetExpectedTarget( aExpectedBranch, aExpectedHeadOid );
+                handler.SetExpectedDestination( aRemoteName, aPushUrl );
                 outcome->result = handler.PerformPush( true );
                 KIGIT_ERROR_MESSAGE error = handler.PopError();
                 outcome->error = error.summary;
@@ -535,33 +582,43 @@ void PANEL_GIT_BRANCHES::startForcePush( std::shared_ptr<KIGIT_COMMON> aCommon, 
                 if( !m_dialog->SessionStillCurrent() )
                     return;
 
-                m_dialog->SetPaneTransferBusy( false );
+                m_pushBusy.Release();
 
                 if( !outcome->cancelled && outcome->result == PushResult::Success )
                     KIGIT::ClearSyncWarnings( aCommon.get() );
 
                 if( outcome->cancelled || outcome->result == PushResult::Success )
+                {
+                    m_credentialPrompts = 0;
                     return;
+                }
 
                 if( outcome->result == PushResult::Busy )
                 {
+                    m_credentialPrompts = 0;
                     KIGIT::ShowBusyMessage( this );
                     return;
                 }
 
-                if( outcome->hostKey )
-                {
-                    if( KIGIT::PromptToTrustHost( this, *outcome->hostKey, aRetriedAfterTrust ) )
-                        onForcePush( true );
+                KIGIT::TRANSFER_FAILURE failure;
+                failure.authFailure = outcome->authFailure;
+                failure.hostKey = outcome->hostKey;
+                failure.error = outcome->error;
 
-                    return;
-                }
-
-                if( outcome->authFailure
-                    && KIGIT::PromptForCredentials( this, aCommon.get(), &m_frame->Prj(), outcome->error ) )
+                switch( KIGIT::AnswerTransferFailure( this, m_push.Alive(), aCommon.get(), &m_frame->Prj(), failure,
+                                                      aRetriedAfterTrust, m_credentialPrompts ) )
                 {
-                    onForcePush( aRetriedAfterTrust );
-                    return;
+                case KIGIT::TRANSFER_RETRY::RETRY: onForcePush( aRetriedAfterTrust ); return;
+
+                case KIGIT::TRANSFER_RETRY::RETRY_TRUSTED: onForcePush( true ); return;
+
+                // Declining a prompt is the user's answer, not an error
+                case KIGIT::TRANSFER_RETRY::CANCELLED: m_dialog->ShowTransferProgress( _( "Cancelled." ) ); return;
+
+                case KIGIT::TRANSFER_RETRY::HOST_DECLINED:
+                case KIGIT::TRANSFER_RETRY::GONE: return;
+
+                case KIGIT::TRANSFER_RETRY::REPORT: break;
                 }
 
                 wxString error = outcome->error;
@@ -574,7 +631,7 @@ void PANEL_GIT_BRANCHES::startForcePush( std::shared_ptr<KIGIT_COMMON> aCommon, 
 
     if( !started )
     {
-        m_dialog->SetPaneTransferBusy( false );
+        m_pushBusy.Release();
         DisplayInfoMessage( this, _( "Could not start the force push." ) );
     }
 }

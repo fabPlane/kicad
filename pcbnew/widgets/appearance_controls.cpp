@@ -36,6 +36,7 @@
 #include <pcbnew_settings.h>
 #include <footprint_editor_settings.h>
 #include <gal/graphics_abstraction_layer.h>
+#include <math/util.h>
 #include <project.h>
 #include <project/project_local_settings.h>
 #include <settings/color_settings.h>
@@ -1370,25 +1371,18 @@ void APPEARANCE_CONTROLS::setVisibleLayers( const LSET& aLayers )
     else if( BOARD* board = m_frame->GetBoard() )
     {
         const LSET before = board->GetVisibleLayers();
-        const LSET changed = before ^ aLayers;
 
         board->SetVisibleLayers( aLayers );
 
-        // A retained scene tracks layer visibility itself, so only items on changed layers need
-        // repainting. Holes also depend on whether any physical layer is left.
+        // The last physical layer going away changes every hole
         const bool anyPhysicalBefore = ( before & LSET::PhysicalLayersMask() ).any();
         const bool anyPhysicalAfter = ( aLayers & LSET::PhysicalLayersMask() ).any();
-        const bool narrow = view->GetGAL() && view->GetGAL()->HasRetainedScene()
-                            && anyPhysicalBefore == anyPhysicalAfter;
+        const bool narrow = anyPhysicalBefore == anyPhysicalAfter;
 
-        // Note: KIGFX::REPAINT isn't enough for things that go from invisible to visible as
-        // they won't be found in the view layer's itemset for repainting.
-        view->UpdateAllItemsConditionally( KIGFX::ALL,
+        // Visibility leaves view layers and bounding boxes alone, so repaint and skip the R-tree rebuild
+        view->UpdateAllItemsConditionally( KIGFX::REPAINT,
                 [&]( KIGFX::VIEW_ITEM* aItem ) -> bool
                 {
-                    // Items rendered to composite layers (such as LAYER_PAD_TH) must be redrawn
-                    // whether they're optionally flashed or not (as the layer being hidden/shown
-                    // might be the last layer the item is visible on).
                     if( !aItem->IsBOARD_ITEM() )
                         return false;
 
@@ -1397,7 +1391,7 @@ void APPEARANCE_CONTROLS::setVisibleLayers( const LSET& aLayers )
                     if( item->Type() != PCB_VIA_T && item->Type() != PCB_PAD_T )
                         return false;
 
-                    return !narrow || ( item->GetLayerSet() & changed ).any();
+                    return !narrow || KIGFX::PCB_PAINTER::VisibleLayersChangeDrawing( item, before, aLayers );
                 } );
 
         m_frame->Update3DView( true, m_frame->GetPcbNewSettings()->m_Display.m_Live3DRefresh );
@@ -1562,6 +1556,9 @@ std::vector<LAYER_PRESET> APPEARANCE_CONTROLS::GetUserLayerPresets() const
 
 void APPEARANCE_CONTROLS::SetUserLayerPresets( std::vector<LAYER_PRESET>& aPresetList )
 {
+    // Points into the map about to be rebuilt
+    m_lastSelectedUserPreset = nullptr;
+
     // Reset to defaults
     loadDefaultLayerPresets();
 
@@ -1576,6 +1573,9 @@ void APPEARANCE_CONTROLS::SetUserLayerPresets( std::vector<LAYER_PRESET>& aPrese
     }
 
     rebuildLayerPresetsWidget( true );
+
+    // The reset selects All Layers, which a later save would persist over what is actually shown
+    syncLayerPresetSelection();
 }
 
 
@@ -1637,6 +1637,7 @@ std::vector<VIEWPORT> APPEARANCE_CONTROLS::GetUserViewports() const
 void APPEARANCE_CONTROLS::SetUserViewports( std::vector<VIEWPORT>& aViewportList )
 {
     m_viewports.clear();
+    m_viewportMRU.clear();
 
     for( const VIEWPORT& viewport : aViewportList )
     {
@@ -2530,13 +2531,14 @@ void APPEARANCE_CONTROLS::syncObjectSettings()
               && m_objectSettingsMap.count( LAYER_FILLED_SHAPES )
               && m_objectSettingsMap.count( LAYER_OUTSIDE_GROUP_OPACITY ) );
 
-    m_objectSettingsMap[LAYER_TRACKS]->ctl_opacity->SetValue( opts.m_TrackOpacity * 100 );
-    m_objectSettingsMap[LAYER_VIAS]->ctl_opacity->SetValue( opts.m_ViaOpacity * 100 );
-    m_objectSettingsMap[LAYER_PADS]->ctl_opacity->SetValue( opts.m_PadOpacity * 100 );
-    m_objectSettingsMap[LAYER_ZONES]->ctl_opacity->SetValue( opts.m_ZoneOpacity * 100 );
-    m_objectSettingsMap[LAYER_DRAW_BITMAPS]->ctl_opacity->SetValue( opts.m_ImageOpacity * 100 );
-    m_objectSettingsMap[LAYER_FILLED_SHAPES]->ctl_opacity->SetValue( opts.m_FilledShapeOpacity * 100 );
-    m_objectSettingsMap[LAYER_OUTSIDE_GROUP_OPACITY]->ctl_opacity->SetValue( opts.m_OutsideGroupOpacity * 100 );
+    m_objectSettingsMap[LAYER_TRACKS]->ctl_opacity->SetValue( KiROUND( opts.m_TrackOpacity * 100 ) );
+    m_objectSettingsMap[LAYER_VIAS]->ctl_opacity->SetValue( KiROUND( opts.m_ViaOpacity * 100 ) );
+    m_objectSettingsMap[LAYER_PADS]->ctl_opacity->SetValue( KiROUND( opts.m_PadOpacity * 100 ) );
+    m_objectSettingsMap[LAYER_ZONES]->ctl_opacity->SetValue( KiROUND( opts.m_ZoneOpacity * 100 ) );
+    m_objectSettingsMap[LAYER_DRAW_BITMAPS]->ctl_opacity->SetValue( KiROUND( opts.m_ImageOpacity * 100 ) );
+    m_objectSettingsMap[LAYER_FILLED_SHAPES]->ctl_opacity->SetValue( KiROUND( opts.m_FilledShapeOpacity * 100 ) );
+    m_objectSettingsMap[LAYER_OUTSIDE_GROUP_OPACITY]->ctl_opacity->SetValue(
+            KiROUND( opts.m_OutsideGroupOpacity * 100 ) );
 }
 
 
@@ -2999,6 +3001,8 @@ void APPEARANCE_CONTROLS::onLayerPresetChanged( wxCommandEvent& aEvent )
 
                 if( m_currentPreset && m_currentPreset->name == presetName )
                     m_currentPreset = nullptr;
+
+                m_layerPresets.erase( presetName );
 
                 m_cbLayerPresets->Delete( idx );
             }

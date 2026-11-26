@@ -137,6 +137,8 @@ public:
 
     bool IsLibraryWritable( const wxString& aLibraryPath ) override;
 
+    void LeakCacheAtExit() override { m_leakCacheAtExit = true; }
+
     void GetAvailableSymbolFields( std::vector<wxString>& aNames ) override;
     void GetDefaultSymbolFields( std::vector<wxString>& aNames ) override;
 
@@ -162,7 +164,8 @@ private:
     void saveBusEntry( SCH_BUS_ENTRY_BASE* aBusEntry );
     void saveLine( SCH_LINE* aLine );
     void saveShape( SCH_SHAPE* aShape );
-    void saveRuleArea( SCH_RULE_AREA* aRuleArea );
+    void saveRuleArea( SCH_RULE_AREA* aRuleArea, const SCHEMATIC& aSchematic, const SCH_SHEET_LIST& aSheetList,
+                       bool aForClipboard, const SCH_SHEET_PATH* aRelativePath = nullptr );
     void saveText( SCH_TEXT* aText );
     void saveTextBox( SCH_TEXTBOX* aText );
     void saveTable( SCH_TABLE* aTable );
@@ -189,6 +192,7 @@ protected:
     SCHEMATIC*              m_schematic = nullptr;  ///< init() reads this before assigning it.
     OUTPUTFORMATTER*        m_out;              ///< The formatter for saving SCH_SCREEN objects.
     SCH_IO_KICAD_SEXPR_LIB_CACHE* m_cache;
+    bool                    m_leakCacheAtExit = false;
 
     /// initialize PLUGIN like a constructor would.
     void init( SCHEMATIC* aSchematic, const std::map<std::string, UTF8>* aProperties = nullptr );

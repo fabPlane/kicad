@@ -196,17 +196,23 @@ wxString PATHS::GetStockDataPath( bool aRespectRunFromBuildDir )
     if( aRespectRunFromBuildDir && RunningFromBuildDir() )
     {
         // Allow debugging from build dir by placing relevant files/folders in the build root
-#if defined( __WXMAC__ )
-        wxFileName fn;
-        fn.AssignDir( getOSXBundleRoot() );
-        fn.RemoveLastDir(); // Above the .app bundle
-        fn.RemoveLastDir(); // Above the target subdirectory to build root
-        path = fn.GetPath();
-#elif defined( __WXMSW__ )
-        path = getWindowsKiCadRoot();
-#else
         path = GetBuildRoot();
 
+#if defined( __WXMAC__ )
+        // KICAD_RUN_FROM_BUILD_DIR can be set outside a build tree
+        if( path.IsEmpty() )
+        {
+            wxFileName fn;
+            fn.AssignDir( getOSXBundleRoot() );
+            fn.RemoveLastDir(); // Above the .app bundle
+            fn.RemoveLastDir(); // Above the target subdirectory to build root
+            path = fn.GetPath();
+        }
+#elif defined( __WXMSW__ )
+        // KICAD_RUN_FROM_BUILD_DIR can be set outside a build tree
+        if( path.IsEmpty() )
+            path = getWindowsKiCadRoot();
+#else
         wxASSERT_MSG( !path.IsEmpty(), wxString::Format( wxT( "Could not find build root directory above %s" ),
                                                          GetExecutablePath() ) );
 #endif
@@ -666,6 +672,51 @@ const wxString& PATHS::GetExecutablePath()
 }
 
 
+wxString PATHS::GetExecutableDir()
+{
+#ifdef __WXMAC__
+    // The bundle root resolves symlinks and auxiliary bundles, unlike the raw executable path
+    wxFileName root = wxFileName::DirName( getOSXBundleRoot() );
+
+    if( !root.GetDirs().IsEmpty() && root.GetDirs().Last().Lower().EndsWith( wxS( ".app" ) ) )
+    {
+        root.AppendDir( wxS( "Contents" ) );
+        root.AppendDir( wxS( "MacOS" ) );
+    }
+
+    return root.GetPath();
+#else
+    // Unlike wxStandardPaths this knows the AppImage layout
+    return wxFileName::DirName( GetExecutablePath() ).GetPath();
+#endif
+}
+
+
+std::vector<wxString> PATHS::GetToolDirectories( const wxString& aExecutableDir )
+{
+    std::vector<wxString> dirs;
+
+    if( aExecutableDir.IsEmpty() )
+        return dirs;
+
+    dirs.emplace_back( wxFileName::DirName( aExecutableDir ).GetPath() );
+
+    // A macOS bundle keeps Python under Contents/Frameworks, probed on all platforms for testability
+    wxFileName python = wxFileName::DirName( aExecutableDir );
+    python.RemoveLastDir();
+    python.AppendDir( wxS( "Frameworks" ) );
+    python.AppendDir( wxS( "Python.framework" ) );
+    python.AppendDir( wxS( "Versions" ) );
+    python.AppendDir( wxS( "Current" ) );
+    python.AppendDir( wxS( "bin" ) );
+
+    if( python.DirExists() )
+        dirs.emplace_back( python.GetPath() );
+
+    return dirs;
+}
+
+
 wxString PATHS::ResolveSiblingExecutable( const wxString& aBaseName )
 {
 #ifdef __WXMAC__
@@ -697,13 +748,17 @@ const wxString& PATHS::GetBuildRoot()
 
 bool PATHS::RunningFromBuildDir()
 {
+#if defined( __WXMAC__ ) || defined( __WXMSW__ )
+    // The build root only locates stock data here; running from the tree stays opt-in
+    return wxGetEnv( wxT( "KICAD_RUN_FROM_BUILD_DIR" ), nullptr );
+#else
     return wxGetEnv( wxT( "KICAD_RUN_FROM_BUILD_DIR" ), nullptr ) || !GetBuildRoot().IsEmpty();
+#endif
 }
 
 
 wxString PATHS::FindKiCadBuildRoot( const wxString& aExecutablePath )
 {
-#if !defined( __WXMAC__ ) && !defined( __WXMSW__ )
     if( aExecutablePath.IsEmpty() )
         return wxEmptyString;
 
@@ -735,8 +790,4 @@ wxString PATHS::FindKiCadBuildRoot( const wxString& aExecutablePath )
         return wxEmptyString;
 
     return fn.GetPath();
-#else
-    wxUnusedVar( aExecutablePath );
-    return wxEmptyString;
-#endif
 }

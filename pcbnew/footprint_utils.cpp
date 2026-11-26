@@ -134,6 +134,65 @@ bool ComputeFootprintShift( const FOOTPRINT& aExisting, const FOOTPRINT& aNew, V
 }
 
 
+PAD_CHANGE_SUMMARY ComparePads( const FOOTPRINT& aPlaced, const FOOTPRINT& aLibrary )
+{
+    // Absorbs the rounding of library positions in footprints placed at arbitrary angles
+    const int tolerance = pcbIUScale.mmToIU( 0.001 );
+
+    struct PAD_GROUP
+    {
+        std::vector<VECTOR2I> libraryPositions;
+        int                   unmatchedPlaced = 0;
+    };
+
+    std::map<wxString, PAD_GROUP> groups;
+
+    for( PAD* pad : aLibrary.Pads() )
+    {
+        VECTOR2I pos = pad->GetLibraryPosition();
+
+        // A back-side footprint's library frame is mirrored, see ComputeFootprintShift
+        if( aPlaced.IsFlipped() != aLibrary.IsFlipped() )
+            MIRROR( pos.y, 0 );
+
+        groups[pad->GetNumber()].libraryPositions.push_back( pos );
+    }
+
+    for( PAD* pad : aPlaced.Pads() )
+    {
+        PAD_GROUP&             group = groups[pad->GetNumber()];
+        std::vector<VECTOR2I>& candidates = group.libraryPositions;
+        const VECTOR2I         placedPos = pad->GetLibraryPosition();
+
+        auto it = std::find_if( candidates.begin(), candidates.end(),
+                                [&]( const VECTOR2I& aPos )
+                                {
+                                    return std::abs( aPos.x - placedPos.x ) <= tolerance
+                                           && std::abs( aPos.y - placedPos.y ) <= tolerance;
+                                } );
+
+        if( it != candidates.end() )
+            candidates.erase( it );
+        else
+            group.unmatchedPlaced++;
+    }
+
+    PAD_CHANGE_SUMMARY summary;
+
+    for( const auto& [number, group] : groups )
+    {
+        const int unmatchedLibrary = static_cast<int>( group.libraryPositions.size() );
+        const int moved = std::min( unmatchedLibrary, group.unmatchedPlaced );
+
+        summary.moved += moved;
+        summary.added += unmatchedLibrary - moved;
+        summary.removed += group.unmatchedPlaced - moved;
+    }
+
+    return summary;
+}
+
+
 void FOOTPRINT_UTILS::CheckFootprintAttributes(
         const FOOTPRINT& aFootprint, const std::function<void( const wxString& )>& aErrorHandler )
 {
@@ -289,7 +348,18 @@ void FOOTPRINT_UTILS::CheckNetTies(
             copperItems.push_back( field );
     }
 
-    for( PCB_LAYER_ID layer : { F_Cu, In1_Cu, B_Cu } )
+    // Any copper layer which carries footprint copper can form a shorting group, including the
+    // inner layers used by buried graphics and non-component pads.
+
+    LSET copperLayers;
+
+    for( BOARD_ITEM* item : copperItems )
+        copperLayers |= item->GetLayerSet();
+
+    for( const PAD* pad : aFootprint.Pads() )
+        copperLayers |= pad->GetLayerSet();
+
+    for( PCB_LAYER_ID layer : copperLayers.CuStack() )
     {
         // Next, build a polygon-set for the copper on this layer.  We don't really care about
         // nets here, we just want to end up with a set of outlines describing the distinct
@@ -313,6 +383,13 @@ void FOOTPRINT_UTILS::CheckNetTies(
 
         for( const PAD* pad : aFootprint.Pads() )
         {
+            // PAD::GetEffectiveShape() will report the shape of the pad inferred for the given layer,
+            // but for single-layer pads like SMD/Non-component, this does not mean that the pad actually
+            // exists as copper on this layer.
+            // So check that there is actually copper here before assuming it can collide with the outline.
+            if( !pad->IsOnLayer( layer ) )
+                continue;
+
             for( int ii = 0; ii < copperOutlines.OutlineCount(); ++ii )
             {
                 if( pad->GetEffectiveShape( layer )->Collide( &copperOutlines.Outline( ii ), 0 ) )

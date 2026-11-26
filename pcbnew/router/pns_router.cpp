@@ -50,6 +50,7 @@
 #include "pns_meander_placer.h"
 #include "pns_meander_skew_placer.h"
 #include "pns_dp_meander_placer.h"
+#include "pns_tracks_spreader.h"
 #include "pns_utils.h"
 #include "pns_diff_pair.h"
 
@@ -147,7 +148,7 @@ const ITEM_SET ROUTER::QueryHoverItems( const VECTOR2I& aP, int aSlopRadius )
         node->QueryColliding( &test, obs, opts );
 
         DIFF_PAIR_PLACER* dpPlacer = static_cast<DIFF_PAIR_PLACER*>( Placer() );
-        auto              currentDP = dpPlacer->CurrentTrace();
+        const DIFF_PAIR   currentDP = dpPlacer->CurrentTrace();
 
         int distP = std::numeric_limits<int>::max();
         int distN = std::numeric_limits<int>::max();
@@ -208,8 +209,8 @@ const ITEM_SET ROUTER::QueryHoverItems( const VECTOR2I& aP, int aSlopRadius )
         test.SetLayers( PNS_LAYER_RANGE::All() );
 
         opts.m_differentNetsOnly = false;
-        opts.m_overrideClearance = aSlopRadius;
-
+        opts.SetFixedClearanceOverride( aSlopRadius );
+        
         node->QueryColliding( &test, obs, opts );
 
         for( const OBSTACLE& obstacle : obs )
@@ -232,14 +233,14 @@ bool ROUTER::StartDragging( const VECTOR2I& aP, ITEM* aItem, int aDragMode )
 
 bool ROUTER::hasDiffPairMembers( const ITEM_SET& aItems ) const
 {
-     auto rr = GetRuleResolver();
+    RULE_RESOLVER* rr = GetRuleResolver();
 
-    for( auto item : aItems.CItems() )
+    for( ITEM* item : aItems.CItems() )
     {
-
         if( item->OfKind( ITEM::SEGMENT_T | ITEM::ARC_T ) )
         {
             NET_HANDLE coupledNet = rr->DpCoupledNet( item->Net() );
+
             if( coupledNet )
             {
                 PNS_DBG( dbg(), Message, wxString::Format( wxT("found DP in itemset: %s/%s"),
@@ -258,11 +259,12 @@ bool ROUTER::StartDragging( const VECTOR2I& aP, ITEM_SET aStartItems, int aDragM
 {
     m_leaderSegments.clear();
     SetFailureReason( wxEmptyString );
-    auto dbg = GetInterface()->GetDebugDecorator();
+    DEBUG_DECORATOR* dbg = GetInterface()->GetDebugDecorator();
+
     if( aStartItems.Empty() )
         return false;
 
-    auto rr = GetRuleResolver();
+    RULE_RESOLVER* rr = GetRuleResolver();
     rr->ClearCaches();
 
     bool useMultidragger = aStartItems.Count( ITEM::SEGMENT_T | ITEM::ARC_T ) > 1;
@@ -459,8 +461,7 @@ bool ROUTER::isStartingPointRoutable( const VECTOR2I& aWhere, ITEM* aStartItem, 
         wxString          errorMsg;
 
         
-        if( !dpPlacer.FindDpPrimitivePair( m_world.get(), startPoint, aStartItem, dpPair,
-                                                    &errorMsg ) )
+        if( !dpPlacer.FindDpPrimitivePair( m_world.get(), startPoint, aStartItem, dpPair, &errorMsg ) )
         {
             SetFailureReason( errorMsg );
             return false;
@@ -472,12 +473,20 @@ bool ROUTER::isStartingPointRoutable( const VECTOR2I& aWhere, ITEM* aStartItem, 
 }
 
 
-bool ROUTER::StartRouting( const VECTOR2I& aP, ITEM* aStartItem, int aLayer )
+bool ROUTER::StartRouting( const VECTOR2I& aP, ITEM* aStartItem, int aLayer, const ITEM_SET& aAuxItems )
 {
     GetRuleResolver()->ClearCaches();
 
-    if( !isStartingPointRoutable( aP, aStartItem, aLayer ) )
-        return false;
+    if( m_mode == PNS_MODE_SPREAD_TRACKS )
+    {
+        if( !aStartItem )
+            return false;
+    }
+    else
+    {
+        if( !isStartingPointRoutable( aP, aStartItem, aLayer ) )
+            return false;
+    }
 
     switch( m_mode )
     {
@@ -501,6 +510,12 @@ bool ROUTER::StartRouting( const VECTOR2I& aP, ITEM* aStartItem, int aLayer )
         m_placer = std::make_unique<MEANDER_SKEW_PLACER>( this );
         break;
 
+    case PNS_MODE_SPREAD_TRACKS:
+        m_placer = std::make_unique<TRACKS_SPREADER>( this );
+	// fixme: ugly cast
+        static_cast<TRACKS_SPREADER*>( m_placer.get() )->SetSpreadableItems( aAuxItems );
+        break;
+
     default:
         return false;
     }
@@ -517,7 +532,18 @@ bool ROUTER::StartRouting( const VECTOR2I& aP, ITEM* aStartItem, int aLayer )
         if( m_logger )
         {
             m_logger->Clear();
-            m_logger->Log( LOGGER::EVT_START_ROUTE, aP, aStartItem, &m_sizes, m_placer->CurrentLayer() );
+            std::vector<ITEM*> logItems;
+            logItems.push_back( aStartItem );
+
+            if( m_mode == PNS_MODE_SPREAD_TRACKS )
+            {
+                ITEM_SET spreadable = static_cast<TRACKS_SPREADER*>( m_placer.get() )->GetSpreadableItems();
+
+                for( ITEM* item : spreadable.Items() )
+                    logItems.push_back( item );
+            }
+
+            m_logger->LogM( LOGGER::EVT_START_ROUTE, aP, logItems, &m_sizes, m_placer->CurrentLayer() );
         }
 
         return true;
@@ -556,8 +582,7 @@ bool ROUTER::Move( const VECTOR2I& aP, ITEM* endItem )
 }
 
 
-bool ROUTER::GetNearestRatnestAnchor( VECTOR2I& aOtherEnd, PNS_LAYER_RANGE& aOtherEndLayers,
-                                      ITEM*& aOtherEndItem )
+bool ROUTER::GetNearestRatnestAnchor( VECTOR2I& aOtherEnd, PNS_LAYER_RANGE& aOtherEndLayers, ITEM*& aOtherEndItem )
 {
     // Can't finish something with no connections
     if( GetCurrentNets().empty() )
@@ -578,16 +603,12 @@ bool ROUTER::GetNearestRatnestAnchor( VECTOR2I& aOtherEnd, PNS_LAYER_RANGE& aOth
 
     // If the user has drawn a line, get the anchor nearest to the line end
     if( trace->SegmentCount() > 0 )
-    {
-        return topo.NearestUnconnectedAnchorPoint( trace, aOtherEnd, aOtherEndLayers,
-                                                   aOtherEndItem );
-    }
+        return topo.NearestUnconnectedAnchorPoint( trace, aOtherEnd, aOtherEndLayers, aOtherEndItem );
 
     // Otherwise, find the closest anchor to our start point
 
     // Get joint from placer start item
-    const JOINT* jt = lastNode->FindJoint( placer->CurrentStart(), placer->CurrentLayer(),
-                                           placer->CurrentNets()[0] );
+    const JOINT* jt = lastNode->FindJoint( placer->CurrentStart(), placer->CurrentLayer(), placer->CurrentNets()[0] );
 
     if( !jt )
         return false;

@@ -28,12 +28,15 @@
 #include "sim_plot_colors.h"
 #include "sim_plot_tab.h"
 #include "simulator_frame.h"
+#include "spice_value.h"
 #include "core/kicad_algo.h"
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 
+#include <wx/dcclient.h>
 
 
 static wxString formatFloat( double x, int nDigits )
@@ -46,6 +49,10 @@ static wxString formatFloat( double x, int nDigits )
         fmt = wxT( "%.0f" );
 
     rv.Printf( fmt, x );
+
+    // A tick a rounding error below zero would otherwise read "-0.0"
+    if( rv.StartsWith( wxS( "-" ) ) && rv.find_first_not_of( wxS( "-0." ) ) == wxString::npos )
+        rv = rv.Mid( 1 );
 
     return rv;
 }
@@ -143,6 +150,13 @@ public:
 
     wxString GetUnits() const { return m_unit; }
 
+    /// Change the quantity this axis measures, e.g. when a .dc sweep is re-targeted.
+    void SetUnits( const wxString& aUnit )
+    {
+        m_unit = aUnit;
+        m_base_axis_label.Clear();
+    }
+
 private:
     void formatLabels() override
     {
@@ -162,8 +176,13 @@ private:
         for( mpScaleBase::TICK_LABEL& l : T_PARENT::m_tickLabels )
             digits = std::max( digits, countDecimalDigits( l.pos / sf, MAX_DIGITS ) );
 
+        int minDigits = digits;
+
         do
         {
+            // Only this pass's labels decide whether another digit is needed.
+            duplicateLabels = false;
+
             for( size_t ii = 0; ii < T_PARENT::m_tickLabels.size(); ++ii )
             {
                 mpScaleBase::TICK_LABEL& l = T_PARENT::m_tickLabels[ii];
@@ -177,6 +196,13 @@ private:
         }
         while( duplicateLabels && ++digits <= MAX_DISAMBIGUATION_DIGITS );
 
+        // Indistinguishable at any digit count; go back to the short form.
+        if( duplicateLabels && digits > minDigits )
+        {
+            for( mpScaleBase::TICK_LABEL& l : T_PARENT::m_tickLabels )
+                l.label = formatFloat( l.pos / sf, minDigits );
+        }
+
         if( m_base_axis_label.IsEmpty() )
             m_base_axis_label = T_PARENT::GetName();
 
@@ -184,8 +210,8 @@ private:
     }
 
 private:
-    const wxString m_unit;
-    wxString       m_base_axis_label;
+    wxString m_unit;
+    wxString m_base_axis_label;
 };
 
 
@@ -219,9 +245,7 @@ public:
 
     void ResetDataRange() override
     {
-        m_minV = m_startTime;
-        m_maxV = m_endTime;
-        m_rangeSet = true;
+        SetDataRange( m_startTime, m_endTime );
     }
 
 protected:
@@ -1168,10 +1192,62 @@ wxString CURSOR::getID()
     for( const auto& [ id, cursor ] : m_trace->GetCursors() )
     {
         if( cursor == this )
-            return wxString::Format( _( "%d" ), id );
+            return wxString::Format( wxS( "%d" ), id );
     }
 
     return wxEmptyString;
+}
+
+
+bool TRACE::GetValueAtX( double aX, double* aY ) const
+{
+    size_t count = std::min( m_xs.size(), m_ys.size() );
+
+    if( count <= 1 )
+        return false;
+
+    size_t startIdx = 0;
+    size_t endIdx = count;
+    size_t sweepSize = GetSweepSize();
+
+    if( m_isMultiRun && GetSweepCount() > 1 && sweepSize != std::numeric_limits<size_t>::max() && sweepSize > 0 )
+    {
+        // Runs are concatenated one after another; only show the most recent one.  It may still
+        // be coming in, so start at its first sample rather than counting a whole run back from
+        // the end, which would straddle the previous run.
+        startIdx = std::min( static_cast<size_t>( GetSweepCount() - 1 ) * sweepSize,
+                             ( count - 1 ) / sweepSize * sweepSize );
+        endIdx = std::min( count, startIdx + sweepSize );
+    }
+
+    if( endIdx - startIdx < 2 )
+        return false;
+
+    auto beginIt = m_xs.begin() + startIdx;
+    auto endIt = m_xs.begin() + endIdx;
+
+    // a DC sweep can step downwards, in which case X is sorted the other way round
+    auto maxXIt = m_xs[endIdx - 1] < m_xs[startIdx] ? std::upper_bound( beginIt, endIt, aX, std::greater<double>() )
+                                                    : std::upper_bound( beginIt, endIt, aX );
+
+    if( maxXIt == beginIt || maxXIt == endIt )
+        return false;
+
+    size_t maxIdx = maxXIt - m_xs.begin();
+    size_t minIdx = maxIdx - 1;
+
+    const double leftX = m_xs[minIdx];
+    const double rightX = m_xs[maxIdx];
+    const double leftY = m_ys[minIdx];
+    const double rightY = m_ys[maxIdx];
+
+    if( leftX == rightX )
+        return false;
+
+    *aY = leftY + ( rightY - leftY ) / ( rightX - leftX ) * ( aX - leftX );
+
+    // a magnitude of zero plots as NaN, there is no value to read out
+    return std::isfinite( *aY );
 }
 
 
@@ -1327,6 +1403,149 @@ void CURSOR::UpdateReference()
 }
 
 
+void TRACK_CURSOR::Plot( wxDC& aDC, mpWindow& aWindow )
+{
+    if( !m_visible )
+        return;
+
+    // a Smith chart is drawn from the chart geometry, its X axis carries no readable value
+    if( m_view->IsSmithChart() )
+        return;
+
+    wxCoord leftPx = aWindow.GetMarginLeft();
+    wxCoord rightPx = aWindow.GetScrX() - aWindow.GetMarginRight();
+    wxCoord topPx = aWindow.GetMarginTop();
+    wxCoord bottomPx = aWindow.GetScrY() - aWindow.GetMarginBottom();
+
+    // each view converts the shared plot-space X with its own margins and scale
+    wxCoord mouseX = aWindow.x2p( m_plotX );
+
+    if( mouseX < leftPx || mouseX > rightPx )
+        return;
+
+    wxColour fg = aWindow.GetForegroundColour();
+    wxPen    linePen( fg, 1, wxPENSTYLE_DOT );
+
+    aDC.SetPen( linePen );
+    aDC.DrawLine( mouseX, topPx, mouseX, bottomPx );
+
+    // only the traces plotted on this view are read out here; the sibling views draw their own
+    std::vector<TRACE*> traces;
+
+    for( const auto& [name, trace] : m_plotTab->GetTraces() )
+    {
+        if( trace && trace->GetView() == m_view )
+            traces.push_back( trace );
+    }
+
+    if( traces.empty() )
+        return;
+
+    // set explicitly: layers are plotted in list order and leave their own font on the DC
+    aDC.SetFont( GetPlotFont() );
+
+    // All traces on a tab share the same X axis, so any one of them can convert the window's
+    // plot-space X (which may be log-transformed) back into the real X data value.
+    double dataX = traces.front()->s2x( m_plotX );
+
+    wxColour bg = aWindow.GetBackgroundColour();
+
+    // Pick a box colour scheme that contrasts with the plot's own background, so the box reads
+    // the same regardless of whether "Dark Mode Plots" is on.
+    double   luminance = 0.299 * bg.Red() + 0.587 * bg.Green() + 0.114 * bg.Blue();
+    bool     plotIsDark = luminance < 128;
+    wxColour boxBg = plotIsDark ? wxColour( 0, 0, 0, 220 ) : wxColour( 255, 255, 255, 220 );
+    wxColour boxDefaultText = plotIsDark ? *wxWHITE : *wxBLACK;
+
+    struct ROW
+    {
+        wxString label;
+        wxString value;
+        wxColour colour;
+    };
+
+    std::vector<ROW> rows;
+
+    SPICE_VALUE_FORMAT xFmt{ 4, wxS( "~" ) + m_view->GetUnitsX() };
+    rows.push_back( { m_view->GetLabelX() + wxS( ":" ), SPICE_VALUE( dataX ).ToString( xFmt ), boxDefaultText } );
+
+    for( TRACE* trace : traces )
+    {
+        double traceX = trace->s2x( m_plotX );
+        double y;
+
+        if( !trace->GetValueAtX( traceX, &y ) )
+            continue;
+
+        wxColour traceColour = trace->GetTraceColour();
+
+        // Mark the intersection point of the crosshair with the trace itself.
+        int markerY = aWindow.y2p( trace->y2s( y ) );
+
+        if( markerY >= topPx && markerY <= bottomPx )
+        {
+            wxBrush markerBrush( traceColour );
+            wxPen   markerPen( bg, 1 );
+
+            aDC.SetBrush( markerBrush );
+            aDC.SetPen( markerPen );
+            aDC.DrawCircle( mouseX, markerY, 4 );
+        }
+
+        SPICE_VALUE_FORMAT fmt{ 4, wxS( "~" ) + m_view->GetUnitsForTrace( trace ) };
+
+        rows.push_back( { trace->GetDisplayName() + wxS( ":" ), SPICE_VALUE( y ).ToString( fmt ), traceColour } );
+    }
+
+    if( rows.size() <= 1 )
+        return;
+
+    int labelWidth = 0;
+    int valueWidth = 0;
+    int rowHeight = 0;
+
+    for( const ROW& row : rows )
+    {
+        wxSize labelSize = aDC.GetTextExtent( row.label );
+        wxSize valueSize = aDC.GetTextExtent( row.value );
+
+        labelWidth = std::max( labelWidth, labelSize.x );
+        valueWidth = std::max( valueWidth, valueSize.x );
+        rowHeight = std::max( { rowHeight, labelSize.y, valueSize.y } );
+    }
+
+    const int columnGap = 8;
+    int       lineHeight = rowHeight + 2;
+    int       boxWidth = labelWidth + columnGap + valueWidth + 10;
+    int       boxHeight = lineHeight * (int) rows.size() + 6;
+
+    int boxX = mouseX + 12;
+
+    if( boxX + boxWidth > rightPx )
+        boxX = std::max( leftPx, mouseX - 12 - boxWidth );
+
+    int boxY = topPx + 4;
+
+    wxBrush brush( boxBg );
+    wxPen   boxPen( fg );
+
+    aDC.SetBrush( brush );
+    aDC.SetPen( boxPen );
+    aDC.DrawRectangle( boxX, boxY, boxWidth, boxHeight );
+
+    int textY = boxY + 3;
+    int valueRight = boxX + boxWidth - 5;
+
+    for( const ROW& row : rows )
+    {
+        aDC.SetTextForeground( row.colour );
+        aDC.DrawText( row.label, boxX + 5, textY );
+        aDC.DrawText( row.value, valueRight - aDC.GetTextExtent( row.value ).x, textY );
+        textY += lineHeight;
+    }
+}
+
+
 SIM_VIEW::SIM_VIEW( SIM_PLOT_TAB* aPlotTab, wxWindow* aParent ) :
         mpWindow( aParent, wxID_ANY ),
         m_axis_x( nullptr ),
@@ -1335,6 +1554,9 @@ SIM_VIEW::SIM_VIEW( SIM_PLOT_TAB* aPlotTab, wxWindow* aParent ) :
         m_axis_y3( nullptr ),
         m_legend( nullptr ),
         m_plotTab( aPlotTab ),
+        m_trackCursor( nullptr ),
+        m_suppressXSync( false ),
+        m_marginCheckPending( false ),
         m_smithGrid( nullptr ),
         m_smithChart( false ),
         m_smithZoom( 1.0 ),
@@ -1355,12 +1577,73 @@ SIM_VIEW::SIM_VIEW( SIM_PLOT_TAB* aPlotTab, wxWindow* aParent ) :
     // route the context-menu zoom commands to the Smith view
     for( int id : { mpID_ZOOM_IN, mpID_ZOOM_OUT, mpID_FIT, mpID_CENTER } )
         Bind( wxEVT_MENU, &SIM_VIEW::onSmithMenuCommand, this, id );
+
+    m_trackCursor = new TRACK_CURSOR( aPlotTab, this );
+    AddLayer( m_trackCursor );
+
+    Bind( wxEVT_MOTION, &SIM_VIEW::onPlotMouseMove, this );
+    Bind( wxEVT_LEAVE_WINDOW, &SIM_VIEW::onPlotMouseLeave, this );
+}
+
+
+bool SIM_VIEW::SetTrackCursorPlotX( double aPlotX )
+{
+    if( !m_trackCursor || ( m_trackCursor->IsVisible() && m_trackCursor->GetPlotX() == aPlotX ) )
+        return false;
+
+    m_trackCursor->SetPlotX( aPlotX );
+    return true;
+}
+
+
+bool SIM_VIEW::HideTrackCursor()
+{
+    if( !m_trackCursor || !m_trackCursor->IsVisible() )
+        return false;
+
+    m_trackCursor->SetHidden();
+    return true;
+}
+
+
+void SIM_VIEW::RaiseOverlays()
+{
+    // Layers are drawn in the order they were added, so re-adding the overlays last ensures
+    // they stay on top of (newly added) trace and cursor layers.  Their order here is their
+    // stacking order, with the track cursor -- the transient one -- on top.
+    for( mpLayer* overlay : { (mpLayer*) m_legend, (mpLayer*) m_trackCursor } )
+    {
+        if( overlay )
+        {
+            DelLayer( overlay, false, false );
+            AddLayer( overlay, false );
+        }
+    }
+}
+
+
+void SIM_VIEW::onPlotMouseMove( wxMouseEvent& aEvent )
+{
+    // the pointer is over one chart, but the crosshair is drawn on all of them
+    if( m_plotTab && m_plotTab->IsTrackCursorEnabled() )
+        m_plotTab->SetTrackCursorX( p2x( aEvent.GetX() ) );
+
+    aEvent.Skip();
+}
+
+
+void SIM_VIEW::onPlotMouseLeave( wxMouseEvent& aEvent )
+{
+    if( m_plotTab && m_plotTab->IsTrackCursorEnabled() )
+        m_plotTab->HideTrackCursor();
+
+    aEvent.Skip();
 }
 
 
 void SIM_VIEW::OnXViewChanged()
 {
-    if( m_plotTab )
+    if( m_plotTab && !m_suppressXSync )
         m_plotTab->SyncXView( this );
 }
 
@@ -1614,27 +1897,6 @@ void SIM_VIEW::updateAxes( int aNewTraceType )
         break;
     }
 
-    if( m_plotTab->GetSimType() == ST_TRAN || m_plotTab->GetSimType() == ST_DC )
-    {
-        if( m_axis_y3 )
-        {
-            SetMargins( 30, 160, 45, 70 );
-
-            if( m_axis_y2 )
-                m_axis_y2->SetNameAlign( mpALIGN_BORDER_RIGHT );
-
-            m_axis_y3->SetAlign( mpALIGN_BORDER_RIGHT );
-            m_axis_y3->SetNameAlign( mpALIGN_BORDER_RIGHT );
-        }
-        else
-        {
-            SetMargins( 30, 70, 45, 70 );
-
-            if( m_axis_y2 )
-                m_axis_y2->SetNameAlign( mpALIGN_RIGHT );
-        }
-    }
-
     if( m_axis_x )
         m_axis_x->SetFont( KIUI::GetStatusFont( this ) );
 
@@ -1647,7 +1909,79 @@ void SIM_VIEW::updateAxes( int aNewTraceType )
     if( m_axis_y3 )
         m_axis_y3->SetFont( KIUI::GetStatusFont( this ) );
 
+    // Visibility first: the margins depend on it.
     UpdateAxisVisibility();
+    UpdateMargins();
+}
+
+
+void SIM_VIEW::UpdateMargins()
+{
+    if( !m_inMarginRefit )
+        m_marginRefits = 0;
+
+    int  oldTop = GetMarginTop();
+    int  oldRight = GetMarginRight();
+    int  oldBottom = GetMarginBottom();
+    int  oldLeft = GetMarginLeft();
+    int  left = calcLeftMargin();
+    bool tranOrDC = m_plotTab->GetSimType() == ST_TRAN || m_plotTab->GetSimType() == ST_DC;
+    bool powerAxis = false;
+
+    // Stacked views share an X scale, so one Power axis widens every view's right margin
+    for( SIM_VIEW* view : m_plotTab->GetViews() )
+        powerAxis |= view->m_axis_y3 && view->m_axis_y3->IsVisible();
+
+    auto userOr = [this]( int aIndex, int aAuto )
+    {
+        return m_userMargins[aIndex] >= 0 ? m_userMargins[aIndex] : aAuto;
+    };
+
+    int right = userOr( 1, tranOrDC && powerAxis ? 160 : 70 );
+
+    // Reserve the Power margin only while the Power axis has traces.
+    if( tranOrDC && m_axis_y3 && m_axis_y3->IsVisible() )
+    {
+        SetMargins( userOr( 0, 30 ), right, userOr( 2, calcBottomMargin() ), left );
+
+        if( m_axis_y2 )
+            m_axis_y2->SetNameAlign( mpALIGN_BORDER_RIGHT );
+
+        m_axis_y3->SetAlign( mpALIGN_BORDER_RIGHT );
+        m_axis_y3->SetNameAlign( mpALIGN_BORDER_RIGHT );
+    }
+    else if( tranOrDC )
+    {
+        SetMargins( userOr( 0, 30 ), right, userOr( 2, calcBottomMargin() ), left );
+
+        if( m_axis_y2 )
+            m_axis_y2->SetNameAlign( mpALIGN_RIGHT );
+    }
+    else
+    {
+        // No third axis; only the left and bottom margins follow the plot.
+        SetMargins( userOr( 0, 30 ), userOr( 1, 70 ), userOr( 2, calcBottomMargin() ), left );
+    }
+
+    // Margins feed the data->pixel transform, so re-fit to the desired bounds (keeping zoom/pan).
+    if( GetMarginTop() != oldTop || GetMarginRight() != oldRight || GetMarginBottom() != oldBottom
+        || GetMarginLeft() != oldLeft )
+    {
+        // Siblings have their own margins, so don't mirror the X range onto them.
+        m_suppressXSync = true;
+        Fit( m_desiredXmin, m_desiredXmax, m_desiredYmin, m_desiredYmax );
+        m_suppressXSync = false;
+    }
+
+    // Stacked views share their side margins, and a sibling already at them stops the recursion
+    if( GetMarginLeft() != oldLeft || GetMarginRight() != oldRight )
+    {
+        for( SIM_VIEW* view : m_plotTab->GetViews() )
+        {
+            if( view != this && ( view->GetMarginLeft() != left || view->GetMarginRight() != right ) )
+                view->UpdateMargins();
+        }
+    }
 }
 
 
@@ -1671,54 +2005,44 @@ void SIM_VIEW::prepareDCAxes( int aNewTraceType )
             // Best efforts
         }
 
+        wxString unit;
+        wxString name;
+
         switch( ch )
         {
         // Make sure that we have a reliable default (even if incorrectly labeled)
         default:
         case 'v':
-            if( !m_axis_x )
-            {
-                m_axis_x = new LIN_SCALE<mpScaleX>( wxEmptyString, wxT( "V" ), mpALIGN_BOTTOM );
-                m_axis_x->SetNameAlign( mpALIGN_BOTTOM );
-                AddLayer( m_axis_x );
-            }
-
-            m_axis_x->SetName( _( "Voltage (swept)" ) );
+            unit = wxT( "V" );
+            name = _( "Voltage (swept)" );
             break;
-
         case 'i':
-            if( !m_axis_x )
-            {
-                m_axis_x = new LIN_SCALE<mpScaleX>( wxEmptyString, wxT( "A" ), mpALIGN_BOTTOM );
-                m_axis_x->SetNameAlign( mpALIGN_BOTTOM );
-                AddLayer( m_axis_x );
-            }
-
-            m_axis_x->SetName( _( "Current (swept)" ) );
+            unit = wxT( "A" );
+            name = _( "Current (swept)" );
             break;
-
         case 'r':
-            if( !m_axis_x )
-            {
-                m_axis_x = new LIN_SCALE<mpScaleX>( wxEmptyString, wxT( "Ω" ), mpALIGN_BOTTOM );
-                m_axis_x->SetNameAlign( mpALIGN_BOTTOM );
-                AddLayer( m_axis_x );
-            }
-
-            m_axis_x->SetName( _( "Resistance (swept)" ) );
+            unit = wxT( "Ω" );
+            name = _( "Resistance (swept)" );
             break;
-
         case 't':
-            if( !m_axis_x )
-            {
-                m_axis_x = new LIN_SCALE<mpScaleX>( wxEmptyString, wxT( "°C" ), mpALIGN_BOTTOM );
-                m_axis_x->SetNameAlign( mpALIGN_BOTTOM );
-                AddLayer( m_axis_x );
-            }
-
-            m_axis_x->SetName( _( "Temperature (swept)" ) );
+            unit = wxT( "°C" );
+            name = _( "Temperature (swept)" );
             break;
         }
+
+        if( !m_axis_x )
+        {
+            m_axis_x = new LIN_SCALE<mpScaleX>( wxEmptyString, unit, mpALIGN_BOTTOM );
+            m_axis_x->SetNameAlign( mpALIGN_BOTTOM );
+            AddLayer( m_axis_x );
+        }
+        else if( LIN_SCALE<mpScaleX>* linScale = dynamic_cast<LIN_SCALE<mpScaleX>*>( m_axis_x ) )
+        {
+            // Re-targeted sweeps keep their axes; update the unit.
+            linScale->SetUnits( unit );
+        }
+
+        m_axis_x->SetName( name );
 
         if( !m_axis_y1 )
         {
@@ -1746,15 +2070,93 @@ void SIM_VIEW::prepareDCAxes( int aNewTraceType )
 }
 
 
+void SIM_VIEW::SetUserMargins( int aTop, int aRight, int aBottom, int aLeft )
+{
+    const int margins[4] = { aTop, aRight, aBottom, aLeft };
+
+    for( int ii = 0; ii < 4; ++ii )
+        m_userMargins[ii] = std::max( margins[ii], -1 );
+
+    UpdateMargins();
+}
+
+
+int SIM_VIEW::calcBottomMargin() const
+{
+    wxClientDC dc( const_cast<SIM_VIEW*>( this ) );
+    dc.SetFont( KIUI::GetStatusFont( const_cast<SIM_VIEW*>( this ) ) );
+
+    int tx, ty;
+    dc.GetTextExtent( wxT( "0" ), &tx, &ty );
+
+    return ( ty * 2 ) + 20;
+}
+
+
+int SIM_VIEW::calcLeftMargin() const
+{
+    // Uses the axis' own label widths, so it is safe to call at the end of a paint.
+    int labels = 0;
+    int user = -1;
+
+    // Labels are inset 4px and clip beyond the margin.  All views share the widest margin.
+    for( SIM_VIEW* view : m_plotTab->GetViews() )
+    {
+        if( view->m_axis_y1 && view->m_axis_y1->IsVisible() )
+            labels = std::max( labels, view->m_axis_y1->GetMaxLabelWidth() + LABEL_MARGIN_PADDING );
+
+        user = std::max( user, view->m_userMargins[3] );
+    }
+
+    // A user-entered margin replaces the default minimum, but still makes room for the labels.
+    return std::max( user >= 0 ? user : MIN_MARGIN_LEFT, labels );
+}
+
+
+void SIM_VIEW::onPaintFinished()
+{
+    // Label widths are only known after painting; re-check once afterwards.
+    if( m_marginCheckPending )
+        return;
+
+    int needed = calcLeftMargin();
+    int current = GetMarginLeft();
+
+    // Grow at once, but don't follow every small shrink (see MARGIN_SHRINK_SLACK).
+    if( needed == current || ( needed < current && current - needed <= MARGIN_SHRINK_SLACK ) )
+    {
+        m_marginRefits = 0;
+        return;
+    }
+
+    if( m_marginRefits >= MAX_MARGIN_REFITS )
+        return;
+
+    m_marginRefits++;
+    m_marginCheckPending = true;
+
+    CallAfter(
+            [this]()
+            {
+                m_inMarginRefit = true;
+                UpdateMargins();
+                m_inMarginRefit = false;
+                m_marginCheckPending = false;
+            } );
+}
+
+
 void SIM_VIEW::EnsureThirdYAxisExists()
 {
     if( !m_axis_y3 )
     {
-        SetMargins( 30, 160, 45, 70 );
         m_axis_y3 = new LIN_SCALE<mpScaleY>( wxEmptyString, wxT( "W" ), mpALIGN_BORDER_RIGHT );
         m_axis_y3->SetNameAlign( mpALIGN_BORDER_RIGHT );
         m_axis_y3->SetMasterScale( m_axis_y1 );
         AddLayer( m_axis_y3 );
+
+        // Reserve the Power margin, honouring user margins.
+        UpdateMargins();
     }
 
     if( m_axis_y3 )
@@ -1892,6 +2294,9 @@ void SIM_VIEW::SetSmithChart( bool aEnable )
         m_smithGrid->SetFont( KIUI::GetStatusFont( this ) );
         m_smithGrid->SetPen( wxPen( m_plotTab->GetPlotColor( SIM_PLOT_COLORS::COLOR_SET::AXIS ), 1 ) );
         AddLayer( m_smithGrid );
+
+        // the chart is a backdrop; keep the floating overlays above it
+        RaiseOverlays();
     }
 
     if( m_smithGrid )
@@ -2180,7 +2585,9 @@ void SIM_VIEW::onSmithMenuCommand( wxCommandEvent& aEvent )
 SIM_PLOT_TAB::SIM_PLOT_TAB( const wxString& aSimCommand, wxWindow* parent ) :
         SIM_TAB( aSimCommand, parent ),
         m_dotted_cp( false ),
+        m_traceWidth( 2 ),
         m_syncingXView( false ),
+        m_trackCursorEnabled( false ),
         m_smithMode( false )
 {
     m_mouseWheelActions = convertMouseWheelActions( SIM_MOUSE_WHEEL_ACTION_SET::GetMouseDefaults() );
@@ -2246,23 +2653,54 @@ SIM_VIEW* SIM_PLOT_TAB::AddView()
     SIM_VIEW* view = new SIM_VIEW( this, this );
 
     view->LimitView( true );
-    view->SetMargins( 30, 70, 45, 70 );
+    view->SetMargins( 30, 70, view->calcBottomMargin(), 70 );
     view->SetMouseWheelActions( m_mouseWheelActions );
 
     view->updateAxes();
 
-    // a mpInfoLegend displays the name of traces on the left top panel corner:
-    mpInfoLegend* legend = new mpInfoLegend( wxRect( 0, 0, 200, 40 ), wxTRANSPARENT_BRUSH );
+    // Inside the plot area, so the opaque legend does not hide the Y axis name and top labels
+    mpInfoLegend* legend = new mpInfoLegend( wxRect( view->GetMarginLeft() + 8, view->GetMarginTop() + 8, 200, 40 ),
+                                             wxTRANSPARENT_BRUSH );
     legend->SetVisible( false );
     view->AddLayer( legend );
     view->m_legend = legend;
     view->m_lastLegendPosition = legend->GetPosition();
 
     view->EnableDoubleBuffer( true );
+    view->RaiseOverlays();
     view->SetSmithChart( m_smithMode );
+
+    // Fixed Y axis ranges apply across all views in the tab, so a newly added view must
+    // pick up whatever locks are already in effect on the existing ones.
+    if( SIM_VIEW* firstView = GetDefaultView() )
+    {
+        double min, max;
+
+        if( firstView->GetY1Scale( &min, &max ) )
+            view->SetY1Scale( true, min, max );
+
+        if( firstView->GetY2Scale( &min, &max ) )
+            view->SetY2Scale( true, min, max );
+
+        if( firstView->GetY3Scale( &min, &max ) )
+        {
+            view->EnsureThirdYAxisExists();
+            view->SetY3Scale( true, min, max );
+        }
+
+        // a chart added later matches the legend the tab is already showing
+        view->ShowLegend( firstView->IsLegendShown() );
+    }
 
     m_views.push_back( view );
     m_viewsSizer->Add( view, 1, wxALL | wxEXPAND, 1 );
+
+    // User margins apply to the whole tab.
+    if( m_views.size() > 1 )
+    {
+        view->SetUserMargins( m_views[0]->GetUserMargin( 0 ), m_views[0]->GetUserMargin( 1 ),
+                              m_views[0]->GetUserMargin( 2 ), m_views[0]->GetUserMargin( 3 ) );
+    }
 
     UpdatePlotColors();
 
@@ -2470,65 +2908,167 @@ wxString SIM_PLOT_TAB::GetUnitsY3() const
 }
 
 
+bool SIM_PLOT_TAB::getYScale( int aSlot, double* aMin, double* aMax ) const
+{
+    SIM_VIEW* defaultView = GetDefaultView();
+
+    if( !defaultView )
+        return false;
+
+    // A fixed range is applied to every view at once, so the default view's locked state (and
+    // value) speaks for the whole tab.
+    if( mpScaleY* axis = defaultView->GetAxisBySlot( aSlot ) )
+    {
+        if( axis->GetAxisMinMax( aMin, aMax ) )
+            return true;
+    }
+
+    // Not locked: propose a default range that covers the data in *every* view sharing this
+    // axis slot, not just the first view (which might not have any traces of this kind at all,
+    // e.g. no Current trace in view 1 even though later views plot one).
+    bool   haveRange = false;
+    double min = 0.0, max = 0.0;
+
+    for( SIM_VIEW* view : m_views )
+    {
+        mpScaleY* axis = view->GetAxisBySlot( aSlot );
+
+        if( !axis || !axis->IsRangeSet() )
+            continue;
+
+        double viewMin, viewMax;
+        axis->GetDataRange( viewMin, viewMax );
+
+        if( !haveRange )
+        {
+            min = viewMin;
+            max = viewMax;
+            haveRange = true;
+        }
+        else
+        {
+            min = std::min( min, viewMin );
+            max = std::max( max, viewMax );
+        }
+    }
+
+    if( haveRange )
+    {
+        *aMin = min;
+        *aMax = max;
+    }
+
+    return false;
+}
+
+
 bool SIM_PLOT_TAB::GetY1Scale( double* aMin, double* aMax ) const
 {
-    SIM_VIEW* view = GetDefaultView();
-    return view && view->GetY1Scale( aMin, aMax );
+    return getYScale( 1, aMin, aMax );
 }
 
 
 bool SIM_PLOT_TAB::GetY2Scale( double* aMin, double* aMax ) const
 {
-    SIM_VIEW* view = GetDefaultView();
-    return view && view->GetY2Scale( aMin, aMax );
+    return getYScale( 2, aMin, aMax );
 }
 
 
 bool SIM_PLOT_TAB::GetY3Scale( double* aMin, double* aMax ) const
 {
-    SIM_VIEW* view = GetDefaultView();
-    return view && view->GetY3Scale( aMin, aMax );
+    return getYScale( 3, aMin, aMax );
 }
 
 
 void SIM_PLOT_TAB::SetY1Scale( bool aLock, double aMin, double aMax )
 {
-    if( SIM_VIEW* view = GetDefaultView() )
-        view->SetY1Scale( aLock, aMin, aMax );
+    // Stacked views need not all have this axis
+    for( SIM_VIEW* view : m_views )
+    {
+        if( !view->GetLabelY1().IsEmpty() )
+            view->SetY1Scale( aLock, aMin, aMax );
+    }
 }
 
 
 void SIM_PLOT_TAB::SetY2Scale( bool aLock, double aMin, double aMax )
 {
-    if( SIM_VIEW* view = GetDefaultView() )
-        view->SetY2Scale( aLock, aMin, aMax );
+    // Stacked views need not all have this axis
+    for( SIM_VIEW* view : m_views )
+    {
+        if( !view->GetLabelY2().IsEmpty() )
+            view->SetY2Scale( aLock, aMin, aMax );
+    }
 }
 
 
 void SIM_PLOT_TAB::SetY3Scale( bool aLock, double aMin, double aMax )
 {
-    if( SIM_VIEW* view = GetDefaultView() )
-        view->SetY3Scale( aLock, aMin, aMax );
+    // Stacked views need not all have this axis
+    for( SIM_VIEW* view : m_views )
+    {
+        if( !view->GetLabelY3().IsEmpty() )
+            view->SetY3Scale( aLock, aMin, aMax );
+    }
 }
 
 
 void SIM_PLOT_TAB::EnsureThirdYAxisExists()
 {
-    if( SIM_VIEW* view = GetDefaultView() )
+    for( SIM_VIEW* view : m_views )
         view->EnsureThirdYAxisExists();
 }
 
 
 void SIM_PLOT_TAB::UpdatePlotColors()
 {
+    wxColour bg = m_colors.GetPlotColor( SIM_PLOT_COLORS::COLOR_SET::BACKGROUND );
+    wxColour fg = m_colors.GetPlotColor( SIM_PLOT_COLORS::COLOR_SET::FOREGROUND );
+    wxColour axis = m_colors.GetPlotColor( SIM_PLOT_COLORS::COLOR_SET::AXIS );
+
     for( SIM_VIEW* view : m_views )
     {
-        view->SetColourTheme( m_colors.GetPlotColor( SIM_PLOT_COLORS::COLOR_SET::BACKGROUND ),
-                              m_colors.GetPlotColor( SIM_PLOT_COLORS::COLOR_SET::FOREGROUND ),
-                              m_colors.GetPlotColor( SIM_PLOT_COLORS::COLOR_SET::AXIS ) );
+        view->SetColourTheme( bg, fg, axis );
+
+        // Opaque, framed background so the labels stay readable over traces.
+        if( view->m_legend )
+        {
+            view->m_legend->SetBrush( wxBrush( bg ) );
+            view->m_legend->SetPen( wxPen( axis, 1 ) );
+        }
 
         view->UpdateSmithGridColor();
         view->UpdateAll();
+    }
+}
+
+
+void SIM_PLOT_TAB::EnableTrackCursor( bool aEnable )
+{
+    m_trackCursorEnabled = aEnable;
+
+    if( !aEnable )
+        HideTrackCursor();
+}
+
+
+void SIM_PLOT_TAB::SetTrackCursorX( double aPlotX )
+{
+    // only redraw when the crosshair actually moved (e.g. not for vertical-only mouse motion)
+    for( SIM_VIEW* view : m_views )
+    {
+        if( view->SetTrackCursorPlotX( aPlotX ) )
+            view->UpdateAll();
+    }
+}
+
+
+void SIM_PLOT_TAB::HideTrackCursor()
+{
+    for( SIM_VIEW* view : m_views )
+    {
+        if( view->HideTrackCursor() )
+            view->UpdateAll();
     }
 }
 
@@ -2625,8 +3165,10 @@ void SIM_PLOT_TAB::UpdateTraceStyle( TRACE* trace )
     else
         penStyle = wxPENSTYLE_SOLID;
 
-    trace->SetPen( wxPen( trace->GetTraceColour(), 2, penStyle ) );
-    m_sessionTraceColors[trace->GetName()] = trace->GetTraceColour();
+    trace->SetPen( wxPen( trace->GetTraceColour(), m_traceWidth, penStyle ) );
+
+    // Keyed by vector: the layer name may be renamed.
+    m_sessionTraceColors[trace->GetVectorName()] = trace->GetTraceColour();
 }
 
 
@@ -2676,6 +3218,11 @@ TRACE* SIM_PLOT_TAB::GetOrAddTrace( const wxString& aVectorName, int aType, SIM_
 
         trace->SetView( aView );
         aView->AddLayer( (mpLayer*) trace );
+        aView->RaiseOverlays();
+
+        // The trace didn't exist when updateAxes() ran; refresh visibility and margins now.
+        aView->UpdateAxisVisibility();
+        aView->UpdateMargins();
     }
 
     return trace;
@@ -2773,6 +3320,7 @@ void SIM_PLOT_TAB::DeleteTrace( TRACE* aTrace )
 
         view->DelLayer( aTrace, true, true );
         view->UpdateAxisVisibility();
+        view->UpdateMargins();
         view->UpdateSmithReferenceImpedance();
     }
 
@@ -2826,6 +3374,7 @@ void SIM_PLOT_TAB::EnableCursor( TRACE* aTrace, int aCursorId, const wxString& a
 
     aTrace->SetCursor( aCursorId, cursor );
     view->AddLayer( cursor );
+    view->RaiseOverlays();
 
     // Notify the parent window about the changes
     wxQueueEvent( this, new wxCommandEvent( EVT_SIM_CURSOR_UPDATE ) );

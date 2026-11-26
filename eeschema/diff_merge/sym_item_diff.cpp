@@ -19,13 +19,19 @@
  */
 
 #include <diff_merge/sym_item_diff.h>
+#include <diff_merge/auto_resolution.h>
 #include <diff_merge/property_diff.h>
+#include <diff_merge/kicad_merge_engine.h>
+#include <diff_merge/sym_lib_differ.h>
 
 #include <lib_symbol.h>
+#include <richio.h>
+#include <sch_io/kicad_sexpr/sch_io_kicad_sexpr.h>
 #include <sch_field.h>
 #include <sch_item.h>
 #include <sch_pin.h>
 
+#include <algorithm>
 #include <map>
 #include <set>
 
@@ -35,7 +41,7 @@ namespace KICAD_DIFF
 
 namespace
 {
-    wxString graphicTypeName( const SCH_ITEM* aItem )
+    wxString graphicTypeName( const EDA_ITEM* aItem )
     {
         switch( aItem->Type() )
         {
@@ -43,44 +49,6 @@ namespace
         case SCH_TEXT_T:    return _( "Text" );
         case SCH_TEXTBOX_T: return _( "Text Box" );
         default:            return _( "Item" );
-        }
-    }
-
-
-    void diffKeyed( std::vector<SYM_ELEMENT>& aOut, const wxString& aTypeName,
-                    const std::map<wxString, const EDA_ITEM*>& aBefore,
-                    const std::map<wxString, const EDA_ITEM*>& aAfter )
-    {
-        std::set<wxString> keys;
-
-        for( const auto& [key, item] : aBefore )
-            keys.insert( key );
-
-        for( const auto& [key, item] : aAfter )
-            keys.insert( key );
-
-        for( const wxString& key : keys )
-        {
-            auto            beforeIt = aBefore.find( key );
-            auto            afterIt = aAfter.find( key );
-            const EDA_ITEM* before = beforeIt != aBefore.end() ? beforeIt->second : nullptr;
-            const EDA_ITEM* after = afterIt != aAfter.end() ? afterIt->second : nullptr;
-
-            if( before && after )
-            {
-                std::vector<PROPERTY_DELTA> deltas = DiffItemProperties( before, after );
-
-                if( !deltas.empty() )
-                    aOut.push_back( { after, aTypeName, key, CHANGE_KIND::MODIFIED, std::move( deltas ) } );
-            }
-            else if( before )
-            {
-                aOut.push_back( { before, aTypeName, key, CHANGE_KIND::REMOVED, ItemProperties( before, false ) } );
-            }
-            else
-            {
-                aOut.push_back( { after, aTypeName, key, CHANGE_KIND::ADDED, ItemProperties( after, true ) } );
-            }
         }
     }
 
@@ -122,9 +90,9 @@ namespace
     }
 
 
-    std::vector<const SCH_ITEM*> graphics( const LIB_SYMBOL* aSym )
+    std::vector<const EDA_ITEM*> graphics( const LIB_SYMBOL* aSym )
     {
-        std::vector<const SCH_ITEM*> out;
+        std::vector<const EDA_ITEM*> out;
 
         if( aSym )
         {
@@ -140,90 +108,139 @@ namespace
 } // namespace
 
 
-std::vector<SYM_ELEMENT> DiffSymbolElements( const LIB_SYMBOL* aBefore, const LIB_SYMBOL* aAfter )
+std::vector<LIB_ELEMENT> DiffSymbolElements( const LIB_SYMBOL* aBefore, const LIB_SYMBOL* aAfter )
 {
-    std::vector<SYM_ELEMENT> out;
+    std::vector<LIB_ELEMENT> out;
 
-    diffKeyed( out, _( "Pin" ), pinsByNumber( aBefore ), pinsByNumber( aAfter ) );
-    diffKeyed( out, _( "Field" ), fieldsByName( aBefore ), fieldsByName( aAfter ) );
-
-    std::vector<const SCH_ITEM*> beforeGraphics = graphics( aBefore );
-    std::vector<const SCH_ITEM*> afterGraphics = graphics( aAfter );
-    std::set<const SCH_ITEM*>    matchedBefore;
-    std::set<const SCH_ITEM*>    matchedAfter;
-
-    // Pass 1: consume graphics the property diff sees as identical so unchanged
-    // geometry never shows up.
-    for( const SCH_ITEM* after : afterGraphics )
-    {
-        for( const SCH_ITEM* before : beforeGraphics )
-        {
-            if( matchedBefore.count( before ) || before->Type() != after->Type() )
-                continue;
-
-            if( DiffItemProperties( before, after ).empty() )
-            {
-                matchedBefore.insert( before );
-                matchedAfter.insert( after );
-                break;
-            }
-        }
-    }
-
-    // Pass 2: pair each leftover after-graphic with its nearest same-type
-    // leftover before-graphic (a modified shape), else it is newly added.
-    for( const SCH_ITEM* after : afterGraphics )
-    {
-        if( matchedAfter.count( after ) )
-            continue;
-
-        const SCH_ITEM* best = nullptr;
-        double          bestDist = 0.0;
-
-        for( const SCH_ITEM* before : beforeGraphics )
-        {
-            if( matchedBefore.count( before ) || before->Type() != after->Type() )
-                continue;
-
-            VECTOR2I delta = before->GetPosition() - after->GetPosition();
-            double   dist = (double) delta.x * delta.x + (double) delta.y * delta.y;
-
-            if( !best || dist < bestDist )
-            {
-                best = before;
-                bestDist = dist;
-            }
-        }
-
-        if( best )
-        {
-            matchedBefore.insert( best );
-
-            std::vector<PROPERTY_DELTA> deltas = DiffItemProperties( best, after );
-
-            if( !deltas.empty() )
-            {
-                out.push_back( { after, graphicTypeName( after ), wxEmptyString, CHANGE_KIND::MODIFIED,
-                                 std::move( deltas ) } );
-            }
-        }
-        else
-        {
-            out.push_back( { after, graphicTypeName( after ), wxEmptyString, CHANGE_KIND::ADDED,
-                             ItemProperties( after, true ) } );
-        }
-    }
-
-    for( const SCH_ITEM* before : beforeGraphics )
-    {
-        if( !matchedBefore.count( before ) )
-        {
-            out.push_back( { before, graphicTypeName( before ), wxEmptyString, CHANGE_KIND::REMOVED,
-                             ItemProperties( before, false ) } );
-        }
-    }
+    DiffKeyedElements( out, _( "Pin" ), pinsByNumber( aBefore ), pinsByNumber( aAfter ) );
+    DiffKeyedElements( out, _( "Field" ), fieldsByName( aBefore ), fieldsByName( aAfter ) );
+    DiffUnkeyedElements( out, graphics( aBefore ), graphics( aAfter ), graphicTypeName );
 
     return out;
+}
+
+
+std::unique_ptr<LIB_SYMBOL> CombineSymbolEdits( const LIB_SYMBOL& aAncestor, const LIB_SYMBOL& aOurs,
+                                                const LIB_SYMBOL& aTheirs, const ITEM_CHANGE& aOurChange,
+                                                const ITEM_CHANGE& aTheirChange )
+{
+    // Edits are compared on flattened symbols, so an inherited field cannot be copied back safely
+    if( aOurs.IsDerived() || aTheirs.IsDerived() )
+        return nullptr;
+
+    auto onlyFields = []( const ITEM_CHANGE& aChange )
+    {
+        return std::ranges::all_of( aChange.children,
+                                    []( const ITEM_CHANGE& aChild )
+                                    {
+                                        return aChild.typeName == _( "Field" ) && aChild.refdes
+                                               && aChild.kind != CHANGE_KIND::REMOVED;
+                                    } );
+    };
+
+    const bool theirsDonates = onlyFields( aTheirChange );
+
+    if( !theirsDonates && !onlyFields( aOurChange ) )
+        return nullptr;
+
+    const std::set<wxString> ourNames = EditedNames( aOurChange );
+    const std::set<wxString> theirNames = EditedNames( aTheirChange );
+
+    // A rename moves the symbol to another key, which a field copy cannot follow
+    if( ourNames.contains( wxS( "Name" ) ) || theirNames.contains( wxS( "Name" ) ) )
+        return nullptr;
+
+    if( std::ranges::any_of( ourNames, [&]( const wxString& aName ) { return theirNames.contains( aName ); } ) )
+        return nullptr;
+
+    const LIB_SYMBOL&  donor = theirsDonates ? aTheirs : aOurs;
+    const ITEM_CHANGE& donation = theirsDonates ? aTheirChange : aOurChange;
+
+    auto donate = [&]( const LIB_SYMBOL& aBase ) -> std::unique_ptr<LIB_SYMBOL>
+    {
+        auto target = std::make_unique<LIB_SYMBOL>( aBase );
+
+        for( const ITEM_CHANGE& child : donation.children )
+        {
+            const SCH_FIELD* from = donor.GetField( *child.refdes );
+
+            if( !from )
+                return nullptr;
+
+            if( SCH_FIELD* to = target->GetField( *child.refdes ) )
+                *to = *from;
+            else
+                target->AddField( new SCH_FIELD( *from ) );
+        }
+
+        std::vector<PROPERTY_RESOLUTION> props;
+
+        for( const PROPERTY_DELTA& delta : donation.properties )
+        {
+            PROPERTY_RESOLUTION prop;
+            prop.name = delta.name;
+            prop.kind = PROP_RES::THEIRS;
+            props.push_back( std::move( prop ) );
+        }
+
+        if( ApplyPropertyResolutions( target.get(), props, nullptr, &donor, nullptr ).failed > 0 )
+            return nullptr;
+
+        return target;
+    };
+
+    // The saved form holds everything a symbol carries, including state no diff reports
+    auto saved = []( const LIB_SYMBOL& aSymbol )
+    {
+        LIB_SYMBOL       copy( aSymbol );
+        STRING_FORMATTER formatter;
+
+        SCH_IO_KICAD_SEXPR::FormatLibSymbol( &copy, formatter );
+        return formatter.GetString();
+    };
+
+    // Judge the merge as it will be written, since a symbol can hold state its file drops
+    auto reload = [&]( const LIB_SYMBOL& aSymbol ) -> std::unique_ptr<LIB_SYMBOL>
+    {
+        std::string text = saved( aSymbol );
+
+        try
+        {
+            std::vector<LIB_SYMBOL*> parsed = SCH_IO_KICAD_SEXPR::ParseLibSymbols( text, "combined symbol" );
+            std::vector<std::unique_ptr<LIB_SYMBOL>> owned( parsed.begin(), parsed.end() );
+
+            if( owned.size() == 1 )
+                return std::move( owned.front() );
+
+            return nullptr;
+        }
+        catch( const IO_ERROR& )
+        {
+            return nullptr;
+        }
+    };
+
+    std::unique_ptr<LIB_SYMBOL> replay = donate( aAncestor );
+
+    if( !replay || saved( *replay ) != saved( donor ) )
+        return nullptr;
+
+    std::unique_ptr<LIB_SYMBOL> merged = donate( theirsDonates ? aOurs : aTheirs );
+
+    if( merged )
+        merged = reload( *merged );
+
+    const wxString& name = aAncestor.GetName();
+
+    // A donated property can undo the other side's edit, as a lower unit count drops its pins
+    if( !merged
+        || !SYM_LIB_DIFFER::MergeKeepsBothSides( { { name, &aAncestor } }, { { name, &aOurs } },
+                                                 { { name, &aTheirs } }, { { name, merged.get() } } ) )
+    {
+        return nullptr;
+    }
+
+    return merged;
 }
 
 } // namespace KICAD_DIFF

@@ -21,6 +21,7 @@
  */
 
 #include <atomic>
+#include <map>
 #include <stack>
 #include <vector>
 #include <wx/filefn.h>
@@ -49,6 +50,7 @@
 #include <sch_junction.h>
 #include <sch_line.h>
 #include <sch_marker.h>
+#include <sch_rule_area.h>
 #include <sch_sheet.h>
 #include <sch_sheet_pin.h>
 #include <sch_text.h>
@@ -947,6 +949,10 @@ void SCH_SCREEN::BumpConnectivityRevision( KICAD_T aChangedType )
     if( aChangedType != SCH_LINE_T )
         ++m_connectivitySymbolRevision;
 
+    // Packages spanning sheets are found from the symbols on every screen
+    if( aChangedType == SCH_SYMBOL_T || aChangedType == TYPE_NOT_INIT )
+        SCH_SYMBOL::BumpRefGeneration();
+
     m_connectivityItems.reset();
 }
 
@@ -1116,7 +1122,8 @@ void SCH_SCREEN::Plot( PLOTTER* aPlotter, const SCH_PLOT_OPTS& aPlotOpts, const 
                 std::vector<VECTOR3I> curr_wire_shape = aLine->BuildWireWithHopShape( this, arcRadius );
 
                 // The hop pieces are standalone copies/shapes without the connection map, so
-                // resolve the net-class color and style from the original wire and reuse them.
+                // resolve the net-class width, color and style from the original wire and reuse them.
+                int        penWidth = aLine->GetPenWidth();
                 COLOR4D    lineColor = aLine->GetLineColor();
                 LINE_STYLE lineStyle = aLine->GetEffectiveLineStyle();
 
@@ -1132,6 +1139,7 @@ void SCH_SCREEN::Plot( PLOTTER* aPlotter, const SCH_PLOT_OPTS& aPlotOpts, const 
                         SCH_LINE curr_line( *aLine );
                         curr_line.SetStartPoint( start );
                         curr_line.SetEndPoint( end );
+                        curr_line.SetLineWidth( penWidth );
                         curr_line.SetLineColor( lineColor );
                         curr_line.SetLineStyle( lineStyle );
                         curr_line.Plot( aPlotter, !background, aPlotOpts, 0, 0, { 0, 0 }, false );
@@ -2047,6 +2055,17 @@ std::set<wxString> SCH_SCREEN::GetVariantNames() const
         }
     }
 
+    for( const SCH_ITEM* item : Items().OfType( SCH_RULE_AREA_T ) )
+    {
+        const SCH_RULE_AREA* ruleArea = static_cast<const SCH_RULE_AREA*>( item );
+
+        for( const SCH_RULE_AREA_INSTANCE& instance : ruleArea->GetInstances() )
+        {
+            for( const auto& [name, variant] : instance.m_Variants )
+                variantNames.emplace( name );
+        }
+    }
+
     return variantNames;
 }
 
@@ -2092,6 +2111,19 @@ void SCH_SCREEN::DeleteVariant( const wxString& aVariantName, SCH_COMMIT* aCommi
 
                 sheet->DeleteVariant( instance.m_Path, aVariantName );
             }
+        }
+    }
+
+    for( SCH_ITEM* item : Items().OfType( SCH_RULE_AREA_T ) )
+    {
+        SCH_RULE_AREA* ruleArea = static_cast<SCH_RULE_AREA*>( item );
+
+        if( ruleArea->HasVariant( aVariantName ) )
+        {
+            if( aCommit )
+                aCommit->Modify( item, this );
+
+            ruleArea->DeleteVariant( aVariantName );
         }
     }
 }
@@ -2141,6 +2173,19 @@ void SCH_SCREEN::RenameVariant( const wxString& aOldName, const wxString& aNewNa
             }
         }
     }
+
+    for( SCH_ITEM* item : Items().OfType( SCH_RULE_AREA_T ) )
+    {
+        SCH_RULE_AREA* ruleArea = static_cast<SCH_RULE_AREA*>( item );
+
+        if( ruleArea->HasVariant( aOldName ) )
+        {
+            if( aCommit )
+                aCommit->Modify( item, this );
+
+            ruleArea->RenameVariant( aOldName, aNewName );
+        }
+    }
 }
 
 
@@ -2186,6 +2231,19 @@ void SCH_SCREEN::CopyVariant( const wxString& aSourceVariant, const wxString& aN
 
                 sheet->CopyVariant( instance.m_Path, aSourceVariant, aNewVariant );
             }
+        }
+    }
+
+    for( SCH_ITEM* item : Items().OfType( SCH_RULE_AREA_T ) )
+    {
+        SCH_RULE_AREA* ruleArea = static_cast<SCH_RULE_AREA*>( item );
+
+        if( ruleArea->HasVariant( aSourceVariant ) )
+        {
+            if( aCommit )
+                aCommit->Modify( item, this );
+
+            ruleArea->CopyVariant( aSourceVariant, aNewVariant );
         }
     }
 }
@@ -2522,6 +2580,38 @@ int SCH_SCREENS::ChangeSymbolLibNickname( const wxString& aFrom, const wxString&
     }
 
     return cnt;
+}
+
+
+std::vector<SCH_SYMBOL*> SCH_SCREENS::OutdatedSymbols( SYMBOL_LIBRARY_ADAPTER& aLibraries, int aCompareFlags )
+{
+    std::vector<SCH_SYMBOL*>                      outdated;
+    std::map<LIB_ID, std::unique_ptr<LIB_SYMBOL>> flattened;
+
+    for( SCH_SCREEN* screen = GetFirst(); screen; screen = GetNext() )
+    {
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL*       symbol = static_cast<SCH_SYMBOL*>( item );
+            const LIB_SYMBOL* embedded = symbol->GetLibSymbolRef().get();
+
+            if( !embedded )
+                continue;
+
+            auto it = flattened.find( symbol->GetLibId() );
+
+            if( it == flattened.end() )
+            {
+                LIB_SYMBOL* libSymbol = aLibraries.LoadSymbol( symbol->GetLibId() );
+                it = flattened.emplace( symbol->GetLibId(), libSymbol ? libSymbol->Flatten() : nullptr ).first;
+            }
+
+            if( it->second && it->second->Compare( *embedded, aCompareFlags ) != 0 )
+                outdated.push_back( symbol );
+        }
+    }
+
+    return outdated;
 }
 
 

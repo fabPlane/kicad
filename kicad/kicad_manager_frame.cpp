@@ -51,6 +51,7 @@
 #include <kiplatform/ui.h>
 #include <kiplatform/policy.h>
 #include <build_version.h>
+#include <jobs/scratch_doc.h>
 #include <kiway.h>
 #include <kiway_mail.h>
 #include <launch_ext.h>
@@ -515,7 +516,7 @@ void KICAD_MANAGER_FRAME::setupUIConditions()
 
     ACTION_MANAGER* manager = m_toolManager->GetActionManager();
 
-    wxASSERT( manager );
+    wxCHECK2( manager, return );
 
     auto activeProject =
             [this] ( const SELECTION& )
@@ -529,7 +530,7 @@ void KICAD_MANAGER_FRAME::setupUIConditions()
     activeProjectCond.Enable( activeProject );
 
     manager->SetConditions( ACTIONS::saveAs,                       activeProjectCond );
-    manager->SetConditions( KICAD_MANAGER_ACTIONS::exportForOlderVersion, activeProjectCond );
+    manager->SetConditions( ACTIONS::exportForOlderVersion, activeProjectCond );
     manager->SetConditions( KICAD_MANAGER_ACTIONS::closeProject,   activeProjectCond );
     manager->SetConditions( KICAD_MANAGER_ACTIONS::archiveProject, activeProjectCond );
     manager->SetConditions( KICAD_MANAGER_ACTIONS::newJobsetFile,  activeProjectCond );
@@ -569,7 +570,7 @@ wxWindow* KICAD_MANAGER_FRAME::GetToolCanvas() const
 APP_SETTINGS_BASE* KICAD_MANAGER_FRAME::config() const
 {
     APP_SETTINGS_BASE* ret = PgmTop().PgmSettings();
-    wxASSERT( ret );
+    wxCHECK( ret, nullptr );
     return ret;
 }
 
@@ -577,7 +578,7 @@ APP_SETTINGS_BASE* KICAD_MANAGER_FRAME::config() const
 KICAD_SETTINGS* KICAD_MANAGER_FRAME::kicadSettings() const
 {
     KICAD_SETTINGS* ret = dynamic_cast<KICAD_SETTINGS*>( config() );
-    wxASSERT( ret );
+    wxCHECK( ret, nullptr );
     return ret;
 }
 
@@ -587,11 +588,11 @@ void KICAD_MANAGER_FRAME::PreloadAllLibraries()
     CallAfter(
             [&]()
             {
-                KIFACE *schface = Kiway().KiFACE( KIWAY::FACE_SCH );
-                schface->PreloadLibraries( &Kiway() );
-
-                KIFACE *pcbface = Kiway().KiFACE( KIWAY::FACE_PCB );
-                pcbface->PreloadLibraries( &Kiway() );
+                for( KIWAY::FACE_T face : { KIWAY::FACE_SCH, KIWAY::FACE_PCB } )
+                {
+                    if( KIFACE* kiface = Kiway().KiFACE( face ) )
+                        kiface->PreloadLibraries( &Kiway() );
+                }
 
                 Pgm().PreloadDesignBlockLibraries( &Kiway() );
             } );
@@ -731,6 +732,24 @@ void KICAD_MANAGER_FRAME::DoWithAcceptedFiles()
 
 bool KICAD_MANAGER_FRAME::canCloseWindow( wxCloseEvent& aEvent )
 {
+    // Shutdown blocks must be determined and vetoed as early as possible, before any jobset prompt
+    if( isBlockableSessionEnd() )
+    {
+        for( size_t i = 0; i < m_notebook->GetPageCount(); i++ )
+        {
+            PANEL_JOBSET* jobset = dynamic_cast<PANEL_JOBSET*>( m_notebook->GetPage( i ) );
+
+            if( jobset && jobset->GetJobsFile()->GetDirty() )
+            {
+                KIPLATFORM::APP::SetShutdownBlockReason( this, _( "Jobset changes are unsaved" ) );
+                return false;
+            }
+        }
+
+        // Drop the reason a cancelled logoff left behind once its jobset has been saved
+        KIPLATFORM::APP::RemoveShutdownBlockReason( this );
+    }
+
     KICAD_SETTINGS* settings = kicadSettings();
     settings->m_OpenProjects = GetSettingsManager()->GetOpenProjects();
 
@@ -818,7 +837,7 @@ void KICAD_MANAGER_FRAME::SaveOpenJobSetsToLocalSettings( bool aIsExplicitUserSa
 
 void KICAD_MANAGER_FRAME::OnExit( wxCommandEvent& event )
 {
-    Close( true );
+    Close( false );
 }
 
 
@@ -828,11 +847,11 @@ bool KICAD_MANAGER_FRAME::CloseProject( bool aSave )
         return false;
 
     // Abort any in-progress background load, since the threads depend on the project not changing
-    KIFACE *schface = Kiway().KiFACE( KIWAY::FACE_SCH );
-    schface->CancelPreload();
-
-    KIFACE *pcbface = Kiway().KiFACE( KIWAY::FACE_PCB );
-    pcbface->CancelPreload();
+    for( KIWAY::FACE_T face : { KIWAY::FACE_SCH, KIWAY::FACE_PCB } )
+    {
+        if( KIFACE* kiface = Kiway().KiFACE( face ) )
+            kiface->CancelPreload();
+    }
 
     // Save the project file for the currently loaded project.
     if( m_active_project )
@@ -987,10 +1006,6 @@ bool KICAD_MANAGER_FRAME::LoadProject( const wxFileName& aProjectFileName )
         if( !AskOverrideLock( this, msg ) )
             return false;  // User clicked Cancel - abort project loading entirely
 
-        // Clear the lock so the load below can take it
-        LOCKFILE overridden( fullPath );
-        overridden.OverrideLock();
-
         lockOverrideGranted = true;
     }
 
@@ -1006,7 +1021,9 @@ bool KICAD_MANAGER_FRAME::LoadProject( const wxFileName& aProjectFileName )
     // current extension. Be very careful with aProjectFileName vs. Prj().GetProjectPath()
     // from here on out.
 
-    Pgm().GetSettingsManager().LoadProject( fullPath );
+    // The load overrides the lock in place.  Releasing it here and taking it again there would
+    // delete and recreate the lock file, which fails on Windows while another handle is open.
+    Pgm().GetSettingsManager().LoadProject( fullPath, true, lockOverrideGranted );
 
     // Propagate lock override decision to the loaded project
     if( lockOverrideGranted )
@@ -1035,7 +1052,8 @@ bool KICAD_MANAGER_FRAME::LoadProject( const wxFileName& aProjectFileName )
         if( dlg.ShowModal() == wxID_YES )
         {
             // The dialog above is the confirmation, skip RestoreCommit's own prompt.
-            Kiway().LocalHistory().RestoreCommit( Prj().GetProjectPath(), head, this, false );
+            if( Kiway().LocalHistory().RestoreCommit( Prj().GetProjectPath(), head, this, false ) )
+                reloadProjectSettings();
         }
         else
         {
@@ -1116,18 +1134,24 @@ void KICAD_MANAGER_FRAME::CreateNewProject( const wxFileName& aProjectFileName, 
             wxFileName destFileName( aProjectFileName );
             destFileName.SetExt( FILEEXT::ProjectFileExtension );
 
-            // Create a minimal project file if the template project file could not be copied
-            if( !wxFileName::FileExists( srcFileName )
-                || !wxCopyFile( srcFileName, destFileName.GetFullPath() ) )
-            {
-                wxFFile file( destFileName.GetFullPath(), "wb" );
-
-                if( file.IsOpened() )
-                    file.Write( wxT( "{\n}\n") );
-
-                // wxFFile dtor will close the file
-            }
+            // Without the template, the full write below creates the file from defaults
+            if( wxFileName::FileExists( srcFileName ) && !wxCopyFile( srcFileName, destFileName.GetFullPath() ) )
+                wxRemoveFile( destFileName.GetFullPath() );
         }
+    }
+
+    // Nothing else writes a project file until a real change, so a new one is written in full now.
+    // A slot already loaded holds another project's settings, which must not land in the new file
+    wxFileName projectFn( aProjectFileName );
+    projectFn.SetExt( FILEEXT::ProjectFileExtension );
+    projectFn.MakeAbsolute();
+
+    if( !GetSettingsManager()->GetProject( projectFn.GetFullPath() ) )
+    {
+        SCRATCH_PROJECT scratch( *GetSettingsManager(), projectFn.GetFullPath() );
+
+        if( scratch.IsValid() )
+            scratch.GetProject()->GetProjectFile().SaveToFile( projectFn.GetPath(), true );
     }
 
     // Create a "stub" for a schematic root sheet and a board if requested.
@@ -1216,7 +1240,7 @@ void KICAD_MANAGER_FRAME::OnCompareProjectBranches( wxCommandEvent& event )
 
     // libgit2 is not safe for concurrent use of one repository, so read the refs under the git
     // action lock. If a background operation holds it, fall back to HEAD.
-    if( std::unique_lock<std::mutex> lock = gitCommon->TryLockAction(); lock.owns_lock() )
+    if( KIGIT::ACTION_LOCK lock = gitCommon->TryLockAction(); lock.owns_lock() )
         refs = KIGIT::CompareBranchRefs( repo );
 
     if( refs.empty() )
@@ -1366,12 +1390,7 @@ void KICAD_MANAGER_FRAME::ProjectChanged()
 
     // Register project file saver. Ensures project file participates in
     // autosave history commits without affecting dirty state.
-    Kiway().LocalHistory().RegisterSaver( &Prj(),
-            [this]( const wxString& aProjectPath, std::vector<HISTORY_FILE_DATA>& aFileData )
-            {
-                Prj().SaveToHistory( aProjectPath, aFileData );
-            },
-            Prj().GetHistoryLifetimeToken() );
+    Kiway().LocalHistory().RegisterProjectSaver( &Prj() );
 }
 
 
@@ -1570,6 +1589,14 @@ void KICAD_MANAGER_FRAME::ToggleLocalHistory()
 }
 
 
+void KICAD_MANAGER_FRAME::reloadProjectSettings()
+{
+    // Editors take the project settings from memory, which still hold what the restore replaced
+    Prj().GetProjectFile().LoadFromFile( Prj().GetProjectPath() );
+    Prj().GetLocalSettings().LoadFromFile( Prj().GetProjectPath() );
+}
+
+
 void KICAD_MANAGER_FRAME::RestoreCommitFromHistory( const wxString& aHash )
 {
     if( !Kiway().PlayersClose( true ) )
@@ -1578,6 +1605,7 @@ void KICAD_MANAGER_FRAME::RestoreCommitFromHistory( const wxString& aHash )
     if( Kiway().LocalHistory().RestoreCommit( Prj().GetProjectPath(), aHash, this ) )
     {
         m_restoredFromHistory = true;  // Mark editors dirty when they reopen
+        reloadProjectSettings();
     }
 
     m_projectTreePane->ReCreateTreePrj();

@@ -36,12 +36,11 @@ public:
     PCB_PLOTTER( BOARD* aBoard, REPORTER* aReporter, PCB_PLOT_PARAMS& aParams );
 
     bool Plot( const wxString& aOutputPath, const LSEQ& aLayersToPlot, const LSEQ& aCommonLayers,
-               bool aUseGerberFileExtensions,
-                bool aOutputPathIsSingle = false,
-                std::optional<wxString> aLayerName = std::nullopt,
-                std::optional<wxString> aSheetName = std::nullopt,
-                std::optional<wxString> aSheetPath = std::nullopt,
-                std::vector<wxString>* aOutputFiles = nullptr );
+               bool aUseGerberFileExtensions, bool aPlotAllLayersToSingleFile, bool aForceAllLayersToSinglePage,
+               std::optional<wxString> aLayerName = std::nullopt,
+               std::optional<wxString> aSheetName = std::nullopt,
+               std::optional<wxString> aSheetPath = std::nullopt,
+               std::vector<wxString>* aOutputFiles = nullptr );
 
     /**
      * All copper layers that are disabled are actually selected
@@ -52,6 +51,16 @@ public:
      * This skips a copper layer if it is actually disabled on the board.
      */
     bool copperLayerShouldBeSkipped( PCB_LAYER_ID aLayerToPlot );
+
+    /**
+     * Return the layers a plot dialog stores when \a aChecked are ticked.
+     *
+     * The dialog shows only the board's \a aEnabledLayers.  Board plot settings also keep every
+     * unused copper layer so it starts ticked once the board enables it.  A job keeps only what
+     * the dialog showed, since it plots on other boards and a layer nobody can see cannot be
+     * removed.
+     */
+    static LSET DialogLayerSelection( const LSET& aChecked, const LSET& aEnabledLayers, bool aForJob );
 
     /**
      * Complete a plot filename.
@@ -67,14 +76,6 @@ public:
      */
     static void BuildPlotFileName( wxFileName* aFilename, const wxString& aOutputDir, const wxString& aSuffix,
                                    const wxString& aExtension );
-
-    /**
-     * True when the board's out-of-date-chart policy regenerated charts during the last
-     * Plot().
-     *
-     * The board changed in memory and no plot writes the board file, so an interactive
-     * caller has to mark the document modified or the regenerated charts are lost on close.
-     */
 
     /**
      * Translate a JOB to PCB_PLOT_PARAMS

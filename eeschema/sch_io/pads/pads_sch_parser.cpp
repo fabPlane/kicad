@@ -24,6 +24,7 @@
 #include <reporter.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <fstream>
 #include <sstream>
@@ -58,6 +59,57 @@ VECTOR2I padsSchArcMidpoint( const VECTOR2I& aStart, const VECTOR2I& aEnd, const
     }
 
     return midPt;
+}
+
+
+// Pulsonix writes the two CAEDECAL font lines without quotes
+static bool isUnquotedFontLine( const std::string& aLine )
+{
+    if( aLine.empty() )
+        return false;
+
+    unsigned char c = static_cast<unsigned char>( aLine[0] );
+
+    if( std::isdigit( c ) || c == '-' || c == '+' || c == '.' || c == '*' || c == '"' )
+        return false;
+
+    std::string keyword = aLine.substr( 0, aLine.find( ' ' ) );
+
+    if( keyword == "OPEN" || keyword == "CLOSED" || keyword == "CIRCLE" || keyword == "COPCLS" )
+        return false;
+
+    // Pin and label records are a T or P followed by a number
+    if( ( c == 'T' || c == 'P' ) && aLine.size() > 1
+        && ( std::isdigit( static_cast<unsigned char>( aLine[1] ) ) || aLine[1] == '-' ) )
+    {
+        return false;
+    }
+
+    return true;
+}
+
+
+static void readFontLine( const std::vector<std::string>& aLines, size_t& aIdx, std::string& aFont )
+{
+    if( aIdx >= aLines.size() )
+        return;
+
+    const std::string& line = aLines[aIdx];
+
+    if( line.size() >= 2 && line[0] == '"' )
+    {
+        size_t qEnd = line.find( '"', 1 );
+
+        if( qEnd != std::string::npos )
+            aFont = line.substr( 1, qEnd - 1 );
+
+        aIdx++;
+    }
+    else if( isUnquotedFontLine( line ) )
+    {
+        aFont = line;
+        aIdx++;
+    }
 }
 
 
@@ -381,10 +433,15 @@ size_t PADS_SCH_PARSER::parseSectionSCH( const std::vector<std::string>& aLines,
             std::string second;
             iss >> second;
 
-            if( second == "SIZE" )
+            // Accept either SIZE SIZECODE as two tokens, or concatentated as a single token
+            if( second.starts_with( "SIZE" ) )
             {
                 std::string sizeCode;
-                iss >> sizeCode;
+
+                if( second == "SIZE" )
+                    iss >> sizeCode;
+                else
+                    sizeCode = second.substr( 4 );
 
                 m_parameters.sheet_size.name = sizeCode;
 
@@ -1048,25 +1105,8 @@ size_t PADS_SCH_PARSER::parseSymbolDef( const std::vector<std::string>& aLines, 
     }
 
     // Two optional font-name lines, absent in older formats
-    if( idx < aLines.size() && aLines[idx].size() >= 2 && aLines[idx][0] == '"' )
-    {
-        size_t qEnd = aLines[idx].find( '"', 1 );
-
-        if( qEnd != std::string::npos )
-            aSymbol.font1 = aLines[idx].substr( 1, qEnd - 1 );
-
-        idx++;
-    }
-
-    if( idx < aLines.size() && aLines[idx].size() >= 2 && aLines[idx][0] == '"' )
-    {
-        size_t qEnd = aLines[idx].find( '"', 1 );
-
-        if( qEnd != std::string::npos )
-            aSymbol.font2 = aLines[idx].substr( 1, qEnd - 1 );
-
-        idx++;
-    }
+    readFontLine( aLines, idx, aSymbol.font1 );
+    readFontLine( aLines, idx, aSymbol.font2 );
 
     // Attribute label pairs, each a position line then a name line
     for( int a = 0; a < aSymbol.num_attrs && idx + 1 < aLines.size(); a++ )
@@ -1110,9 +1150,28 @@ size_t PADS_SCH_PARSER::parseSymbolDef( const std::vector<std::string>& aLines, 
         }
 
         SYMBOL_GRAPHIC graphic;
+        size_t         primitiveLine = idx;
         idx = parseGraphicPrimitive( aLines, idx, graphic );
-        aSymbol.graphics.push_back( graphic );
         idx++;
+
+        // A shape without two points has no extent and breaks item ordering downstream
+        bool needsTwoPoints = graphic.type == GRAPHIC_TYPE::POLYLINE || graphic.type == GRAPHIC_TYPE::RECTANGLE;
+
+        if( needsTwoPoints && graphic.points.size() < 2 )
+        {
+            if( m_reporter )
+            {
+                m_reporter->Report( wxString::Format( _( "Skipped graphic on line %llu of symbol '%s' with fewer "
+                                                         "than two points." ),
+                                                      static_cast<unsigned long long>( primitiveLine + 1 ),
+                                                      wxString::FromUTF8( aSymbol.name ) ),
+                                    RPT_SEVERITY_WARNING );
+            }
+
+            continue;
+        }
+
+        aSymbol.graphics.push_back( graphic );
     }
 
     // Embedded text labels sit between graphics and pins. Scan until a T-prefixed pin line; a
@@ -1176,20 +1235,24 @@ size_t PADS_SCH_PARSER::parseSymbolDef( const std::vector<std::string>& aLines, 
 
         SYMBOL_PIN pin;
 
-        // T line: T<x> y angle side pn_h pn_w pn_angle pn_just pl_h pl_w pl_angle pl_just
+        // T line: T<x> y angle side pn_x pn_y pn_angle pn_just pl_x pl_y pl_angle pl_just
         //         pin_decal_name
         if( tLine.size() > 1 && tLine[0] == 'T' )
         {
             std::string tContent = tLine.substr( 1 );
             std::istringstream tiss( tContent );
-            int tx = 0, ty = 0, angle = 0;
+            int                tx = 0, ty = 0, angle = 0, pnx = 0, pny = 0, plx = 0, ply = 0;
 
-            tiss >> tx >> ty >> angle >> pin.side >> pin.pn_h >> pin.pn_w >> pin.pn_angle >> pin.pn_just >> pin.pl_h
-                    >> pin.pl_w >> pin.pl_angle >> pin.pl_just >> pin.pin_decal_name;
+            tiss >> tx >> ty >> angle >> pin.side >> pnx >> pny >> pin.pn_angle >> pin.pn_just >> plx >> ply
+                    >> pin.pl_angle >> pin.pl_just >> pin.pin_decal_name;
 
             pin.position.x = tx;
             pin.position.y = ty;
             pin.rotation = angle;
+            pin.pn_offset.x = pnx;
+            pin.pn_offset.y = pny;
+            pin.pl_offset.x = plx;
+            pin.pl_offset.y = ply;
 
             // The pin decal name encodes inverted/clock styles
             if( pin.pin_decal_name == "PINB" || pin.pin_decal_name == "PINORB" || pin.pin_decal_name == "PCLKB"
@@ -1227,13 +1290,13 @@ size_t PADS_SCH_PARSER::parseSymbolDef( const std::vector<std::string>& aLines, 
                 std::istringstream piss( pContent );
                 int px1 = 0, py1 = 0, px2 = 0, py2 = 0;
 
-                piss >> px1 >> py1 >> pin.pn_off_angle >> pin.pn_off_just >> px2 >> py2 >> pin.pl_off_angle
-                        >> pin.pl_off_just >> pin.p_flags;
+                piss >> px1 >> py1 >> pin.p_angle1 >> pin.p_just1 >> px2 >> py2 >> pin.p_angle2 >> pin.p_just2
+                        >> pin.p_flags;
 
-                pin.pn_offset.x = px1;
-                pin.pn_offset.y = py1;
-                pin.pl_offset.x = px2;
-                pin.pl_offset.y = py2;
+                pin.p_position1.x = px1;
+                pin.p_position1.y = py1;
+                pin.p_position2.x = px2;
+                pin.p_position2.y = py2;
 
                 // Pin name hidden if flags bit 128 set
                 if( pin.p_flags & 128 )

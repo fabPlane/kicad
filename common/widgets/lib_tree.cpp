@@ -372,7 +372,7 @@ void LIB_TREE::SelectLibId( const LIB_ID& aLibId )
     wxDataViewItem item = m_adapter->FindItem( aLibId );
 
     // Expand the parent library so the row is visible and can be selected/scrolled to.
-    if( item.IsOk() )
+    if( isShown( item ) )
         m_tree_ctrl->ExpandAncestors( item );
 
     selectIfValid( item );
@@ -495,6 +495,13 @@ void LIB_TREE::RefreshLibTree()
 }
 
 
+bool LIB_TREE::isShown( const wxDataViewItem& aTreeId ) const
+{
+    // A row the filter hides has no native row to select
+    return aTreeId.IsOk() && m_adapter->GetTreeNodeFor( aTreeId )->m_Score > 0;
+}
+
+
 wxWindow* LIB_TREE::GetFocusTarget()
 {
     if( m_query_ctrl )
@@ -525,7 +532,7 @@ void LIB_TREE::toggleExpand( const wxDataViewItem& aTreeId )
 
 void LIB_TREE::selectIfValid( const wxDataViewItem& aTreeId )
 {
-    if( aTreeId.IsOk() )
+    if( isShown( aTreeId ) )
     {
         EnsureVisibleIfEnabled( m_tree_ctrl, aTreeId );
         m_tree_ctrl->UnselectAll();
@@ -544,7 +551,7 @@ void LIB_TREE::centerIfValid( const wxDataViewItem& aTreeId )
      * It does try to keep the given item a bit off the top or bottom of the window.
      */
 
-    if( aTreeId.IsOk() )
+    if( isShown( aTreeId ) )
     {
         LIB_TREE_NODE* node = m_adapter->GetTreeNodeFor( aTreeId );
         LIB_TREE_NODE* parent = node->m_Parent;
@@ -585,7 +592,7 @@ void LIB_TREE::centerIfValid( const wxDataViewItem& aTreeId )
 
 void LIB_TREE::expandIfValid( const wxDataViewItem& aTreeId )
 {
-    if( aTreeId.IsOk() && !m_tree_ctrl->IsExpanded( aTreeId ) )
+    if( isShown( aTreeId ) && !m_tree_ctrl->IsExpanded( aTreeId ) )
         m_tree_ctrl->Expand( aTreeId );
 }
 
@@ -642,8 +649,7 @@ void LIB_TREE::setState( const STATE& aState )
     // command is issued, otherwise it selects a random item (Windows)
     m_tree_ctrl->Thaw();
 
-    if( !aState.selection.GetLibItemName().empty() || !aState.selection.GetLibNickname().empty() )
-        SelectLibId( aState.selection );
+    SelectLibId( aState.selection );
 }
 
 
@@ -922,6 +928,15 @@ void LIB_TREE::onTreeCharHook( wxKeyEvent& aKeyStroke )
                 m_tree_ctrl->Collapse( sel );
         }
 
+        return;
+    }
+
+    // Let the native control extend the selection on Shift+Up/Down
+    if( aKeyStroke.GetEventObject() == m_tree_ctrl && m_tree_ctrl->HasFlag( wxDV_MULTIPLE )
+        && aKeyStroke.GetModifiers() == wxMOD_SHIFT
+        && ( aKeyStroke.GetKeyCode() == WXK_UP || aKeyStroke.GetKeyCode() == WXK_DOWN ) )
+    {
+        aKeyStroke.Skip();
         return;
     }
 

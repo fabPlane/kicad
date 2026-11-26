@@ -221,12 +221,17 @@ set( PCBNEW_DIALOGS
     dialogs/panel_pcbnew_color_settings.cpp
     dialogs/panel_pcbnew_display_origin.cpp
     dialogs/panel_pcbnew_display_origin_base.cpp
+    dialogs/panel_project_defaults.cpp
+    dialogs/panel_project_defaults_base.cpp
     dialogs/panel_rule_area_properties_keepout_base.cpp
     dialogs/panel_rule_area_properties_placement_base.cpp
     dialogs/panel_assign_component_classes.cpp
     dialogs/panel_assign_component_classes_base.cpp
     dialogs/panel_setup_constraints.cpp
     dialogs/panel_setup_constraints_base.cpp
+    dialogs/panel_setup_constraint_rules.cpp
+    dialogs/constraint_rules_list.cpp
+    dialogs/constraint_rules_list_base.cpp
     dialogs/panel_setup_defaults.cpp
     dialogs/panel_setup_defaults_base.cpp
     dialogs/panel_setup_dimensions.cpp
@@ -345,6 +350,7 @@ set( PCBNEW_DRC_SRCS
     drc/drc_test_provider_hole_to_hole.cpp
     drc/drc_test_provider_hole_size.cpp
     drc/drc_test_provider_library_parity.cpp
+    drc/drc_test_provider_line_width.cpp
     drc/drc_test_provider_schematic_parity.cpp
     drc/drc_test_provider_misc.cpp
     drc/drc_test_provider_net_chain_tuning_profiles.cpp
@@ -367,7 +373,7 @@ set( PCBNEW_DRC_SRCS
     drc/rule_editor/drc_re_panel_matcher.cpp
     drc/rule_editor/drc_re_rule_loader.cpp
     drc/rule_editor/drc_re_rule_saver.cpp
-    drc/rule_editor/dialog_drc_rule_editor.cpp
+    drc/rule_editor/drc_rule_document.cpp
     drc/rule_editor/panel_drc_rule_editor_base.cpp
     drc/rule_editor/panel_drc_rule_editor.cpp
     drc/rule_editor/drc_re_bitmap_overlay_panel.cpp
@@ -387,8 +393,6 @@ set( PCBNEW_DRC_SRCS
     drc/rule_editor/drc_re_condition_row_panel.cpp
     drc/rule_editor/drc_re_condition_group_panel.cpp
     drc/rule_editor/drc_re_custom_rule_panel.cpp
-    drc/rule_editor/panel_drc_group_header_base.cpp
-    drc/rule_editor/panel_drc_group_header.cpp
     drc/rule_editor/drc_re_validator_checkbox_list.cpp
     drc/rule_editor/drc_re_validator_combo_ctrl.cpp
     drc/rule_editor/drc_re_validator_min_max_ctrl.cpp
@@ -436,7 +440,6 @@ set( PCBNEW_CLASS_SRCS
     board_statistics.cpp
     board_statistics_report.cpp
     board_tables/board_characteristics_table.cpp
-    board_tables/board_stackup_table.cpp
     build_BOM_from_board.cpp
     cleanup_item.cpp
     convert_shape_list_to_polygon.cpp
@@ -485,6 +488,7 @@ set( PCBNEW_CLASS_SRCS
     pcbplot.cpp
     plot_board_layers.cpp
     plot_brditems_plotter.cpp
+    ref_suffix_split.cpp
     specctra_import_export/specctra.cpp
     specctra_import_export/specctra_export.cpp
     specctra_import_export/specctra_import.cpp
@@ -494,6 +498,7 @@ set( PCBNEW_CLASS_SRCS
     toolbars_footprint_wizard.cpp
     toolbars_pcb_editor.cpp
     tracks_cleaner.cpp
+    undo_group_state.cpp
     undo_redo.cpp
     zone_filler.cpp
     zone_settings_bag.cpp
@@ -504,6 +509,7 @@ set( PCBNEW_CLASS_SRCS
     api/api_handler_footprint.cpp
     api/api_handler_footprint_library.cpp
     api/api_handler_pcb.cpp
+    api/api_handler_pcb_tasks.cpp
     api/api_undo_pcb.cpp
     api/footprint_context.cpp
     api/headless_pcb_context.cpp
@@ -511,6 +517,11 @@ set( PCBNEW_CLASS_SRCS
     api/pcb_context.cpp
 
     tools/array_tool.cpp
+    tools/block_drag_capability.cpp
+    tools/block_drag_dependents.cpp
+    tools/block_drag_displacement.cpp
+    tools/block_drag_pick.cpp
+    tools/block_drag_validation.cpp
     tools/board_editor_control.cpp
     tools/board_inspection_tool.cpp
     tools/board_reannotate_tool.cpp
@@ -537,6 +548,7 @@ set( PCBNEW_CLASS_SRCS
     tools/pcb_control.cpp
     tools/pcb_design_block_control.cpp
     tools/pcb_group_tool.cpp
+    tools/pcb_handle_key.cpp
     tools/pcb_picker_tool.cpp
     tools/pcb_selection.cpp
     tools/pcb_selection_conditions.cpp
@@ -552,7 +564,6 @@ set( PCBNEW_CLASS_SRCS
     tools/generator_tool.cpp
     tools/generator_tool_pns_proxy.cpp
     tools/multichannel_tool.cpp
-    tools/drc_rule_editor_tool.cpp
 
     footprint_preview_panel.cpp
     footprint_tree_pane.cpp
@@ -574,6 +585,8 @@ set( PCBNEW_CLASS_SRCS
     widgets/net_inspector_panel.cpp
     widgets/pcb_net_inspector_panel.cpp
     widgets/vertex_editor_pane.cpp
+    widgets/via_cross_section_geometry.cpp
+    widgets/via_cross_section_preview.cpp
 
     component_classes/component_class.cpp
     component_classes/component_class_cache_proxy.cpp

@@ -195,6 +195,7 @@ SCH_PIN::SCH_PIN( SCH_SYMBOL* aParentSymbol, SCH_PIN* aLibPin ) :
 
     SetName( m_libPin->GetName() );
     SetNumber( m_libPin->GetNumber() );
+    SetCustomProperties( m_libPin->GetCustomProperties() );
     m_position = m_libPin->GetPosition();
 
     m_layer = LAYER_PIN;
@@ -303,7 +304,9 @@ void SCH_PIN::Serialize( google::protobuf::Any& aContainer ) const
         pin.set_active_alternate( m_alt.ToUTF8() );
 
     kiapi::common::PackCustomProperties( pin.mutable_custom_properties(), *this );
-    aContainer.PackFrom( pin );
+
+    if( !aContainer.PackFrom( pin ) )
+        wxFAIL_MSG( wxT( "Failed to pack SCH_PIN" ) );
 }
 
 
@@ -1910,7 +1913,7 @@ wxString SCH_PIN::GetItemDescription( UNITS_PROVIDER* aUnitsProvider, bool aFull
         const SCH_SYMBOL* symbol = static_cast<const SCH_SYMBOL*>( GetParentSymbol() );
 
         return wxString::Format( "Symbol %s %s",
-                                 UnescapeString( symbol->GetField( FIELD_T::REFERENCE )->GetText() ),
+                                 UnescapeString( symbol->GetCurrentSheetRef() ),
                                  itemDesc );
     }
 
@@ -2073,7 +2076,7 @@ int PIN_COMPARISON_DATA::Compare( const PIN_COMPARISON_DATA& aOther, int aCompar
 
 PIN_COMPARISON_DATA SCH_PIN::ComparisonData() const
 {
-    wxASSERT( dynamic_cast<const LIB_SYMBOL*>( GetParentSymbol() ) );
+    wxCHECK( dynamic_cast<const LIB_SYMBOL*>( GetParentSymbol() ), {} );
     return { GetUnit(), GetBodyStyle(), IsPrivate(), m_position, m_number, m_name, m_length,
              m_orientation, m_shape, m_type, m_hidden, m_numTextSize, m_nameTextSize, m_alternates };
 }
@@ -2105,18 +2108,39 @@ int SCH_PIN::compare( const SCH_ITEM& aOther, int aCompareFlags ) const
 
     if( m_number != tmp->m_number )
     {
-        // StrNumCmp: sort the same as the pads in the footprint file
-        return StrNumCmp( m_number, tmp->m_number );
-    }
+        // Sort based on natural sort (same as pads in the footprint file), but don't consider
+        // naturally-equivalent values to be equal.  Run them through a second, non-natural compare.
 
-    if( m_name != tmp->m_name )
-    {
-        retv = StrNumCmp( m_name, tmp->m_name );
+        // StrNumCmp: sort the same as the pads in the footprint file
+        retv = StrNumCmp( m_number, tmp->m_number, CMP_T::CASE_SENSITIVE );
 
         if( retv != 0 )
             return retv;
 
-        return m_number.Cmp( tmp->m_name );
+        // Don't make the mistake of conflating naturally-equivalent with equal.  Run them through
+        // a second, non-natural compare.
+        retv = m_number.Cmp( tmp->m_number );
+
+        if( retv != 0 )
+            return retv;
+    }
+
+    if( m_name != tmp->m_name )
+    {
+        // Sort based on natural sort (same as pads in the footprint file), but don't consider
+        // naturally-equivalent values to be equal.  Run them through a second, non-natural compare.
+
+        retv = StrNumCmp( m_name, tmp->m_name, CMP_T::CASE_SENSITIVE );
+
+        if( retv != 0 )
+            return retv;
+
+        // Don't make the mistake of conflating naturally-equivalent with equal.  Run them through
+        // a second, non-natural compare.
+        retv = m_name.Cmp( tmp->m_name );
+
+        if( retv != 0 )
+            return retv;
     }
 
     if( m_position.x != tmp->m_position.x )

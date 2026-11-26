@@ -28,6 +28,7 @@
 #include <pgm_base.h>
 #include <thread_pool.h>
 #include <trace_helpers.h>
+#include <project.h>
 #include <wildcards_and_files_ext.h>
 #include <confirm.h>
 #include <progress_reporter.h>
@@ -377,6 +378,19 @@ void LOCAL_HISTORY::RegisterSaver(
 }
 
 
+void LOCAL_HISTORY::RegisterProjectSaver( PROJECT* aProject )
+{
+    RegisterSaver( aProject,
+                   [aProject]( const wxString& aProjectPath, std::vector<HISTORY_FILE_DATA>& aFileData )
+                   {
+                       // ZIP-mode recovery only offers boards and schematics
+                       if( Pgm().GetCommonSettings()->AutosaveUsesLocalHistory() )
+                           aProject->SaveToHistory( aProjectPath, aFileData );
+                   },
+                   aProject->GetHistoryLifetimeToken() );
+}
+
+
 void LOCAL_HISTORY::pruneExpiredSavers()
 {
     std::vector<const void*> expired;
@@ -553,7 +567,7 @@ bool LOCAL_HISTORY::RunRegisteredSaversAsAutosaveFiles( const wxString& aProject
 
     for( HISTORY_FILE_DATA& entry : fileData )
     {
-        if( entry.relativePath.IsEmpty() || wxFileName( entry.relativePath ).IsAbsolute() )
+        if( entry.removed || entry.relativePath.IsEmpty() || wxFileName( entry.relativePath ).IsAbsolute() )
             continue;
 
         wxString dst = resolveAutosaveDestination( autosaveRoot, entry.relativePath, location );
@@ -739,6 +753,33 @@ LOCAL_HISTORY::FindStaleAutosaveFiles( const wxString& aProjectPath, const std::
 }
 
 
+std::vector<std::pair<wxString, wxString>>
+LOCAL_HISTORY::ResolveAutosavesForLoad( const wxString& aProjectPath, const std::vector<wxString>& aExtensions,
+                                        bool aReverting ) const
+{
+    if( !aReverting )
+        return FindStaleAutosaveFiles( aProjectPath, aExtensions );
+
+    std::vector<wxString> sources;
+
+    for( const auto& [autosavePath, srcPath] : findAutosaveFilePairs( aProjectPath ) )
+    {
+        wxString ext = wxFileName( srcPath ).GetExt();
+
+        auto matches = [&]( const wxString& aExt )
+        {
+            return ext.IsSameAs( aExt, false );
+        };
+
+        if( std::any_of( aExtensions.begin(), aExtensions.end(), matches ) )
+            sources.push_back( srcPath );
+    }
+
+    RemoveAutosaveFiles( aProjectPath, sources );
+    return {};
+}
+
+
 void LOCAL_HISTORY::RemoveAutosaveFiles( const wxString& aProjectPath ) const
 {
     // After a successful manual save the source typically has a newer mtime than its
@@ -809,13 +850,20 @@ SNAPSHOT_COMMIT_RESULT LOCAL_HISTORY::commitInBackground( const wxString& aProje
     {
         wxString    relativePath;
         std::string content;
+        bool        removed = false;
     };
 
     std::vector<STAGED_FILE> staged;
 
     for( const HISTORY_FILE_DATA& entry : aFileData )
     {
-        STAGED_FILE file{ entry.relativePath, std::string() };
+        STAGED_FILE file{ entry.relativePath, std::string(), entry.removed };
+
+        if( file.removed )
+        {
+            staged.push_back( std::move( file ) );
+            continue;
+        }
 
         if( !entry.content.empty() )
         {
@@ -859,6 +907,20 @@ SNAPSHOT_COMMIT_RESULT LOCAL_HISTORY::commitInBackground( const wxString& aProje
         rel.Replace( wxS( "\\" ), wxS( "/" ) );
 
         std::string     path = rel.utf8_string();
+
+        // The index keeps every file an earlier snapshot staged, so a deleted one must be dropped
+        if( file.removed )
+        {
+            if( git_index_remove_bypath( index, path.c_str() ) != 0 )
+            {
+                wxLogTrace( traceAutoSave, wxS( "[history] background: failed to unstage '%s'" ), rel );
+                git_index_read( index, true );
+                return SNAPSHOT_COMMIT_RESULT::Error;
+            }
+
+            continue;
+        }
+
         git_index_entry indexEntry = {};
         indexEntry.mode = GIT_FILEMODE_BLOB;
         indexEntry.path = path.c_str();
@@ -926,7 +988,11 @@ SNAPSHOT_COMMIT_RESULT LOCAL_HISTORY::commitInBackground( const wxString& aProje
 
             diskPath.MakeAbsolute( aProjectPath );
 
-            if( !readFileContent( diskPath.GetFullPath(), diskContent ) || diskContent != file.content )
+            const bool matchesDisk = file.removed ? !diskPath.FileExists()
+                                                  : readFileContent( diskPath.GetFullPath(), diskContent )
+                                                            && diskContent == file.content;
+
+            if( !matchesDisk )
             {
                 stagedMatchesDisk = false;
                 break;
@@ -2515,6 +2581,12 @@ namespace
  */
 bool checkForLockedFiles( const wxString& aProjectPath, std::vector<wxString>& aLockedFiles )
 {
+    // A symlinked folder can loop back or lead out of the project
+    DIR_LOOP_GUARD guard( aProjectPath );
+
+    if( !guard.IsRooted() )
+        return true;
+
     std::function<void( const wxString& )> findLocks =
             [&]( const wxString& dirPath )
             {
@@ -2538,7 +2610,8 @@ bool checkForLockedFiles( const wxString& aProjectPath, std::vector<wxString>& a
 
                     if( fullPath.DirExists() )
                     {
-                        findLocks( fullPath.GetFullPath() );
+                        if( guard.ShouldDescend( fullPath.GetFullPath() ) )
+                            findLocks( fullPath.GetFullPath() );
                     }
                     else if( fullPath.FileExists()
                              && filename.StartsWith( FILEEXT::LockFilePrefix )

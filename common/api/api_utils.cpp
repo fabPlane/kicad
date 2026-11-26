@@ -78,6 +78,7 @@ KICOMMON_API std::optional<KICAD_T> TypeNameFromAny( const google::protobuf::Any
         { "type.googleapis.com/kiapi.board.types.Table", PCB_TABLE_T },
         { "type.googleapis.com/kiapi.board.types.DrillChart", PCB_DRILL_CHART_T },
         { "type.googleapis.com/kiapi.board.types.DrillMap", PCB_DRILL_MAP_T },
+        { "type.googleapis.com/kiapi.board.types.StackupTable", PCB_STACKUP_TABLE_T },
         { "type.googleapis.com/kiapi.board.types.TableCell", PCB_TABLECELL_T },
         { "type.googleapis.com/kiapi.board.types.BoardGraphicShape", PCB_SHAPE_T },
         { "type.googleapis.com/kiapi.board.types.Barcode", PCB_BARCODE_T },
@@ -424,7 +425,12 @@ KICOMMON_API bool PackKiwayApiMessage( const google::protobuf::Message& aMessage
 {
     ApiRequest request;
     request.mutable_header()->set_client_name( KiwayClientName );
-    request.mutable_message()->PackFrom( aMessage );
+
+    if( !request.mutable_message()->PackFrom( aMessage ) )
+    {
+        wxFAIL_MSG( "Failed to pack Kiway message" );
+        return false;
+    }
 
     aBytes = request.SerializeAsString();
     return true;

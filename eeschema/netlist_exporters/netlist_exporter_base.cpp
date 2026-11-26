@@ -26,7 +26,7 @@
 #include <api/api_utils.h> // traceApi
 #include <trace_helpers.h>
 #include <connection_graph.h>
-#include <kiface_ids.h>
+#include <kiface_services.h>
 #include <kiway.h>
 #include <lib_id.h>
 #include <sch_pin.h>
@@ -229,7 +229,8 @@ wxString NETLIST_EXPORTER_BASE::MakeCommandLine( const wxString& aFormatString, 
 }
 
 
-SCH_SYMBOL* NETLIST_EXPORTER_BASE::findNextSymbol( EDA_ITEM* aItem, const SCH_SHEET_PATH& aSheetPath )
+SCH_SYMBOL* NETLIST_EXPORTER_BASE::findNextSymbol( EDA_ITEM* aItem, const SCH_SHEET_PATH& aSheetPath,
+                                                   const EXPORT_EXCLUSION& aExcluded )
 {
     wxCHECK( aItem, nullptr );
 
@@ -248,6 +249,10 @@ SCH_SYMBOL* NETLIST_EXPORTER_BASE::findNextSymbol( EDA_ITEM* aItem, const SCH_SH
     if( ref[0] == wxChar( '#' ) )
         return nullptr;
 
+    // An excluded unit must not claim the reference, or the package's exported units would be dropped with it
+    if( aExcluded && aExcluded( symbol, aSheetPath ) )
+        return nullptr;
+
     SCH_SCREEN* screen = aSheetPath.LastScreen();
 
     wxCHECK( screen, nullptr );
@@ -262,6 +267,10 @@ SCH_SYMBOL* NETLIST_EXPORTER_BASE::findNextSymbol( EDA_ITEM* aItem, const SCH_SH
     // If symbol is a "multi parts per package" type
     if( libSymbol->GetUnitCount() > 1 )
     {
+        // A package spanning sheets belongs to the unit on its suffix's sheet, so the footprint path matches the ref
+        if( packageOwnedElsewhere( symbol, aSheetPath, aExcluded ) )
+            return nullptr;
+
         // test if this reference has already been processed, and if so skip
         if( m_referencesAlreadyFound.Lookup( ref ) )
             return nullptr;
@@ -274,7 +283,95 @@ SCH_SYMBOL* NETLIST_EXPORTER_BASE::findNextSymbol( EDA_ITEM* aItem, const SCH_SH
 }
 
 
-std::vector<PIN_INFO> NETLIST_EXPORTER_BASE::CreatePinList( SCH_SYMBOL* aSymbol, const SCH_SHEET_PATH& aSheetPath )
+EXPORT_EXCLUSION NETLIST_EXPORTER_BASE::boardExclusion() const
+{
+    return [this]( const SCH_SYMBOL* aSymbol, const SCH_SHEET_PATH& aSheet )
+           {
+               return excludedFromBoard( aSymbol, aSheet );
+           };
+}
+
+
+bool NETLIST_EXPORTER_BASE::excludedFromBoard( const SCH_ITEM* aSymbol, const SCH_SHEET_PATH& aSheetPath ) const
+{
+    return aSheetPath.GetExcludedFromBoard( m_exportVariant )
+           || aSymbol->ResolveExcludedFromBoard( &aSheetPath, m_exportVariant );
+}
+
+
+void NETLIST_EXPORTER_BASE::prepareBoardNetNodes( std::vector<std::pair<SCH_PIN*, SCH_SHEET_PATH>>& aNodes ) const
+{
+    using NODE = std::pair<SCH_PIN*, SCH_SHEET_PATH>;
+
+    // Excluded first, so an excluded unit's duplicate cannot displace an included pin
+    std::erase_if( aNodes,
+                   [this]( const NODE& aNode )
+                   {
+                       return excludedFromBoard( aNode.first->GetParentSymbol(), aNode.second );
+                   } );
+
+    std::sort( aNodes.begin(), aNodes.end(),
+               []( const NODE& a, const NODE& b )
+               {
+                   wxString ref_a = a.first->GetParentSymbol()->GetRef( &a.second );
+                   wxString ref_b = b.first->GetParentSymbol()->GetRef( &b.second );
+
+                   if( ref_a == ref_b )
+                       return a.first->GetShownNumber() < b.first->GetShownNumber();
+
+                   return ref_a < ref_b;
+               } );
+
+    aNodes.erase( std::unique( aNodes.begin(), aNodes.end(),
+                               []( const NODE& a, const NODE& b )
+                               {
+                                   return a.first->GetParentSymbol()->GetRef( &a.second )
+                                                  == b.first->GetParentSymbol()->GetRef( &b.second )
+                                          && a.first->GetShownNumber() == b.first->GetShownNumber();
+                               } ),
+                  aNodes.end() );
+}
+
+
+bool NETLIST_EXPORTER_BASE::packageOwnedElsewhere( const SCH_SYMBOL* aSymbol, const SCH_SHEET_PATH& aSheetPath,
+                                                   const EXPORT_EXCLUSION& aExcluded ) const
+{
+    const SCHEMATIC* schematic = aSymbol->Schematic();
+
+    if( !schematic )
+        return false;
+
+    const wxString suffix = schematic->GetPackageRefSuffix( aSymbol, aSheetPath );
+
+    if( suffix == schematic->GetRefSuffix( aSheetPath ) )
+        return false;
+
+    const wxString base = aSymbol->GetBaseRef( &aSheetPath );
+
+    for( const SCH_SHEET_PATH& path : m_exportSheets )
+    {
+        if( schematic->GetRefSuffix( path ) != suffix )
+            continue;
+
+        for( SCH_ITEM* item : path.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            const SCH_SYMBOL* other = static_cast<const SCH_SYMBOL*>( item );
+
+            if( other->GetLibId() == aSymbol->GetLibId() && other->GetBaseRef( &path ) == base
+                    && schematic->GetPackageRefSuffix( other, path ) == suffix
+                    && !( aExcluded && aExcluded( other, path ) ) )
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+
+std::vector<PIN_INFO> NETLIST_EXPORTER_BASE::CreatePinList( SCH_SYMBOL* aSymbol, const SCH_SHEET_PATH& aSheetPath,
+                                                            const EXPORT_EXCLUSION& aExcluded )
 {
     std::vector<PIN_INFO> pins;
 
@@ -301,7 +398,7 @@ std::vector<PIN_INFO> NETLIST_EXPORTER_BASE::CreatePinList( SCH_SYMBOL* aSymbol,
     {
         // Collect all pins for this reference designator by searching the entire design for
         // other parts with the same reference designator.
-        findAllUnitsOfSymbol( aSymbol, aSheetPath, pins );
+        findAllUnitsOfSymbol( aSymbol, aSheetPath, pins, aExcluded );
     }
 
     else // GetUnitCount() <= 1 means one part per package
@@ -317,7 +414,7 @@ std::vector<PIN_INFO> NETLIST_EXPORTER_BASE::CreatePinList( SCH_SYMBOL* aSymbol,
     std::sort( pins.begin(), pins.end(),
                []( const PIN_INFO& lhs, const PIN_INFO& rhs )
                {
-                   return StrNumCmp( lhs.num, rhs.num, true ) < 0;
+                   return StrNumCmp( lhs.num, rhs.num, CMP_T::IGNORE_CASE ) < 0;
                } );
 
     // Remove duplicate Pins in m_SortedSymbolPinList
@@ -390,9 +487,10 @@ const std::set<wxString>& NETLIST_EXPORTER_BASE::footprintPads( const wxString& 
 
         if( cvpcb )
         {
-            typedef void ( *PAD_NUMBERS_FN_PTR )( const wxString&, PROJECT*, std::set<wxString>& );
+            KIFACE_FOOTPRINT_PAD_NUMBERS_SERVICE::Type fetch =
+                    GetKifaceService<KIFACE_FOOTPRINT_PAD_NUMBERS_SERVICE>( cvpcb );
 
-            if( auto fetch = (PAD_NUMBERS_FN_PTR) cvpcb->IfaceOrAddress( KIFACE_FOOTPRINT_PAD_NUMBERS ) )
+            if( fetch )
                 fetch( aFootprintId, &m_schematic->Project(), pads );
         }
     }
@@ -470,7 +568,7 @@ void NETLIST_EXPORTER_BASE::eraseDuplicatePins( std::vector<PIN_INFO>& aPins )
 
 
 void NETLIST_EXPORTER_BASE::findAllUnitsOfSymbol( SCH_SYMBOL* aSchSymbol, const SCH_SHEET_PATH& aSheetPath,
-                                                  std::vector<PIN_INFO>& aPins )
+                                                  std::vector<PIN_INFO>& aPins, const EXPORT_EXCLUSION& aExcluded )
 {
     const wxString ref = aSchSymbol->GetRef( &aSheetPath );
 
@@ -481,6 +579,9 @@ void NETLIST_EXPORTER_BASE::findAllUnitsOfSymbol( SCH_SYMBOL* aSchSymbol, const 
             SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
 
             if( symbol->GetRef( &sheet ).CmpNoCase( ref ) != 0 )
+                continue;
+
+            if( aExcluded && aExcluded( symbol, sheet ) )
                 continue;
 
             for( const SCH_PIN* pin : symbol->GetPins( &sheet ) )

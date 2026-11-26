@@ -69,15 +69,22 @@ public:
             if( it != m_overrides.end() && m_dimmed->count( key ) == 0 )
             {
                 // PCB_PAINTER tints normal items via the layer color, not via
-                // LAYER_BRIGHTENED. Swap the layer color we are drawing on so
-                // the override paints the changed item.
+                // LAYER_BRIGHTENED. Swap the colors of the layer we are drawing on
+                // and the layer it takes its color from so the override paints the item.
                 KIGFX::PCB_RENDER_SETTINGS* settings = GetSettings();
-                KIGFX::COLOR4D              saved = settings->GetLayerColor( aLayer );
-                settings->SetLayerColor( aLayer, it->second );
+                std::vector<std::pair<int, KIGFX::COLOR4D>> saved;
+
+                for( int layer : colorSourceLayers( aLayer ) )
+                {
+                    saved.emplace_back( layer, settings->GetLayerColor( layer ) );
+                    settings->SetLayerColor( layer, it->second );
+                }
 
                 bool result = KIGFX::PCB_PAINTER::Draw( aItem, aLayer );
 
-                settings->SetLayerColor( aLayer, saved );
+                for( const auto& [layer, color] : saved )
+                    settings->SetLayerColor( layer, color );
+
                 return result;
             }
         }
@@ -86,6 +93,34 @@ public:
     }
 
 private:
+    /// The drawn layer plus the one PCB_RENDER_SETTINGS::GetColor takes its colour from.
+    static std::vector<int> colorSourceLayers( int aLayer )
+    {
+        // Numbers, netnames and drill holes sit on their item, so in its colour they vanish
+        if( IsNetnameLayer( aLayer ) || aLayer == LAYER_PAD_PLATEDHOLES || aLayer == LAYER_NON_PLATEDHOLES
+            || aLayer == LAYER_VIA_HOLES )
+        {
+            return {};
+        }
+
+        if( IsPadCopperLayer( aLayer ) )
+            return { aLayer, aLayer - LAYER_PAD_COPPER_START, LAYER_VIA_HOLES };
+
+        if( IsViaCopperLayer( aLayer ) )
+            return { aLayer, aLayer - LAYER_VIA_COPPER_START };
+
+        if( IsClearanceLayer( aLayer ) )
+            return { aLayer, aLayer - LAYER_CLEARANCE_START };
+
+        if( IsZoneFillLayer( aLayer ) )
+            return { aLayer, aLayer - LAYER_ZONE_START };
+
+        if( aLayer == LAYER_PAD_HOLEWALLS )
+            return { aLayer, LAYER_VIA_HOLES };
+
+        return { aLayer };
+    }
+
     std::map<KIID, KIGFX::COLOR4D>  m_overrides;
     std::shared_ptr<std::set<KIID>> m_dimmed;
 };
@@ -150,6 +185,11 @@ void ConfigurePcbDiffContextRenderSettings( KIGFX::PCB_RENDER_SETTINGS& aSetting
     aSettings.SetAllLayerColors( gray );
     aSettings.SetLayerColor( LAYER_BRIGHTENED, aColor );
     aSettings.SetLayerColor( LAYER_PCB_BACKGROUND, background );
+    aSettings.SetLayerColor( LAYER_PAD_PLATEDHOLES, background );
+
+    // Labels sit on grey or diff coloured copper and on light drills, where only dark text reads
+    for( int layer = NETNAMES_LAYER_ID_START; layer < NETNAMES_LAYER_ID_END; ++layer )
+        aSettings.SetLayerColor( layer, KIGFX::COLOR4D::BLACK );
     aSettings.SetBackgroundColor( background );
 
     PCB_DISPLAY_OPTIONS displayOptions;
@@ -184,6 +224,8 @@ void ConfigurePcbDiffCanvasContext( WIDGET_DIFF_CANVAS& aCanvas, BOARD* aReferen
                                     const std::vector<KIGFX::VIEW_ITEM*>&       aExtraItems,
                                     const std::map<KIID, KICAD_DIFF::CATEGORY>& aCategories )
 {
+    aCanvas.SetWorldUnitLength( 1e-9 /* 1 nm */ / 0.0254 /* 1 inch in meters */ );
+
     auto painter = std::make_unique<PCB_DIFF_PAINTER>( aCanvas.GetGAL(), aOverrides );
     ConfigurePcbDiffContextRenderSettings( *painter->GetSettings(), aColor );
 
@@ -224,6 +266,7 @@ void ConfigurePcbDiffCanvasContext( WIDGET_DIFF_CANVAS& aCanvas, BOARD* aReferen
     aCanvas.SetContextItems( items );
 
     ApplyPcbGalLayerOrder( aCanvas.GetView() );
+    ApplyPcbGalLayerDeps( aCanvas.GetView() );
 
     std::map<KIGFX::VIEW_ITEM*, KICAD_DIFF::CATEGORY> itemCategories;
 
@@ -241,6 +284,77 @@ void ConfigurePcbDiffCanvasContext( WIDGET_DIFF_CANVAS& aCanvas, BOARD* aReferen
     }
 
     aCanvas.SetItemCategories( std::move( itemCategories ) );
+}
+
+
+void ConfigureFpDiffCanvasContext( WIDGET_DIFF_CANVAS& aCanvas, FOOTPRINT* aBefore, FOOTPRINT* aAfter,
+                                   std::shared_ptr<const void> aOwner )
+{
+    if( !aBefore && !aAfter )
+    {
+        aCanvas.SetContextItems( {} );
+        return;
+    }
+
+    const DIFF_COLOR_THEME         theme;
+    std::map<KIID, KIGFX::COLOR4D> overrides;
+    std::vector<KIGFX::VIEW_ITEM*> items;
+
+    if( !aBefore || !aAfter )
+    {
+        // A whole footprint added or removed takes its colour from the footprint
+        FOOTPRINT* shown = aAfter ? aAfter : aBefore;
+        overrides[shown->m_Uuid] = aAfter ? theme.added : theme.removed;
+        items = CollectFootprintDiffContextItems( *shown );
+    }
+    else
+    {
+        items = CollectFootprintDiffContextItems( *aAfter );
+
+        for( const LIB_ELEMENT& element : DiffFootprintElements( aBefore, aAfter ) )
+        {
+            overrides[PcbDiffItemId( *element.item )] = theme.ForKind( element.kind );
+
+            // Removed elements exist only on the before side
+            if( element.kind == CHANGE_KIND::REMOVED )
+                items.push_back( const_cast<EDA_ITEM*>( element.item ) );
+        }
+    }
+
+    aCanvas.SetContextPainter( MakePcbDiffContextPainter( aCanvas.GetGAL(), theme.reference, std::move( overrides ) ) );
+    aCanvas.SetContextItems( items, std::move( aOwner ) );
+    ApplyPcbGalLayerOrder( aCanvas.GetView() );
+    ApplyPcbGalLayerDeps( aCanvas.GetView() );
+    aCanvas.ZoomToFit();
+}
+
+
+void ShowFootprintPair( WIDGET_DIFF_CANVAS& aCanvas, const FP_LIB_DIFFER::FOOTPRINT_MAP& aBefore,
+                        const FP_LIB_DIFFER::FOOTPRINT_MAP& aAfter, const wxString& aName )
+{
+    // Each view takes over the items it draws, so it gets copies parented to a board of their own
+    auto holder = std::make_shared<BOARD>();
+    holder->SetBoardUse( BOARD_USE::FPHOLDER );
+
+    // Pads only draw on layers their board enables, and a library footprint may use any of them
+    holder->SetEnabledLayers( LSET::AllLayersMask() );
+
+    auto copy = [&]( const FP_LIB_DIFFER::FOOTPRINT_MAP& aSide ) -> FOOTPRINT*
+    {
+        auto footprint = aSide.find( aName );
+
+        if( footprint == aSide.end() || !footprint->second )
+            return nullptr;
+
+        FOOTPRINT* clone = static_cast<FOOTPRINT*>( footprint->second->Clone() );
+        holder->Add( clone, ADD_MODE::APPEND, true );
+        return clone;
+    };
+
+    FOOTPRINT* before = copy( aBefore );
+    FOOTPRINT* after = copy( aAfter );
+
+    ConfigureFpDiffCanvasContext( aCanvas, before, after, holder );
 }
 
 } // namespace KICAD_DIFF

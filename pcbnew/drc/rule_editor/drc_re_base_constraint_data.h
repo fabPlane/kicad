@@ -38,8 +38,8 @@ class DRC_RE_BASE_CONSTRAINT_DATA : public RULE_EDITOR_DATA_BASE
 public:
     DRC_RE_BASE_CONSTRAINT_DATA() = default;
 
-    explicit DRC_RE_BASE_CONSTRAINT_DATA( int aId, int aParentId, const wxString& aRuleName ) :
-            RULE_EDITOR_DATA_BASE( aId, aParentId, aRuleName )
+    explicit DRC_RE_BASE_CONSTRAINT_DATA( int aId, const wxString& aRuleName ) :
+            RULE_EDITOR_DATA_BASE( aId, aRuleName )
     {
     }
 
@@ -81,6 +81,12 @@ public:
         return {};
     }
 
+    /**
+     * Returns a predicate this panel holds in its own fields rather than in the rule condition,
+     * such as a via type. It is written in front of the condition, joined with &&.
+     */
+    virtual wxString GetConditionPredicate() const { return wxEmptyString; }
+
     std::vector<PCB_LAYER_ID> GetLayers() { return m_layers; }
 
     void SetLayers( std::vector<PCB_LAYER_ID> aLayers ) { m_layers = aLayers; }
@@ -101,22 +107,6 @@ public:
 
     void SetGeneratedRule( const wxString& aRule ) { m_generatedRule = aRule; }
 
-    wxString GetOriginalRuleText() const { return m_originalRuleText; }
-
-    void SetOriginalRuleText( const wxString& aText ) { m_originalRuleText = aText; }
-
-    bool WasEdited() const { return m_wasEdited; }
-
-    void SetWasEdited( bool aEdited ) { m_wasEdited = aEdited; }
-
-    int GetOriginalEntryCount() const { return m_originalEntryCount; }
-
-    void SetOriginalEntryCount( int aCount ) { m_originalEntryCount = aCount; }
-
-    int GetSourceRule() const { return m_sourceRule; }
-
-    void SetSourceRule( int aIndex ) { m_sourceRule = aIndex; }
-
     SEVERITY GetSeverity() const { return m_severity; }
 
     void SetSeverity( SEVERITY aSeverity ) { m_severity = aSeverity; }
@@ -131,9 +121,6 @@ public:
         m_layerSource = source.m_layerSource;
         m_constraintCode = source.m_constraintCode;
         m_generatedRule = source.m_generatedRule;
-        m_originalRuleText = source.m_originalRuleText;
-        m_wasEdited = source.m_wasEdited;
-        m_originalEntryCount = source.m_originalEntryCount;
         m_severity = source.m_severity;
         m_ruleCondition = source.m_ruleCondition;
     }
@@ -150,14 +137,13 @@ public:
         if( aRuleName.IsEmpty() )
             return wxString( wxS( "\"\"" ) );
 
-        bool needsQuoting = false;
+        bool              needsQuoting = false;
+        std::vector<char> buffer( aRuleName.size() );
 
-        char ruleName[1024];
+        for( size_t ii = 0; ii < aRuleName.size(); ++ii )
+            buffer[ii] = aRuleName[ii];
 
-        for( size_t ii = 0; ii < sizeof( ruleName ) && ii < aRuleName.size(); ++ii )
-            ruleName[ii] = aRuleName[ii];
-
-        if( DSNLEXER::isNumber( ruleName, ruleName + std::min( aRuleName.size(), sizeof( ruleName ) ) ) )
+        if( DSNLEXER::isNumber( buffer.data(), buffer.data() + aRuleName.size() ) )
         {
             needsQuoting = true;
         }
@@ -267,11 +253,7 @@ private:
     wxString m_layerSource;     ///< Original layer text: "inner", "outer", or layer name
     wxString m_ruleCondition;
     wxString m_constraintCode;
-    wxString m_generatedRule;
-    wxString m_originalRuleText;
-    bool     m_wasEdited = false;
-    int                       m_originalEntryCount = 1;
-    int      m_sourceRule = -1; ///< Not copied, since a duplicate is a new rule
+    wxString                  m_generatedRule;
     SEVERITY m_severity = RPT_SEVERITY_UNDEFINED;
 };
 

@@ -55,6 +55,7 @@ public:
     int JobExportPlot( JOB* aJob );
     int JobSchErc( JOB* aJob );
     int JobSymUpgrade( JOB* aJob );
+    int JobSymDowngrade( JOB* aJob );
     int JobSymExportSvg( JOB* aJob );
     int JobUpgrade( JOB* aJob );
     int JobDowngrade( JOB* aJob );
@@ -82,7 +83,7 @@ private:
     int runSchMerge( const wxString& aAncestor, const wxString& aOurs, const wxString& aTheirs,
                      const wxString& aOutput, bool aInteractive );
     int runSymLibMerge( const wxString& aAncestor, const wxString& aOurs, const wxString& aTheirs,
-                        const wxString& aOutput );
+                        const wxString& aOutput, bool aInteractive );
 
 public:
 

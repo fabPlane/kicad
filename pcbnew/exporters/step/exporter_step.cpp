@@ -51,7 +51,7 @@
 #include <new>                        // std::bad_alloc
 #include <Message.hxx>                // OpenCascade messenger
 #include <Message_PrinterOStream.hxx> // OpenCascade output messenger
-#include <Standard_Failure.hxx>       // In open cascade
+#include <occ_failure_message.h>
 
 #include <Standard_Version.hxx>
 
@@ -649,7 +649,7 @@ bool EXPORTER_STEP::buildFootprint3DShapes( FOOTPRINT* aFootprint, const VECTOR2
             m_reporter->Report( wxString::Format( _( "Could not add 3D model for %s.\n"
                                                      "OpenCASCADE error: %s\n" ),
                                                   aFootprint->GetReference(),
-                                                  e.GetMessageString() ),
+                                                  OccFailureMessage( e ) ),
                                 RPT_SEVERITY_WARNING );
         }
 
@@ -690,12 +690,12 @@ bool EXPORTER_STEP::buildFootprint3DShapes( FOOTPRINT* aFootprint, const VECTOR2
             {
                 m_reporter->Report( wxString::Format( _( "Could not add extruded body for %s.\n"
                                                          "OpenCASCADE error: %s\n" ),
-                                                      aFootprint->GetReference(), e.GetMessageString() ),
+                                                      aFootprint->GetReference(), OccFailureMessage( e ) ),
                                     RPT_SEVERITY_WARNING );
             }
 
             // Add metallic pin extrusions for through-hole pads
-            if( body->m_standoff > 0 )
+            if( standoff > 0 )
             {
                 try
                 {
@@ -705,7 +705,7 @@ bool EXPORTER_STEP::buildFootprint3DShapes( FOOTPRINT* aFootprint, const VECTOR2
                 {
                     m_reporter->Report( wxString::Format( _( "Could not add extruded pins for %s.\n"
                                                              "OpenCASCADE error: %s\n" ),
-                                                          aFootprint->GetReference(), e.GetMessageString() ),
+                                                          aFootprint->GetReference(), OccFailureMessage( e ) ),
                                         RPT_SEVERITY_WARNING );
                 }
             }
@@ -721,7 +721,7 @@ bool EXPORTER_STEP::IsViaHoleOpen( const PCB_VIA& aVia, bool aFillAllVias )
     if( aFillAllVias )
         return false;
 
-    return aVia.GetFillingMode() != FILLING_MODE::FILLED && aVia.GetCappingMode() != CAPPING_MODE::CAPPED;
+    return aVia.ResolveFillingMode() != FILLING_MODE::FILLED && aVia.ResolveCappingMode() != CAPPING_MODE::CAPPED;
 }
 
 
@@ -1198,6 +1198,7 @@ bool EXPORTER_STEP::buildGraphic3DShape( BOARD_ITEM* aItem, const VECTOR2D& aOri
 
     case PCB_TABLE_T:
     case PCB_DRILL_CHART_T:
+    case PCB_STACKUP_TABLE_T:
     {
         PCB_TABLE* table = static_cast<PCB_TABLE*>( aItem );
 
@@ -1523,7 +1524,7 @@ bool EXPORTER_STEP::Export()
     }
     catch( const Standard_Failure& e )
     {
-        wxString errorMsg = e.GetMessageString();
+        wxString errorMsg = OccFailureMessage( e );
         m_reporter->Report( wxString::Format( _( "\nOpenCASCADE error: %s\n" ), errorMsg ),
                             RPT_SEVERITY_ERROR );
 

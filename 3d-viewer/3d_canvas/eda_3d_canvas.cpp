@@ -211,7 +211,7 @@ void EDA_3D_CANVAS::releaseOpenGL()
     if( m_glRC )
     {
         GL_CONTEXT_MANAGER* gl_mgr = Pgm().GetGLContextManager();
-        wxASSERT( gl_mgr );
+        wxCHECK2( gl_mgr, return );
 
         if( gl_mgr )
         {
@@ -360,6 +360,11 @@ void EDA_3D_CANVAS::ReloadRequest( BOARD* aBoard , S3D_CACHE* aCachePointer )
         m_boardAdapter.SetBoard( aBoard );
 
     m_boardAdapter.ReloadColorSettings();
+
+    m_currentRollOverItem = nullptr;
+
+    if( m_3d_render_opengl )
+        m_3d_render_opengl->SetCurrentRollOverItem( nullptr );
 
     if( m_3d_render )
         m_3d_render->ReloadRequest();
@@ -1248,10 +1253,12 @@ void EDA_3D_CANVAS::OnLeftUp( wxMouseEvent& event )
             sync.set_context( kiapi::common::commands::SyncSelectionContext::SSC_IMPLICIT );
 
             std::string payload;
-            kiapi::common::PackKiwayApiMessage( sync, payload );
 
-            frame->Kiway().ExpressMail( FRAME_PCB_EDITOR, MAIL_SELECTION, payload, frame );
-            frame->Kiway().ExpressMail( FRAME_SCH, MAIL_SELECTION, payload, frame );
+            if( kiapi::common::PackKiwayApiMessage( sync, payload ) )
+            {
+                frame->Kiway().ExpressMail( FRAME_PCB_EDITOR, MAIL_SELECTION, payload, frame );
+                frame->Kiway().ExpressMail( FRAME_SCH, MAIL_SELECTION, payload, frame );
+            }
         }
     }
 

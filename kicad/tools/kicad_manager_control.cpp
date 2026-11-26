@@ -464,7 +464,7 @@ int KICAD_MANAGER_CONTROL::NewFromRepository( const TOOL_EVENT& aEvent )
 
         if( hostKey )
         {
-            if( !KIGIT::PromptToTrustHost( m_frame, *hostKey, retriedAfterTrust ) )
+            if( KIGIT::PromptToTrustHost( m_frame, *hostKey, retriedAfterTrust ) != KIGIT::PROMPT_ANSWER::ACCEPTED )
                 return -1;
 
             retriedAfterTrust = true;
@@ -525,9 +525,10 @@ int KICAD_MANAGER_CONTROL::NewFromRepository( const TOOL_EVENT& aEvent )
                 KIGIT::EnsureGitIdentity( m_frame, m_frame, common, identity->identity );
             } );
 
-    // Keyed like the attach-time lookup, which never sees credentials embedded in the address
-    KIPLATFORM::SECRETS::StoreSecret( KIGIT_COMMON::ParseRemoteURL( dlg.GetRepoURL() ).url, dlg.GetUsername(),
-                                      dlg.GetPassword() );
+    // Keyed like the attach-time lookup, which never sees credentials embedded in the address. Async so an
+    // unlock prompt cannot hold the event loop
+    KIPLATFORM::SECRETS::StoreSecretAsync( KIGIT_COMMON::ParseRemoteURL( dlg.GetRepoURL() ).url, dlg.GetUsername(),
+                                           dlg.GetPassword() );
     Prj().GetLocalSettings().m_GitRepoUsername = dlg.GetUsername();
     Prj().GetLocalSettings().m_GitSSHKey = dlg.GetRepoSSHPath();
 
@@ -1015,21 +1016,10 @@ int KICAD_MANAGER_CONTROL::ShowPlayer( const TOOL_EVENT& aEvent )
 
     REENTRANCY_GUARD guard( &m_inShowPlayer );
 
-    try
-    {
-        player = m_frame->Kiway().Player( playerType, true );
-    }
-    catch( const IO_ERROR& err )
-    {
-        wxLogError( _( "Application failed to load:\n" ) + err.What() );
-        return -1;
-    }
+    player = m_frame->Kiway().Player( playerType, true );
 
-    if ( !player )
-    {
-        wxLogError( _( "Application cannot start." ) );
+    if( !player )
         return -1;
-    }
 
     if( !player->IsVisible() )   // A hidden frame might not have the document loaded.
     {
@@ -1208,7 +1198,7 @@ void KICAD_MANAGER_CONTROL::setTransitions()
 
     Go( &KICAD_MANAGER_CONTROL::ArchiveProject,     KICAD_MANAGER_ACTIONS::archiveProject.MakeEvent() );
     Go( &KICAD_MANAGER_CONTROL::UnarchiveProject,   KICAD_MANAGER_ACTIONS::unarchiveProject.MakeEvent() );
-    Go( &KICAD_MANAGER_CONTROL::ExportForOlderVersion, KICAD_MANAGER_ACTIONS::exportForOlderVersion.MakeEvent() );
+    Go( &KICAD_MANAGER_CONTROL::ExportForOlderVersion, ACTIONS::exportForOlderVersion.MakeEvent() );
     Go( &KICAD_MANAGER_CONTROL::ExploreProject,     KICAD_MANAGER_ACTIONS::openProjectDirectory.MakeEvent() );
     Go( &KICAD_MANAGER_CONTROL::RestoreLocalHistory, KICAD_MANAGER_ACTIONS::restoreLocalHistory.MakeEvent() );
     Go( &KICAD_MANAGER_CONTROL::ToggleLocalHistory, KICAD_MANAGER_ACTIONS::showLocalHistory.MakeEvent() );

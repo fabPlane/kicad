@@ -2108,7 +2108,11 @@ void PCB_IO_EAGLE::packagePad( FOOTPRINT* aFootprint, wxXmlNode* aTree )
         pad->SetOrientation( EDA_ANGLE( e.rot.value().degrees, DEGREES_T ) );
 
     // Eagle spokes are always '+'
-    pad->SetThermalSpokeAngle( ANGLE_0 );
+    pad->Padstack().ForEachUniqueLayer(
+            [&]( PCB_LAYER_ID layer )
+            {
+                pad->SetThermalSpokeAngle( layer, ANGLE_0 );
+            } );
 
     bool badPad = false;
 
@@ -2580,7 +2584,11 @@ void PCB_IO_EAGLE::packageSMD( FOOTPRINT* aFootprint, wxXmlNode* aTree ) const
         pad->SetOrientation( EDA_ANGLE( e.rot.value().degrees, DEGREES_T ) );
 
     // Eagle spokes are always '+'
-    pad->SetThermalSpokeAngle( ANGLE_0 );
+    pad->Padstack().ForEachUniqueLayer(
+            [&]( PCB_LAYER_ID aLayer )
+            {
+                pad->SetThermalSpokeAngle( aLayer, ANGLE_0 );
+            } );
 
     pad->SetLocalSolderPasteMargin( -eagleClamp( m_rules->mlMinCreamFrame,
                                                  (int) ( m_rules->mvCreamFrame * minPadSize ),
@@ -2621,7 +2629,13 @@ void PCB_IO_EAGLE::transferPad( const EPAD_COMMON& aEaglePad, PAD* aPad ) const
 
     // Solid connection to copper zones
     if( aEaglePad.thermals.has_value() && aEaglePad.thermals.value() == false )
-        aPad->SetLocalZoneConnection( ZONE_CONNECTION::FULL );
+    {
+        aPad->Padstack().ForEachUniqueLayer(
+                [&]( PCB_LAYER_ID layer )
+                {
+                    aPad->SetLocalZoneConnection( layer, ZONE_CONNECTION::FULL );
+                } );
+    }
 
     FOOTPRINT* footprint = aPad->GetParentFootprint();
     wxCHECK( footprint, /* void */ );
@@ -2773,7 +2787,7 @@ void PCB_IO_EAGLE::loadSignals( wxXmlNode* aSignals )
             usedNetNames.insert( netName );
         }
 
-        NETINFO_ITEM*             netInfo = new NETINFO_ITEM( m_board, netName, netCode );
+        NETINFO_ITEM*             netInfo = m_board->FindOrAddNet( netName, netCode );
         std::shared_ptr<NETCLASS> netclass;
 
         if( net->HasAttribute( "class" ) )
@@ -2788,9 +2802,7 @@ void PCB_IO_EAGLE::loadSignals( wxXmlNode* aSignals )
             }
         }
 
-        m_board->Add( netInfo );
-
-        // AppendNet deduplicates by name and renumbers to keep net codes
+        // FindOrAddNet deduplicates by name and renumbers to keep net codes
         // consecutive, so the authoritative code for this signal's items is
         // whatever the board accepted, not the local request counter.
         netCode = netInfo->GetNetCode();

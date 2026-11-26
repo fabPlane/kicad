@@ -184,6 +184,13 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDI
     registerHandler<ImportNetlist, ImportNetlistResponse>( &API_HANDLER_PCB::handleImportNetlist );
     registerHandler<ImportSpecctraSession, ImportSpecctraSessionResponse>(
             &API_HANDLER_PCB::handleImportSpecctraSession );
+    registerHandler<kiapi::board::tasks::StartRefillZonesTask, kiapi::common::tasks::StartTaskResponse>(
+            &API_HANDLER_PCB::handleStartRefillZonesTask );
+    registerHandler<kiapi::board::tasks::StartDrcTask,
+                    kiapi::common::tasks::StartTaskResponse>(
+            &API_HANDLER_PCB::handleStartDrcTask );
+    registerHandler<kiapi::board::tasks::GetDrcTaskResult, kiapi::board::tasks::DrcTaskResult>(
+            &API_HANDLER_PCB::handleGetDrcTaskResult, true );
 
     registerHandler<GetBoardEditorAppearanceSettings, BoardEditorAppearanceSettings>(
             &API_HANDLER_PCB::handleGetBoardEditorAppearanceSettings, HANDLER_MODE::GUI_ONLY );
@@ -532,6 +539,9 @@ static const std::vector<KICAD_T> s_allowedBoardTypes = {
     PCB_TEXT_T,
     PCB_TEXTBOX_T,
     PCB_TABLE_T,
+    PCB_DRILL_CHART_T,
+    PCB_STACKUP_TABLE_T,
+    PCB_DRILL_MAP_T,
     PCB_TRACE_T,
     PCB_ARC_T,
     PCB_VIA_T,
@@ -639,6 +649,9 @@ bool API_HANDLER_PCB::collectItems( const std::vector<KICAD_T>& aTypes, std::vec
 
         case PCB_SHAPE_T:
         case PCB_TABLE_T:
+        case PCB_DRILL_CHART_T:
+        case PCB_STACKUP_TABLE_T:
+        case PCB_DRILL_MAP_T:
         case PCB_TEXT_T:
         case PCB_TEXTBOX_T:
         case PCB_BARCODE_T:
@@ -1017,7 +1030,7 @@ HANDLER_RESULT<BoardDesignRulesResponse> API_HANDLER_PCB::handleGetBoardDesignRu
     constraints->mutable_silk_clearance()->set_value_nm( bds.m_SilkClearance );
     constraints->set_min_resolved_spokes( bds.m_MinResolvedSpokes );
     constraints->mutable_min_silk_text_height()->set_value_nm( bds.m_MinSilkTextHeight );
-    constraints->mutable_min_silk_text_thickness()->set_value_nm( bds.m_MinSilkTextThickness );
+    constraints->mutable_min_silk_text_thickness()->set_value_nm( bds.m_MinSilkLineWidth );
 
     kiapi::board::PredefinedSizes* sizes = rules->mutable_predefined_sizes();
 
@@ -1163,7 +1176,7 @@ HANDLER_RESULT<BoardDesignRulesResponse> API_HANDLER_PCB::handleSetBoardDesignRu
         newSettings.m_SilkClearance = constraints.silk_clearance().value_nm();
         newSettings.m_MinResolvedSpokes = constraints.min_resolved_spokes();
         newSettings.m_MinSilkTextHeight = constraints.min_silk_text_height().value_nm();
-        newSettings.m_MinSilkTextThickness = constraints.min_silk_text_thickness().value_nm();
+        newSettings.m_MinSilkLineWidth = constraints.min_silk_text_thickness().value_nm();
     }
 
     if( rules.has_predefined_sizes() )
@@ -2011,6 +2024,44 @@ HANDLER_RESULT<NetClassForNetsResponse> API_HANDLER_PCB::handleGetNetClassForNet
 }
 
 
+HANDLER_RESULT<std::vector<ZONE*>> API_HANDLER_PCB::resolveZonesToFill(
+        const google::protobuf::RepeatedPtrField<kiapi::common::types::KIID>& aZoneIds ) const
+{
+    std::vector<ZONE*> toFill;
+
+    for( const types::KIID& id : aZoneIds )
+    {
+        std::optional<BOARD_ITEM*> item = getItemById( KIID( id.value() ) );
+
+        if( !item || ( *item )->Type() != PCB_ZONE_T )
+        {
+            ApiResponseStatus e;
+            e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( fmt::format( "zone with ID {} not found on the board", id.value() ) );
+            return tl::unexpected( e );
+        }
+
+        ZONE* zone = static_cast<ZONE*>( *item );
+
+        // The filler silently skips rule areas, which would turn this into a false success
+        if( zone->GetIsRuleArea() )
+        {
+            ApiResponseStatus e;
+            e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( fmt::format( "zone with ID {} is a rule area and cannot be filled",
+                                              id.value() ) );
+            return tl::unexpected( e );
+        }
+
+        // A repeated id would enqueue concurrent fill tasks for the same zone
+        if( !alg::contains( toFill, zone ) )
+            toFill.push_back( zone );
+    }
+
+    return toFill;
+}
+
+
 HANDLER_RESULT<Empty> API_HANDLER_PCB::handleRefillZones( const HANDLER_CONTEXT<RefillZones>& aCtx )
 {
     if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() ); !documentValidation )
@@ -2044,41 +2095,15 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleRefillZones( const HANDLER_CONTEXT<
     }
     else
     {
-        std::vector<ZONE*> toFill;
+        HANDLER_RESULT<std::vector<ZONE*>> toFill = resolveZonesToFill( aCtx.Request.zones() );
 
-        for( const types::KIID& id : aCtx.Request.zones() )
-        {
-            std::optional<BOARD_ITEM*> item = getItemById( KIID( id.value() ) );
-
-            if( !item || ( *item )->Type() != PCB_ZONE_T )
-            {
-                ApiResponseStatus e;
-                e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-                e.set_error_message( fmt::format( "zone with ID {} not found on the board", id.value() ) );
-                return tl::unexpected( e );
-            }
-
-            ZONE* zone = static_cast<ZONE*>( *item );
-
-            // The filler silently skips rule areas, which would turn this into a false success
-            if( zone->GetIsRuleArea() )
-            {
-                ApiResponseStatus e;
-                e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-                e.set_error_message( fmt::format( "zone with ID {} is a rule area and cannot be filled",
-                                                  id.value() ) );
-                return tl::unexpected( e );
-            }
-
-            // A repeated id would enqueue concurrent fill tasks for the same zone
-            if( !alg::contains( toFill, zone ) )
-                toFill.push_back( zone );
-        }
+        if( !toFill )
+            return tl::unexpected( toFill.error() );
 
         std::unique_ptr<COMMIT> commit = createCommit();
         ZONE_FILLER             filler( board(), commit.get() );
 
-        if( !filler.Fill( toFill ) )
+        if( !filler.Fill( *toFill ) )
         {
             commit->Revert();
 
@@ -2348,11 +2373,13 @@ void API_HANDLER_PCB::collectDrcMarkers( DrcResultsResponse& aResponse ) const
 
         SEVERITY severity = marker->GetSeverity();
 
+        // Serialize() already filled in the excluded flag and description, and the severity when
+        // the marker is on a board
         msg->mutable_id()->set_value( marker->m_Uuid.AsStdString() );
-        msg->set_severity( ToProtoEnum<SEVERITY, types::RuleSeverity>( severity ) );
-        msg->set_excluded( marker->IsExcluded() );
         msg->set_exclusion_comment( marker->GetComment().ToUTF8() );
-        msg->set_description( marker->GetRCItem()->GetErrorMessage( true ).ToUTF8() );
+
+        if( msg->severity() == types::RuleSeverity::RS_UNKNOWN )
+            msg->set_severity( ToProtoEnum<SEVERITY, types::RuleSeverity>( severity ) );
 
         switch( severity )
         {

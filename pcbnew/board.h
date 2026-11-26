@@ -795,6 +795,15 @@ public:
     std::vector<PCB_MARKER*> ResolveDRCExclusions( bool aCreateMarkers );
 
     /**
+     * Resolve exclusions again after the project file was reread.
+     *
+     * @param aStale receives the markers whose exclusion the file no longer holds.  A fresh load
+     *               would not have them, so the caller removes them.
+     * @return the markers created for exclusions that had none, as ResolveDRCExclusions( true ).
+     */
+    std::vector<PCB_MARKER*> ReloadDRCExclusions( std::vector<PCB_MARKER*>& aStale );
+
+    /**
      * Scan existing markers and record data from any that are Excluded.
      */
     void RecordDRCExclusions();
@@ -1197,6 +1206,21 @@ public:
      * @return the net if found or NULL if not found.
      */
     NETINFO_ITEM* FindNet( const wxString& aNetname ) const;
+
+    /**
+     * Return the net with the given name, adding it to the board if there is none.
+     *
+     * Use this rather than Add() when the name may already exist, because Add() deletes a
+     * duplicate net.
+     *
+     * @param aNetName The net name.
+     * @param aNetCode The code for a new net, or -1 to assign one.
+     * @param aMode How to add a new net.
+     * @param aSkipConnectivity True to leave a new net out of the connectivity data.
+     * @return the net on this board with that name.
+     */
+    NETINFO_ITEM* FindOrAddNet( const wxString& aNetName, int aNetCode = -1, ADD_MODE aMode = ADD_MODE::INSERT,
+                                bool aSkipConnectivity = false );
 
     /**
      * Fetch the coupled netname for a given net.

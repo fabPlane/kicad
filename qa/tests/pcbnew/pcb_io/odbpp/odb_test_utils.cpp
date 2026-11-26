@@ -29,9 +29,11 @@
 #include <core/utf8.h>
 #include <footprint.h>
 #include <pad.h>
+#include <qa_utils/file_utils.h>
 #include <reporter.h>
 #include <pcbnew/pcb_io/odbpp/pcb_io_odbpp.h>
 #include <richio.h>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -50,7 +52,7 @@ fs::path ExportOdb( const BOARD& aBoard, const fs::path& aDir, const std::string
     props["units"] = aUnits;
     props["sigfig"] = aSigfig;
 
-    odbExporter.SaveBoard( wxString::FromUTF8( aDir.string() ), const_cast<BOARD&>( aBoard ), &props );
+    odbExporter.SaveBoard( KI_TEST::ToWxPath( aDir ), const_cast<BOARD&>( aBoard ), &props );
 
     return aDir;
 }
@@ -66,6 +68,20 @@ std::vector<std::string> ReadLines( const fs::path& aFile )
         lines.push_back( line );
 
     return lines;
+}
+
+
+std::vector<std::string> ReadLineFields( const std::string& aLine )
+{
+    // From C++23, we could use ispanstream and take a string_view instead of copying the string.
+    std::istringstream       stream( aLine );
+    std::vector<std::string> fields;
+    std::string              token;
+
+    while( stream >> token )
+        fields.push_back( token );
+
+    return fields;
 }
 
 
@@ -191,7 +207,7 @@ ODB_PRODUCT::ODB_PRODUCT( const fs::path& aRoot )
     wxString block;
     ODB_MATRIX_ROW row;
 
-    FILE_LINE_READER reader( wxString::FromUTF8( ( aRoot / "matrix" / "matrix" ).string() ) );
+    FILE_LINE_READER reader( KI_TEST::ToWxPath( aRoot / "matrix" / "matrix" ) );
 
     while( const char* line = reader.ReadLine() )
     {
@@ -255,7 +271,7 @@ ODB_PRODUCT::ODB_PRODUCT( const fs::path& aRoot )
 
     for( const fs::directory_entry& entry : fs::directory_iterator( aRoot / "steps", ec ) )
     {
-        if( entry.is_directory() && wxString::FromUTF8( entry.path().filename().string() ).IsSameAs( stepName, false ) )
+        if( entry.is_directory() && KI_TEST::ToWxPath( entry.path().filename() ).IsSameAs( stepName, false ) )
             m_stepDir = entry.path();
     }
 }
@@ -269,9 +285,9 @@ wxString ODB_PRODUCT::LayerFile( const wxString& aLayer, const wxString& aFile )
 
     for( const fs::directory_entry& entry : fs::directory_iterator( layersRoot, ec ) )
     {
-        if( entry.is_directory() && wxString::FromUTF8( entry.path().filename().string() ).IsSameAs( aLayer, false ) )
+        if( entry.is_directory() && KI_TEST::ToWxPath( entry.path().filename() ).IsSameAs( aLayer, false ) )
             layerDir = entry.path();
     }
 
-    return wxString::FromUTF8( ( layerDir / aFile.ToStdString() ).string() );
+    return KI_TEST::ToWxPath( layerDir / KI_TEST::ToFsPath( aFile ) );
 }

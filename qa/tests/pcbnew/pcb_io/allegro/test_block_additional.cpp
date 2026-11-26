@@ -95,13 +95,14 @@ static void TestBeagleBoneBlack_0x0F_SlotG1( const BLOCK_BASE& aBlock )
     const auto& blk = static_cast<const BLOCK<BLK_0x0F_FUNCTION_SLOT>&>( aBlock ).GetData();
     BOOST_TEST( blk.m_Key == 0xbf0 );
 
-    BOOST_TEST( blk.m_Ptr0x06 == 0xb91 );
-    BOOST_TEST( blk.m_Next.value_or( 0 ) == 0xb91 ); // Last slot in component
+    BOOST_TEST( blk.m_Next == 0xb91 );
+    BOOST_TEST( blk.m_ParentComponentPtr.value_or( 0 ) == 0xb91 ); // Last slot, so both point at the 0x06
 
-    BOOST_TEST( blk.m_SlotName == 0x2ba );
-    BOOST_TEST( blk.m_Ptr0x11 == 0x060aa );
+    BOOST_TEST( blk.m_SlotNameStrId == 0x2ba );
+    BOOST_TEST( blk.m_PinNamePtr == 0x060aa );
 
-    BOOST_TEST( blk.GetCompDeviceTypeStr() == "RES_10K_1/16W_1%_0402_402_10K,1" );
+    BOOST_REQUIRE( blk.GetCompDeviceTypeStr().has_value() );
+    BOOST_TEST( *blk.GetCompDeviceTypeStr() == "RES_10K_1/16W_1%_0402_402_10K,1" );
 }
 
 
@@ -115,13 +116,14 @@ static void TestOpenBreath_0x0F_SlotAM4096_G1( const BLOCK_BASE& aBlock )
     const auto& blk = static_cast<const BLOCK<BLK_0x0F_FUNCTION_SLOT>&>( aBlock ).GetData();
     BOOST_TEST( blk.m_Key == 0x12d );
 
-    BOOST_TEST( blk.m_Ptr0x06 == 0x126 );
-    BOOST_TEST( blk.m_Next.value_or( 0 ) == 0x126 ); // Last slot in component
+    BOOST_TEST( blk.m_ParentComponentPtr.value_or( 0 ) == 0x126 );
+    BOOST_TEST( blk.m_Next == 0x126 ); // Last slot in component
 
-    BOOST_TEST( blk.m_SlotName == 0x87 );
-    BOOST_TEST( blk.m_Ptr0x11 == 0x264 ); // ptr to "ZERO"
+    BOOST_TEST( blk.m_SlotNameStrId == 0x87 );
+    BOOST_TEST( blk.m_PinNamePtr == 0x264 ); // ptr to "ZERO"
 
-    BOOST_TEST( blk.GetCompDeviceTypeStr() == "AM4096" );
+    BOOST_REQUIRE( blk.GetCompDeviceTypeStr().has_value() );
+    BOOST_TEST( *blk.GetCompDeviceTypeStr() == "AM4096" );
 }
 
 
@@ -265,6 +267,35 @@ static void TestMIMXRT1170_0x36_X05DefTable( const BLOCK_BASE& aBlock )
 
 
 /**
+ * The only 0x35 file reference record in this board. Seems to hold "terminator.log".
+ */
+static void TestRects0x35FileRef( const BLOCK_BASE& aBlock )
+{
+    BOOST_REQUIRE( aBlock.GetBlockType() == 0x35 );
+
+    const auto& blk = static_cast<const BLOCK<BLK_0x35_FILE_REF>&>( aBlock ).GetData();
+
+    BOOST_TEST( blk.m_T2 == 0x00 );
+    BOOST_TEST( blk.m_T3 == 0x01 );
+
+    // The header pair for this board is tail 0x77, head 0xa5
+    BOOST_TEST( blk.m_Next == 0x77 );
+    BOOST_TEST( blk.m_Key == 0xa5 );
+
+    BOOST_TEST( aBlock.GetNext() == 0x77 );
+    BOOST_TEST( aBlock.GetKey() == 0xa5 );
+
+
+    BOOST_TEST( std::string( blk.m_LogFile.data() ) == "terminator.log" );
+    BOOST_TEST( std::string( blk.m_EclReportFile.data() ) == "eclrpt.txt" );
+    BOOST_TEST( std::string( blk.m_EclLogFile.data() ) == "eclrep.log" );
+    BOOST_TEST( blk.m_UnusedFile[0] == '\0' );
+
+    BOOST_TEST( std::string( blk.m_Version.data() ) == "1.0" );
+}
+
+
+/**
  * The registry of additional block tests, keyed by board name and block offset.
  *
  * The test function takes the parsed block as an argument, and can perform any additional
@@ -290,6 +321,9 @@ static const std::unordered_map<BLOCK_TEST_KEY, BLOCK_TEST_FUNC> additionalBlock
 
     // 0x36 definition tables
     { { "MIMXRT1170_EVKB",            0x00cce25c }, TestMIMXRT1170_0x36_X05DefTable },
+
+    // 0x35 file reference records
+    { { "rects",                      0x00032410 }, TestRects0x35FileRef },
 };
 // clang-format on
 

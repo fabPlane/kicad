@@ -347,8 +347,16 @@ void CADSTAR_PCB_ARCHIVE_LOADER::loadBoardStackup()
         cadstarBoardStackup.back().ConstructionLayers.clear();
     }
 
+    const int sourceCopperLayers = m_numCopperLayers;
+
     // Make sure it is an even number of layers (KiCad doesn't yet support unbalanced stack-ups)
-    if( ( m_numCopperLayers % 2 ) != 0 )
+    if( cadstarBoardStackup.size() == 1 )
+    {
+        // Single-sided board gets an empty back copper layer
+        cadstarBoardStackup.emplace_back();
+        ++m_numCopperLayers;
+    }
+    else if( ( m_numCopperLayers % 2 ) != 0 )
     {
         LAYER_BLOCK bottomLayer = cadstarBoardStackup.back();
         cadstarBoardStackup.pop_back();
@@ -528,6 +536,17 @@ void CADSTAR_PCB_ARCHIVE_LOADER::loadBoardStackup()
 
     int numElecLayersProcessed = 0;
 
+    // Non-electrical layers name their side through the physical layer they sit on
+    PHYSICAL_LAYER_ID bottomPhysicalLayer = 1;
+
+    for( const LAYER_ID& cadstarLayerID : Assignments.Layerdefs.LayerStack )
+    {
+        const LAYER& layer = Assignments.Layerdefs.Layers.at( cadstarLayerID );
+
+        if( layer.Type == LAYER_TYPE::ELEC || layer.Type == LAYER_TYPE::POWER )
+            bottomPhysicalLayer = std::max( bottomPhysicalLayer, layer.PhysicalLayer );
+    }
+
     // Map CADSTAR documentation layers to KiCad "User layers"
     int                       currentDocLayer = 0;
     std::vector<PCB_LAYER_ID> docLayers = { Dwgs_User, Cmts_User, User_1, User_2, User_3, User_4,
@@ -549,10 +568,19 @@ void CADSTAR_PCB_ARCHIVE_LOADER::loadBoardStackup()
         auto selectLayerID =
             [&]( PCB_LAYER_ID aFront, PCB_LAYER_ID aBack, LOG_LEVEL aLogType )
             {
-                if( numElecLayersProcessed >= m_numCopperLayers )
-                    kicadLayerID = aBack;
-                else
-                    kicadLayerID = aFront;
+                // Padding layers have no CADSTAR counterpart to count
+                bool isBack = numElecLayersProcessed >= sourceCopperLayers;
+
+                // Stack order is only a fallback, it says nothing about the side
+                if( curLayer.Type == LAYER_TYPE::NONELEC && curLayer.PhysicalLayer != UNDEFINED_PHYSICAL_LAYER )
+                {
+                    if( curLayer.PhysicalLayer <= 1 )
+                        isBack = false;
+                    else if( curLayer.PhysicalLayer >= bottomPhysicalLayer )
+                        isBack = true;
+                }
+
+                kicadLayerID = isBack ? aBack : aFront;
 
                 switch( aLogType )
                 {
@@ -1214,10 +1242,22 @@ PAD* CADSTAR_PCB_ARCHIVE_LOADER::getKiCadPad( const COMPONENT_PAD& aCadstarPad, 
     }
 
     if( csPadcode.ReliefClearance != UNDEFINED_VALUE )
-        pad->SetThermalGap( getKiCadLength( csPadcode.ReliefClearance, 0.5 ) );
+    {
+        pad->Padstack().ForEachUniqueLayer(
+                [&]( PCB_LAYER_ID layer )
+                {
+                    pad->SetThermalGap( layer, getKiCadLength( csPadcode.ReliefClearance, 0.5 ) );
+                } );
+    }
 
     if( csPadcode.ReliefWidth != UNDEFINED_VALUE )
-        pad->SetLocalThermalSpokeWidthOverride( getKiCadLength( csPadcode.ReliefWidth, 0.5 ) );
+    {
+        pad->Padstack().ForEachUniqueLayer(
+                [&]( PCB_LAYER_ID layer )
+                {
+                    pad->SetLocalThermalSpokeWidthOverride( layer, getKiCadLength( csPadcode.ReliefWidth, 0.5 ) );
+                } );
+    }
 
     if( csPadcode.DrillDiameter != UNDEFINED_VALUE )
     {
@@ -1762,25 +1802,42 @@ void CADSTAR_PCB_ARCHIVE_LOADER::loadComponents()
         {
             PART part = Parts.PartDefinitions.at( comp.PartID );
 
-            // Only do this when the number of pins in the part definition equals the number of
-            // pads in the footprint.
-            if( part.Definition.Pins.size() == footprint->Pads().size() )
+            // CADSTAR joins a part pin to the pad with the same identifier, so the pin count may
+            // exceed the pad count. Renames are collected first so one cannot capture another
+            std::map<wxString, std::vector<PAD*>> padsByIdentifier;
+
+            for( PAD* pad : footprint->Pads() )
+                padsByIdentifier[pad->GetNumber()].push_back( pad );
+
+            std::map<PAD*, wxString> renames;
+            const bool               sameCount = part.Definition.Pins.size() == footprint->Pads().size();
+
+            for( const auto& [pinID, pin] : part.Definition.Pins )
             {
-                for( std::pair<PART_DEFINITION_PIN_ID, PART::DEFINITION::PIN> pinPair :
-                        part.Definition.Pins )
-                {
-                    PART::DEFINITION::PIN pin = pinPair.second;
-                    wxString              pinName = pin.Name;
+                wxString pinName = pin.Name;
 
-                    if( pinName.empty() )
-                        pinName = pin.Identifier;
+                if( pinName.empty() )
+                    pinName = pin.Identifier;
 
-                    if( pinName.empty() )
-                        pinName = wxString::Format( wxT( "%ld" ), pin.ID );
+                if( pinName.empty() )
+                    pinName = wxString::Format( wxT( "%ld" ), pin.ID );
 
-                    getPadReference( footprint, pin.ID )->SetNumber( pinName );
-                }
+                std::vector<PAD*> targets;
+
+                auto it = padsByIdentifier.find( pin.Identifier );
+
+                // PCB-only pads have no identifier and must not match a pin without one
+                if( !pin.Identifier.empty() && it != padsByIdentifier.end() )
+                    targets = it->second;
+                else if( sameCount )
+                    targets.push_back( getPadReference( footprint, pin.ID ) );
+
+                for( PAD* pad : targets )
+                    renames.emplace( pad, pinName );
             }
+
+            for( const auto& [pad, name] : renames )
+                pad->SetNumber( name );
         }
 
         //Override pads with pad exceptions
@@ -3054,7 +3111,10 @@ SHAPE_POLY_SET CADSTAR_PCB_ARCHIVE_LOADER::getPolySetFromCadstarShape( const SHA
     polySet.ClearArcs();
 
     if( aLineThickness > 0 )
-        polySet.Inflate( aLineThickness / 2, CORNER_STRATEGY::ROUND_ALL_CORNERS, aContainer->GetMaxError() );
+    {
+        polySet.Inflate( aLineThickness / 2, CORNER_STRATEGY::ROUND_ALL_CORNERS,
+                         m_board->GetDesignSettings().m_MaxError );
+    }
 
 #ifdef DEBUG
     for( int i = 0; i < polySet.OutlineCount(); ++i )
@@ -3590,7 +3650,7 @@ int CADSTAR_PCB_ARCHIVE_LOADER::getKiCadHatchCodeGap( const HATCHCODE_ID& aCadst
     checkAndLogHatchCode( aCadstarHatchcodeID );
     HATCHCODE hcode = getHatchCode( aCadstarHatchcodeID );
 
-    if( hcode.Hatches.size() < 1 || hcode.Hatches.at( 0 ).LineWidth == UNDEFINED_VALUE )
+    if( hcode.Hatches.size() < 1 || hcode.Hatches.at( 0 ).Step == UNDEFINED_VALUE )
         return m_board->GetDesignSettings().GetDefaultZoneSettings().m_HatchGap;
     else
         return getKiCadLength( hcode.Hatches.at( 0 ).Step, 1.5 );
@@ -4012,7 +4072,7 @@ NETINFO_ITEM* CADSTAR_PCB_ARCHIVE_LOADER::getKiCadNet( const NET_ID& aCadstarNet
         }
 
         std::shared_ptr<NET_SETTINGS>& netSettings = m_board->GetDesignSettings().m_NetSettings;
-        NETINFO_ITEM*                  netInfo = new NETINFO_ITEM( m_board, newName, ++m_numNets );
+        NETINFO_ITEM*                  netInfo = m_board->FindOrAddNet( newName, ++m_numNets, ADD_MODE::APPEND );
         std::shared_ptr<NETCLASS>      netclass;
 
         std::tuple<ROUTECODE_ID, NETCLASS_ID, SPACING_CLASS_ID> key = { csNet.RouteCodeID,
@@ -4059,7 +4119,6 @@ NETINFO_ITEM* CADSTAR_PCB_ARCHIVE_LOADER::getKiCadNet( const NET_ID& aCadstarNet
         m_board->GetDesignSettings().m_NetSettings->SetNetclassPatternAssignment( newName, netclass->GetName() );
 
         netInfo->SetNetClass( netclass );
-        m_board->Add( netInfo, ADD_MODE::APPEND );
         m_netMap.insert( { aCadstarNetID, netInfo } );
         return netInfo;
     }

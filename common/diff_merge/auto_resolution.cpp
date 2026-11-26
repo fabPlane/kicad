@@ -24,6 +24,7 @@
 #include <diff_merge/auto_resolution.h>
 
 #include <nlohmann/json.hpp>
+#include <units_provider.h>
 
 #include <wx/intl.h>
 
@@ -121,6 +122,8 @@ ApplyAutoResolutions( MERGE_PLAN&                          aPlan,
     std::vector<std::pair<std::size_t, ITEM_RES>> staged;
     staged.reserve( aConflictActionIndices.size() );
 
+    const std::set<KIID_PATH> unresolved( aPlan.unresolved.begin(), aPlan.unresolved.end() );
+
     for( std::size_t actionIdx : aConflictActionIndices )
     {
         if( actionIdx >= aPlan.actions.size() )
@@ -137,7 +140,8 @@ ApplyAutoResolutions( MERGE_PLAN&                          aPlan,
 
         if( it == aResolutions.end() )
         {
-            if( action.kind == ITEM_RES::MERGE_PROPS )
+            // The engine's own property merge stands unless it left a property conflict
+            if( action.kind == ITEM_RES::MERGE_PROPS && !unresolved.contains( action.id ) )
                 continue;
 
             out.status         = APPLY_AUTO_RESOLUTIONS_STATUS::PARTIAL;
@@ -214,6 +218,122 @@ CollectUnresolvedConflicts( const MERGE_PLAN&                aPlan,
 }
 
 
+void SettleLibraryMerges( MERGE_PLAN& aPlan, const std::function<bool( const KIID_PATH& )>& aCanCombine,
+                          const std::function<std::set<wxString>( const KIID_PATH& )>& aEditedNames )
+{
+    std::set<KIID_PATH> unresolved( aPlan.unresolved.begin(), aPlan.unresolved.end() );
+
+    for( ITEM_RESOLUTION& action : aPlan.actions )
+    {
+        if( action.kind != ITEM_RES::MERGE_PROPS )
+            continue;
+
+        if( aCanCombine( action.id ) )
+        {
+            unresolved.erase( action.id );
+            continue;
+        }
+
+        if( !aEditedNames )
+            continue;
+
+        action.kind = ITEM_RES::KEEP;
+        action.props.clear();
+
+        // Named for the details, which would otherwise omit field and pin edits
+        for( const wxString& name : aEditedNames( action.id ) )
+        {
+            PROPERTY_RESOLUTION prop;
+            prop.name = name;
+            action.props.push_back( std::move( prop ) );
+        }
+
+        if( unresolved.insert( action.id ).second )
+            aPlan.unresolved.push_back( action.id );
+    }
+
+    std::erase_if( aPlan.unresolved,
+                   [&]( const KIID_PATH& aId )
+                   {
+                       return !unresolved.contains( aId );
+                   } );
+}
+
+
+namespace
+{
+
+    wxString editedName( const ITEM_CHANGE& aChild )
+    {
+        // A bare pin number could collide with a field of that name
+        if( aChild.refdes && aChild.typeName == _( "Pin" ) )
+            return wxString::Format( _( "Pin %s" ), *aChild.refdes );
+
+        return aChild.refdes.value_or( aChild.typeName );
+    }
+
+
+    /// The deltas aChange makes to the edit EditedNames calls aName, keyed by what the details call each one
+    std::map<wxString, const PROPERTY_DELTA*> deltasNamed( const ITEM_CHANGE* aChange, const wxString& aName )
+    {
+        std::map<wxString, const PROPERTY_DELTA*> deltas;
+
+        if( !aChange )
+            return deltas;
+
+        for( const PROPERTY_DELTA& delta : aChange->properties )
+        {
+            if( delta.name == aName )
+                deltas[aName] = &delta;
+        }
+
+        for( const ITEM_CHANGE& child : aChange->children )
+        {
+            if( editedName( child ) != aName )
+                continue;
+
+            for( const PROPERTY_DELTA& delta : child.properties )
+                deltas[aName + wxS( " " ) + delta.name] = &delta;
+        }
+
+        return deltas;
+    }
+
+} // namespace
+
+
+std::set<wxString> EditedNames( const ITEM_CHANGE& aChange )
+{
+    std::set<wxString> names;
+
+    for( const PROPERTY_DELTA& delta : aChange.properties )
+        names.insert( delta.name );
+
+    for( const ITEM_CHANGE& child : aChange.children )
+        names.insert( editedName( child ) );
+
+    return names;
+}
+
+
+std::function<std::set<wxString>( const KIID_PATH& )> EditedNamesIn( const DOCUMENT_DIFF& aOurs,
+                                                                    const DOCUMENT_DIFF& aTheirs )
+{
+    return [ours = IndexChangesByKiid( aOurs ), theirs = IndexChangesByKiid( aTheirs )]( const KIID_PATH& aId )
+    {
+        std::set<wxString> edited;
+
+        for( const std::map<KIID_PATH, const ITEM_CHANGE*>* changes : { &ours, &theirs } )
+        {
+            if( auto it = changes->find( aId ); it != changes->end() )
+                edited.merge( EditedNames( *it->second ) );
+        }
+
+        return edited;
+    };
+}
+
+
 std::optional<BOX2I>
 ResolveConflictBBox( const KIID_PATH&                  aId,
                      const std::map<KIID_PATH, BOX2I>& aPrimary,
@@ -248,10 +368,52 @@ ResolveConflictBBox( const KIID_PATH&                  aId,
 }
 
 
-wxString BuildConflictDetailText( const ITEM_RESOLUTION& aResolution )
+wxString ConflictValuesText( const ITEM_RESOLUTION& aResolution, const ITEM_CHANGE* aOurs, const ITEM_CHANGE* aTheirs,
+                             const UNITS_PROVIDER* aUnits )
 {
     wxString text;
-    text << _( "Item id: " ) << aResolution.id.AsString() << wxS( "\n" );
+
+    auto show = [&]( const DIFF_VALUE& aValue )
+    {
+        wxString shown = aUnits ? aValue.ToDisplayString( aUnits->GetUserUnits(), aUnits->GetIuScale() )
+                                : aValue.ToDisplayString();
+
+        // Each value takes one indented line
+        shown.Replace( wxS( "\n" ), wxS( " " ) );
+        return shown;
+    };
+
+    for( const PROPERTY_RESOLUTION& prop : aResolution.props )
+    {
+        std::map<wxString, const PROPERTY_DELTA*> ours = deltasNamed( aOurs, prop.name );
+        std::map<wxString, const PROPERTY_DELTA*> theirs = deltasNamed( aTheirs, prop.name );
+        std::map<wxString, const PROPERTY_DELTA*> either = theirs;
+
+        either.insert( ours.begin(), ours.end() );
+
+        for( const auto& [label, delta] : either )
+        {
+            auto valueOn = [&]( const std::map<wxString, const PROPERTY_DELTA*>& aSide )
+            {
+                auto it = aSide.find( label );
+                return show( it != aSide.end() ? it->second->after : delta->before );
+            };
+
+            text << wxS( "\n" ) << label << wxS( "\n    " )
+                 << wxString::Format( _( "Ancestor: %s" ), show( delta->before ) ) << wxS( "\n    " )
+                 << wxString::Format( _( "Ours: %s" ), valueOn( ours ) ) << wxS( "\n    " )
+                 << wxString::Format( _( "Theirs: %s" ), valueOn( theirs ) ) << wxS( "\n" );
+        }
+    }
+
+    return text;
+}
+
+
+wxString BuildConflictDetailText( const ITEM_RESOLUTION& aResolution, const ITEM_CHANGE* aOurs,
+                                  const ITEM_CHANGE* aTheirs, const UNITS_PROVIDER* aUnits )
+{
+    wxString text;
     text << _( "Current resolution: " );
 
     switch( aResolution.kind )
@@ -269,7 +431,21 @@ wxString BuildConflictDetailText( const ITEM_RESOLUTION& aResolution )
                                         "%zu property edits in this resolution.\n", aResolution.props.size() ),
                               aResolution.props.size() );
 
-    return text;
+    // A count alone does not say which edit a side would lose
+    wxString names;
+
+    for( const PROPERTY_RESOLUTION& prop : aResolution.props )
+    {
+        if( !names.IsEmpty() )
+            names << wxS( ", " );
+
+        names << prop.name;
+    }
+
+    if( !names.IsEmpty() )
+        text << wxString::Format( _( "Changed on either side: %s\n" ), names );
+
+    return text + ConflictValuesText( aResolution, aOurs, aTheirs, aUnits );
 }
 
 } // namespace KICAD_DIFF

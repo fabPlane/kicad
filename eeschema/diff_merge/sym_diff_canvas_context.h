@@ -21,6 +21,10 @@
 #ifndef SYM_DIFF_CANVAS_CONTEXT_H
 #define SYM_DIFF_CANVAS_CONTEXT_H
 
+#include <diff_merge/sym_lib_differ.h>
+
+#include <memory>
+
 class LIB_SYMBOL;
 class WIDGET_DIFF_CANVAS;
 
@@ -28,7 +32,13 @@ class WIDGET_DIFF_CANVAS;
 namespace KICAD_DIFF
 {
 
-void ConfigureSymDiffCanvasContext( WIDGET_DIFF_CANVAS& aCanvas, LIB_SYMBOL* aBefore, LIB_SYMBOL* aAfter );
+/// Draw aBefore and aAfter, which aOwner keeps alive for as long as the canvas shows them.
+void ConfigureSymDiffCanvasContext( WIDGET_DIFF_CANVAS& aCanvas, LIB_SYMBOL* aBefore, LIB_SYMBOL* aAfter,
+                                    std::shared_ptr<const void> aOwner = nullptr );
+
+/// Draw the symbol aName as it is in aBefore and aAfter.
+void ShowSymbolPair( WIDGET_DIFF_CANVAS& aCanvas, const SYM_LIB_DIFFER::SYMBOL_MAP& aBefore,
+                     const SYM_LIB_DIFFER::SYMBOL_MAP& aAfter, const wxString& aName );
 
 } // namespace KICAD_DIFF
 

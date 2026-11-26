@@ -49,6 +49,17 @@ public:
     static git_repository* GetRepositoryForFile( const char* aFilename, wxString* aError = nullptr,
                                                  wxString* aTrustCommand = nullptr );
 
+    // Writes core.longpaths into a new repository, as Windows refuses paths past MAX_PATH without it.
+    // Windows only
+    static int AllowLongPaths( git_repository* aRepo );
+
+    // Gives a handle core.longpaths from a separate config file, leaving the repository's own config alone.
+    // Windows only
+    static int AttachLongPaths( git_repository* aRepo );
+
+    // The file AttachLongPaths keeps its setting in
+    static wxString LongPathsConfigPath();
+
     /**
      * Create a new branch based on HEAD.
      *
@@ -139,7 +150,25 @@ public:
 
     /// Match a project-relative path against the shared transient patterns.
     /// Callers must keep tracked and staged files visible even when their names match.
-    static bool IsTransientGitFile( const wxFileName& aFile );
+    /// @param aIsDirectory The path is a directory git reported as one entry.
+    static bool IsTransientGitFile( const wxFileName& aFile, bool aIsDirectory = false );
+
+    /**
+     * Whether a changed file is left out of what the project has to commit. Only a file git does not know
+     * at all qualifies, inside the project and matching the transient patterns. A tracked or staged file is
+     * carried by a commit and blocks a merge, so hiding it would leave nothing to commit and no way forward.
+     *
+     * @param aRelativePath The file relative to the working directory, '/'-separated.
+     * @param aProjectPrefix The project's folder as ProjectPrefix gives it.
+     * @param aGitStatus The file's git_status_t flags.
+     * @param aIsDirectory Git reported the path as a directory or a submodule.
+     */
+    static bool IsHiddenTransient( const wxString& aRelativePath, const wxString& aProjectPrefix,
+                                   unsigned int aGitStatus, bool aIsDirectory = false );
+
+    /// Whether a commit stops tracking the nested repository at @p aRelativePath rather than recording it.
+    /// Its name matches a transient pattern and no submodule is configured for it.
+    static bool IsTransientGitlink( git_repository* aRepo, const wxString& aRelativePath );
 
     /**
      * The project's folder inside the repository, ending in a slash.
@@ -150,9 +179,13 @@ public:
     static std::optional<wxString> ProjectPrefix( const wxString& aWorkDir, const wxString& aProjectPath );
 
     /// Whether git routes @p aPath through the Git LFS filter.
-    /// aCommit reads the attributes that commit carries rather than the ones in hand, for
-    /// judging a version before it is checked out.
+    /// aCommit also includes that commit's attributes when judging a version before checkout,
+    /// with libgit2 1.3 or later. Older versions only check the index and working tree.
     static bool PathUsesGitLfs( git_repository* aRepo, const wxString& aPath, const git_oid* aCommit = nullptr );
+
+    /// The filter driver git add would run on @p aPath, such as lfs, which libgit2 cannot run. Empty for
+    /// none, nothing when the attributes cannot be read.
+    static std::optional<wxString> FilterDriver( git_repository* aRepo, const wxString& aPath );
 
     /**
      * Whether any committed file in the project's folder goes through Git LFS.

@@ -299,7 +299,34 @@ void WX_GRID::onDPIChanged(wxDPIChangedEvent& aEvt)
             hiddenCols.push_back( col );
     }
 
+#ifdef wxHAS_DPI_INDEPENDENT_PIXELS
+    const wxGridSizesInfo savedColSizes = GetColSizes();
+    const wxGridSizesInfo savedRowSizes = GetRowSizes();
+#endif
+
     aEvt.Skip();
+
+#ifdef wxHAS_DPI_INDEPENDENT_PIXELS
+    CallAfter(
+            [this, savedColSizes, savedRowSizes]()
+            {
+                BeginBatch();
+
+                for( const auto& [col, size] : savedColSizes.m_customSizes )
+                {
+                    if( size > 0 && static_cast<int>( col ) < GetNumberCols() )
+                        SetColSize( col, size );
+                }
+
+                for( const auto& [row, size] : savedRowSizes.m_customSizes )
+                {
+                    if( size > 0 && static_cast<int>( row ) < GetNumberRows() )
+                        SetRowSize( row, size );
+                }
+
+                EndBatch();
+            } );
+#endif
 
     if( !hiddenCols.empty() )
     {
@@ -404,6 +431,12 @@ void WX_GRID::EnableAlternateRowColors( bool aEnable )
 
 void WX_GRID::onGridCellSelect( wxGridEvent& aEvent )
 {
+    if( m_useNativeSelection )
+    {
+        aEvent.Skip();
+        return;
+    }
+
     // Highlight the selected cell.
     // Calling SelectBlock() allows a visual effect when cells are selected by tab or arrow keys.
     // Otherwise, one cannot really know what actual cell is selected.
@@ -473,7 +506,14 @@ void WX_GRID::onCellEditorShown( wxGridEvent& aEvent )
 
 void WX_GRID::onCellEditorHidden( wxGridEvent& aEvent )
 {
-    const int col = aEvent.GetCol();
+    EvaluateCell( aEvent.GetRow(), aEvent.GetCol() );
+    aEvent.Skip();
+}
+
+
+void WX_GRID::EvaluateCell( int aRow, int aCol )
+{
+    const int col = aCol;
 
     if( alg::contains( m_autoEvalCols, col ) )
     {
@@ -485,7 +525,7 @@ void WX_GRID::onCellEditorHidden( wxGridEvent& aEvent )
 
         m_eval->SetDefaultUnits( cellUnits );
 
-        const int row = aEvent.GetRow();
+        const int row = aRow;
 
         // Determine if this cell is marked as holding nullable values
         bool              isNullable = false;
@@ -548,8 +588,6 @@ void WX_GRID::onCellEditorHidden( wxGridEvent& aEvent )
                     }
                 } );
     }
-
-    aEvent.Skip();
 }
 
 
@@ -850,35 +888,7 @@ void WX_GRID::OnDeleteRows( const std::function<void( int row )>& aDeleter )
 void WX_GRID::OnDeleteRows( const std::function<bool( int row )>& aFilter,
                             const std::function<void( int row )>& aDeleter )
 {
-    wxArrayInt selectedRows = GetSelectedRows();
-
-    auto addSelectedRow = [&]( int row )
-    {
-        for( size_t i = 0; i < selectedRows.size(); ++i )
-        {
-            if( selectedRows[i] == row )
-                return;
-        }
-
-        selectedRows.push_back( row );
-    };
-
-    wxGridCellCoordsArray topLeft = GetSelectionBlockTopLeft();
-    wxGridCellCoordsArray botRight = GetSelectionBlockBottomRight();
-
-    for( size_t i = 0; i < std::min( topLeft.Count(), botRight.Count() ); ++i )
-    {
-        for( int row = topLeft[i].GetRow(); row <= botRight[i].GetRow(); ++row )
-            addSelectedRow( row );
-    }
-
-    wxGridCellCoordsArray cells = GetSelectedCells();
-
-    for( size_t i = 0; i < cells.Count(); ++i )
-        addSelectedRow( cells[i].GetRow() );
-
-    if( selectedRows.empty() && GetGridCursorRow() >= 0 )
-        selectedRows.push_back( GetGridCursorRow() );
+    std::vector<int> selectedRows = GetSelectedRowIndices();
 
     if( selectedRows.empty() )
         return;
@@ -893,11 +903,7 @@ void WX_GRID::OnDeleteRows( const std::function<bool( int row )>& aFilter,
         return;
 
     // Reverse sort so deleting a row doesn't change the indexes of the other rows.
-    selectedRows.Sort(
-            []( int* first, int* second )
-            {
-                return *second - *first;
-            } );
+    std::sort( selectedRows.rbegin(), selectedRows.rend() );
 
     int nextSelRow = selectedRows.back() - 1;
 
@@ -909,6 +915,31 @@ void WX_GRID::OnDeleteRows( const std::function<bool( int row )>& aFilter,
 
     for( int row : selectedRows )
         aDeleter( row );
+}
+
+
+std::vector<int> WX_GRID::GetSelectedRowIndices() const
+{
+    std::vector<bool> selected( GetNumberRows(), false );
+
+    for( const wxGridBlockCoords& block : GetSelectedBlocks() )
+    {
+        for( int row = block.GetTopRow(); row <= block.GetBottomRow(); ++row )
+            selected[row] = true;
+    }
+
+    std::vector<int> rows;
+
+    for( int row = 0; row < GetNumberRows(); ++row )
+    {
+        if( selected[row] )
+            rows.push_back( row );
+    }
+
+    if( rows.empty() && GetGridCursorRow() >= 0 )
+        rows.push_back( GetGridCursorRow() );
+
+    return rows;
 }
 
 
@@ -1208,17 +1239,20 @@ void WX_GRID::RecomputeGridWidths()
                 AutoSizeColumn( colIndex );
                 int colSize = GetColSize( colIndex );
 
+                // Give a bit more width to columns that have editors with graphic widgets
+                if( GetNumberRows() > 0 )
                 {
-                    wxGridCellEditor* editor = GetCellEditor( 0, colIndex );
-
-                    if( dynamic_cast<wxGridCellChoiceEditor*>( editor )
-                        || dynamic_cast<GRID_CELL_TEXT_BUTTON*>( editor )
-                        || dynamic_cast<GRID_CELL_COMBOBOX*>( editor ) )
+                    if( wxGridCellEditor* editor = GetCellEditor( 0, colIndex ) )
                     {
-                        colSize += 40;
-                    }
+                        if( dynamic_cast<wxGridCellChoiceEditor*>( editor )
+                            || dynamic_cast<GRID_CELL_TEXT_BUTTON*>( editor )
+                            || dynamic_cast<GRID_CELL_COMBOBOX*>( editor ) )
+                        {
+                            colSize += 40;
+                        }
 
-                    editor->DecRef();
+                        editor->DecRef();
+                    }
                 }
 
                 int minWidthScaled = FromDIP( minWidth );

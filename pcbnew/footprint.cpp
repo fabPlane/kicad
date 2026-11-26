@@ -158,6 +158,51 @@ private:
 };
 
 
+// Net-tie groups are comma-separated with backslash escapes and free whitespace, so compare and
+// serialize the parsed pad numbers rather than the raw text
+static std::vector<wxString> parseNetTiePadGroup( const wxString& aGroup )
+{
+    std::vector<wxString> padNumbers;
+    wxString              pad;
+    bool                  esc = false;
+
+    auto addPad =
+            [&]()
+            {
+                pad.Trim( true ).Trim( false );
+
+                if( !pad.IsEmpty() )
+                    padNumbers.push_back( pad );
+
+                pad.Clear();
+            };
+
+    for( wxUniChar ch : aGroup )
+    {
+        if( esc )
+        {
+            esc = false;
+            pad.Append( ch );
+        }
+        else if( ch == '\\' )
+        {
+            esc = true;
+        }
+        else if( ch == ',' )
+        {
+            addPad();
+        }
+        else
+        {
+            pad.Append( ch );
+        }
+    }
+
+    addPad();
+    return padNumbers;
+}
+
+
 FOOTPRINT::FOOTPRINT( BOARD* parent ) :
         BOARD_ITEM_CONTAINER( (BOARD_ITEM*) parent, PCB_FOOTPRINT_T ),
         m_attributes( 0 ),
@@ -211,6 +256,7 @@ FOOTPRINT::FOOTPRINT( const FOOTPRINT& aFootprint ) :
 
     m_netTiePadGroups                = aFootprint.m_netTiePadGroups;
     m_jumperPadGroups                = aFootprint.m_jumperPadGroups;
+    m_unitInfo                       = aFootprint.m_unitInfo;
     m_duplicatePadNumbersAreJumpers  = aFootprint.m_duplicatePadNumbersAreJumpers;
     m_allowMissingCourtyard          = aFootprint.m_allowMissingCourtyard;
     m_allowSolderMaskBridges         = aFootprint.m_allowSolderMaskBridges;
@@ -552,7 +598,8 @@ void FOOTPRINT::Serialize( google::protobuf::Any &aContainer ) const
             unitMsg->add_pin_numbers( pinNumber.ToUTF8() );
     }
 
-    aContainer.PackFrom( footprint );
+    if( !aContainer.PackFrom( footprint ) )
+        wxFAIL_MSG( wxT( "Failed to pack FOOTPRINT" ) );
 }
 
 
@@ -570,10 +617,9 @@ void FOOTPRINT::SerializeDefinition( kiapi::board::types::Footprint* aOutput ) c
     for( const wxString& group : GetNetTiePadGroups() )
     {
         types::NetTieDefinition* netTie = aOutput->add_net_ties();
-        wxStringTokenizer tokenizer( group, ", \t\r\n", wxTOKEN_STRTOK );
 
-        while( tokenizer.HasMoreTokens() )
-            netTie->add_pad_number( tokenizer.GetNextToken().ToUTF8() );
+        for( const wxString& padNumber : parseNetTiePadGroup( group ) )
+            netTie->add_pad_number( padNumber.ToUTF8() );
 
         netTie->set_group( group.ToUTF8() );
     }
@@ -655,7 +701,9 @@ void FOOTPRINT::SerializeDefinition( kiapi::board::types::Footprint* aOutput ) c
         kiapi::common::PackVector3D( *modelMsg.mutable_offset(), model.m_Offset );
         modelMsg.set_visible( model.m_Show );
         modelMsg.set_opacity( model.m_Opacity );
-        itemMsg->PackFrom( modelMsg );
+
+        if( !itemMsg->PackFrom( modelMsg ) )
+            wxFAIL_MSG( wxT( "Failed to pack FP_3DMODEL" ) );
     }
 }
 
@@ -682,14 +730,9 @@ bool FOOTPRINT::DeserializeDefinition( const kiapi::board::types::Footprint& aIn
 
         // Keep the text as written if it still names the same pads; otherwise the pad list is
         // authoritative and is written in KiCad's usual form
-        wxString          original = wxString::FromUTF8( netTieMsg.group() );
-        wxStringTokenizer tokenizer( original, ", \t\r\n", wxTOKEN_STRTOK );
-        std::vector<wxString> originalPads;
+        wxString original = wxString::FromUTF8( netTieMsg.group() );
 
-        while( tokenizer.HasMoreTokens() )
-            originalPads.push_back( tokenizer.GetNextToken() );
-
-        if( !original.IsEmpty() && originalPads == pads )
+        if( !original.IsEmpty() && parseNetTiePadGroup( original ) == pads )
         {
             AddNetTiePadGroup( original );
             continue;
@@ -699,10 +742,15 @@ bool FOOTPRINT::DeserializeDefinition( const kiapi::board::types::Footprint& aIn
 
         for( const wxString& pad : pads )
         {
+            wxString escaped = pad;
+
+            escaped.Replace( wxS( "\\" ), wxS( "\\\\" ) );
+            escaped.Replace( wxS( "," ), wxS( "\\," ) );
+
             if( !group.IsEmpty() )
                 group += wxS( ", " );
 
-            group += pad;
+            group += escaped;
         }
 
         if( !group.IsEmpty() )
@@ -758,8 +806,8 @@ bool FOOTPRINT::DeserializeDefinition( const kiapi::board::types::Footprint& aIn
     Models().clear();
     Points().clear();
 
-    for( PCB_3D_BODY* body : m_bodies )
-        Remove( body );
+    while( !m_bodies.empty() )
+        Remove( m_bodies.back() );
 
     for( const google::protobuf::Any& itemMsg : aInput.items() )
     {
@@ -828,7 +876,10 @@ bool FOOTPRINT::Deserialize( const google::protobuf::Any &aContainer )
     {
         mandatoryField = footprint.reference_field();
         mandatoryField.mutable_id()->set_id( (int) FIELD_T::REFERENCE );
-        buf.PackFrom( mandatoryField );
+
+        if( !buf.PackFrom( mandatoryField ) )
+            wxFAIL_MSG( wxT( "Failed to pack footprint reference field" ) );
+
         GetField( FIELD_T::REFERENCE )->Deserialize( buf );
     }
 
@@ -836,7 +887,10 @@ bool FOOTPRINT::Deserialize( const google::protobuf::Any &aContainer )
     {
         mandatoryField = footprint.value_field();
         mandatoryField.mutable_id()->set_id( (int) FIELD_T::VALUE );
-        buf.PackFrom( mandatoryField );
+
+        if( !buf.PackFrom( mandatoryField ) )
+            wxFAIL_MSG( wxT( "Failed to pack footpring value field" ) );
+
         GetField( FIELD_T::VALUE )->Deserialize( buf );
     }
 
@@ -844,7 +898,10 @@ bool FOOTPRINT::Deserialize( const google::protobuf::Any &aContainer )
     {
         mandatoryField = footprint.datasheet_field();
         mandatoryField.mutable_id()->set_id( (int) FIELD_T::DATASHEET );
-        buf.PackFrom( mandatoryField );
+
+        if( !buf.PackFrom( mandatoryField ) )
+            wxFAIL_MSG( wxT( "Failed to pack footprint datasheet field" ) );
+
         GetField( FIELD_T::DATASHEET )->Deserialize( buf );
     }
 
@@ -852,7 +909,10 @@ bool FOOTPRINT::Deserialize( const google::protobuf::Any &aContainer )
     {
         mandatoryField = footprint.description_field();
         mandatoryField.mutable_id()->set_id( (int) FIELD_T::DESCRIPTION );
-        buf.PackFrom( mandatoryField );
+
+        if( !buf.PackFrom( mandatoryField ) )
+            wxFAIL_MSG( wxT( "Failed to pack footprint description field" ) );
+
         GetField( FIELD_T::DESCRIPTION )->Deserialize( buf );
     }
 
@@ -1208,6 +1268,7 @@ FOOTPRINT& FOOTPRINT::operator=( FOOTPRINT&& aOther )
     m_netTiePadGroups                = aOther.m_netTiePadGroups;
     m_duplicatePadNumbersAreJumpers  = aOther.m_duplicatePadNumbersAreJumpers;
     m_jumperPadGroups                = aOther.m_jumperPadGroups;
+    m_unitInfo                       = aOther.m_unitInfo;
 
     // If this footprint is on a board, uncache all items before deleting them
     if( BOARD* board = GetBoard() )
@@ -1357,6 +1418,7 @@ FOOTPRINT& FOOTPRINT::operator=( const FOOTPRINT& aOther )
     m_netTiePadGroups                = aOther.m_netTiePadGroups;
     m_duplicatePadNumbersAreJumpers  = aOther.m_duplicatePadNumbersAreJumpers;
     m_jumperPadGroups                = aOther.m_jumperPadGroups;
+    m_unitInfo                       = aOther.m_unitInfo;
     m_variants                       = aOther.m_variants;
 
     // If this footprint is on a board, uncache all items before deleting them
@@ -1466,6 +1528,13 @@ FOOTPRINT& FOOTPRINT::operator=( const FOOTPRINT& aOther )
     // Copy auxiliary data
     m_3D_Drawings   = aOther.m_3D_Drawings;
     m_height        = aOther.m_height;
+
+    // Clear the other item's containers since this is a move
+
+    for( PCB_3D_BODY* body : m_bodies )
+        delete body;
+
+    m_bodies.clear();
 
     for( PCB_3D_BODY* body : aOther.m_bodies )
         Add( static_cast<PCB_3D_BODY*>( body->Clone() ), ADD_MODE::APPEND );
@@ -2199,7 +2268,9 @@ int FOOTPRINT::GetLikelyAttribute() const
 
             break;
 
-        default:
+        case PAD_ATTRIB::NON_COMPONENT:
+        case PAD_ATTRIB::CONN:
+        case PAD_ATTRIB::NPTH:
             break;
         }
     }
@@ -3196,8 +3267,8 @@ PCB_3D_BODY& FOOTPRINT::EnsureBody()
 
 void FOOTPRINT::ClearBody()
 {
-    for( PCB_3D_BODY* body : m_bodies )
-        Remove( body );
+    while( !m_bodies.empty() )
+        Remove( m_bodies.back() );
 }
 
 bool FOOTPRINT::Matches( const EDA_SEARCH_DATA& aSearchData, void* aAuxData ) const
@@ -4081,6 +4152,10 @@ BOARD_ITEM* FOOTPRINT::DuplicateItem( bool addToParentGroup, BOARD_COMMIT* aComm
         break;
     }
 
+    // The copy-constructed branches skip Duplicate(), so they join the group here
+    if( new_item )
+        aItem->SetDuplicateGroup( new_item, addToParentGroup, aCommit );
+
     return new_item;
 }
 
@@ -4477,48 +4552,10 @@ std::map<wxString, int> FOOTPRINT::MapPadNumbersToNetTieGroups() const
     for( const PAD* pad : m_pads )
         padNumberToGroupIdxMap[ pad->GetNumber() ] = -1;
 
-    auto processPad =
-            [&]( wxString aPad, int aGroup )
-            {
-                aPad.Trim( true ).Trim( false );
-
-                if( !aPad.IsEmpty() )
-                    padNumberToGroupIdxMap[ aPad ] = aGroup;
-            };
-
     for( int ii = 0; ii < (int) m_netTiePadGroups.size(); ++ii )
     {
-        wxString group( m_netTiePadGroups[ ii ] );
-        bool esc = false;
-        wxString pad;
-
-        for( wxUniCharRef ch : group )
-        {
-            if( esc )
-            {
-                esc = false;
-                pad.Append( ch );
-                continue;
-            }
-
-            switch( static_cast<unsigned char>( ch ) )
-            {
-            case '\\':
-                esc = true;
-                break;
-
-            case ',':
-                processPad( pad, ii );
-                pad.Clear();
-                break;
-
-            default:
-                pad.Append( ch );
-                break;
-            }
-        }
-
-        processPad( pad, ii );
+        for( const wxString& padNumber : parseNetTiePadGroup( m_netTiePadGroups[ii] ) )
+            padNumberToGroupIdxMap[padNumber] = ii;
     }
 
     return padNumberToGroupIdxMap;
@@ -4575,8 +4612,10 @@ bool FOOTPRINT::HasThroughHolePads() const
 {
     for( PAD* pad : Pads() )
     {
-        if( pad->GetAttribute() != PAD_ATTRIB::SMD )
+        if( pad->GetAttribute() == PAD_ATTRIB::PTH || pad->GetAttribute() == PAD_ATTRIB::NPTH )
+        {
             return true;
+        }
     }
 
     return false;
@@ -4614,8 +4653,14 @@ bool FOOTPRINT::operator==( const FOOTPRINT& aOther ) const
     if( !std::ranges::equal( m_groups, aOther.m_groups, equalItems ) )
         return false;
 
-    if( m_netTiePadGroups != aOther.m_netTiePadGroups )
+    if( !std::ranges::equal( m_netTiePadGroups, aOther.m_netTiePadGroups,
+                             []( const wxString& aLeft, const wxString& aRight )
+                             {
+                                 return parseNetTiePadGroup( aLeft ) == parseNetTiePadGroup( aRight );
+                             } ) )
+    {
         return false;
+    }
 
     if( m_jumperPadGroups != aOther.m_jumperPadGroups )
         return false;
@@ -5315,7 +5360,8 @@ static struct FOOTPRINT_DESC
 
         propMgr.AddProperty( new PROPERTY<FOOTPRINT, int>( _HKI( "Height" ),
                     &FOOTPRINT::SetHeight, &FOOTPRINT::GetHeight, PROPERTY_DISPLAY::PT_SIZE ),
-                    propertyFields ).SetIsCopyable();
+                    propertyFields )
+                .SetIsCopyable();
 
         // Note: Also used by DRC engine
         propMgr.AddProperty( new PROPERTY<FOOTPRINT, wxString>( _HKI( "Component Class" ),
@@ -5350,18 +5396,22 @@ static struct FOOTPRINT_DESC
                     groupOverrides );
         propMgr.AddProperty( new PROPERTY<FOOTPRINT, std::optional<int>>( _HKI( "Clearance Override" ),
                     &FOOTPRINT::SetLocalClearance, &FOOTPRINT::GetLocalClearance, PROPERTY_DISPLAY::PT_SIZE ),
-                    groupOverrides ).SetIsCopyable();
+                    groupOverrides )
+                .SetIsCopyable();
         propMgr.AddProperty( new PROPERTY<FOOTPRINT, std::optional<int>>( _HKI( "Solderpaste Margin Override" ),
                     &FOOTPRINT::SetLocalSolderPasteMargin, &FOOTPRINT::GetLocalSolderPasteMargin,
                     PROPERTY_DISPLAY::PT_SIZE ),
-                    groupOverrides ).SetIsCopyable();
+                    groupOverrides )
+                .SetIsCopyable();
         propMgr.AddProperty( new PROPERTY<FOOTPRINT, std::optional<double>>( _HKI( "Solderpaste Margin Ratio Override" ),
                     &FOOTPRINT::SetLocalSolderPasteMarginRatio, &FOOTPRINT::GetLocalSolderPasteMarginRatio,
                     PROPERTY_DISPLAY::PT_RATIO ),
-                    groupOverrides ).SetIsCopyable();
+                    groupOverrides )
+                .SetIsCopyable();
         propMgr.AddProperty( new PROPERTY_ENUM<FOOTPRINT, ZONE_CONNECTION>( _HKI( "Zone Connection Style" ),
                     &FOOTPRINT::SetLocalZoneConnection, &FOOTPRINT::GetLocalZoneConnection ),
-                    groupOverrides ).SetIsCopyable();
+                    groupOverrides )
+                .SetIsCopyable();
     }
 } _FOOTPRINT_DESC;
 

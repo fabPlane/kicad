@@ -89,6 +89,8 @@ enum ErcErrorType
   ERCET_FIELD_NAME_WHITESPACE = 59;
   ERCET_WIRED_IMPLICIT_POWER = 60;
   ERCET_EMPTY_POWER_VALUE = 61;
+  ERCET_DUPLICATE_SHEET_SUFFIX = 62;
+  ERCET_REF_SUFFIX_MISMATCH = 63;
 }
 
 // See ErcMarker child field
@@ -105,29 +107,6 @@ message ErcMarker
   ErcErrorType error_type = 1;
   kiapi.common.types.Vector2 position = 2;
 
-  // The id of the SCH_MARKER in the schematic.  Only set for markers read from a schematic
-  // (GetErcMarkers, RunSchematicJobErc); ignored when a marker is sent to KiCad as an exclusion.
-  // Markers are rebuilt (with new ids) every time the checker runs, so ids from before a run are
-  // stale.
-  // Since 11.0
-  kiapi.common.types.KIID id = 8;
-
-  // Effective severity of this marker (after exclusions are applied)
-  // Since 11.0
-  kiapi.common.types.RuleSeverity severity = 9;
-
-  // True if the marker has been excluded by the user
-  // Since 11.0
-  bool excluded = 10;
-
-  // Comment attached to the exclusion, if excluded
-  // Since 11.0
-  string exclusion_comment = 11;
-
-  // Human-readable description of the violation
-  // Since 11.0
-  string description = 12;
-
   // For now will be up to 2 items
   repeated kiapi.common.types.KIID items = 3;
 
@@ -140,6 +119,35 @@ message ErcMarker
   // When the ERC marker refers to an item that has no KIID itself (e.g a symbol field)
   // the parent item will be in items and this will be used to look up the child
   optional ErcSymbolChildReference child = 7;
+
+  // The descriptive message for the violation
+  // This field is report-only: it is filled in when available and is read-only to API clients.
+  // Since: 11.0
+  string description = 8;
+
+  // Severity of the violation
+  // This field is report-only: it is filled in when available and is read-only to API clients.
+  // Since: 11.0
+  kiapi.common.types.RuleSeverity severity = 9;
+
+  // True if the violation is suppressed by an exclusion
+  // This field is report-only: it is filled in when available and is read-only to API clients.
+  // Since: 11.0
+  bool excluded = 10;
+
+  // Comment attached to the exclusion, if excluded
+  // Since: 11.0
+  string exclusion_comment = 11;
+
+  // Used by an earlier revision of description; kept free so stale clients cannot misread it
+  reserved 12;
+
+  // The id of the SCH_MARKER in the schematic.  Only set for markers read from a schematic
+  // (GetErcMarkers, RunSchematicJobErc); ignored when a marker is sent to KiCad as an exclusion.
+  // Markers are rebuilt (with new ids) every time the checker runs, so ids from before a run are
+  // stale.
+  // Since: 11.0
+  kiapi.common.types.KIID id = 13;
 }
 
 message ErcSeveritySetting

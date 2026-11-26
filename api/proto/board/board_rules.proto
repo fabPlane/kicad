@@ -42,6 +42,7 @@ message MinimumConstraints
   kiapi.common.types.Distance silk_clearance = 13;
   int32 min_resolved_spokes = 14;
   kiapi.common.types.Distance min_silk_text_height = 15;
+  // Minimum silkscreen line width, which also applies to graphic shapes since 11.0
   kiapi.common.types.Distance min_silk_text_thickness = 16;
 }
 
@@ -131,6 +132,8 @@ message ViaProtectionDefaults
 
 enum DrcErrorType
 {
+  option allow_alias = true;
+
   DRCET_UNKNOWN = 0;
   DRCET_UNCONNECTED_ITEMS = 1;
   DRCET_SHORTING_ITEMS = 2;
@@ -184,7 +187,10 @@ enum DrcErrorType
   DRCET_SILK_EDGE_CLEARANCE = 50;
   DRCET_SOLDERMASK_BRIDGE = 51;
   DRCET_TEXT_HEIGHT = 52;
-  DRCET_TEXT_THICKNESS = 53;
+  // Since: 11.0
+  DRCET_LINE_WIDTH = 53;
+  // Replaced by DRCET_LINE_WIDTH, which also covers graphic shapes
+  DRCET_TEXT_THICKNESS = 53 [deprecated = true];
   DRCET_LENGTH_OUT_OF_RANGE = 54;
   DRCET_SKEW_OUT_OF_RANGE = 55;
   DRCET_VIA_COUNT_OUT_OF_RANGE = 56;
@@ -209,38 +215,50 @@ enum DrcErrorType
   DRCET_HOLE_ASPECT_RATIO = 75;
   DRCET_MICROVIA_CROSSES_CORE = 76;
   DRCET_COPPER_OUTSIDE_BOARD = 77;
-  DRCET_VIA_STITCH_OVERLAP = 78;
+  DRCET_MICROVIA_SPANS_DIELECTRICS = 78;
+  DRCET_VIA_STITCH_OVERLAP = 79;
 }
 
 message DrcMarker
 {
   DrcErrorType error_type = 1;
   kiapi.common.types.Vector2 position = 2;
+  // May be up to 4 items involved
+  repeated kiapi.common.types.KIID items = 3;
+  kiapi.board.types.BoardLayer layer = 4;
+
+  // The rule that was violated (e.g. "clearance")
+  // This field is report-only: it is filled in when available and is read-only to API clients.
+  // Since: 11.0
+  string violating_rule = 5;
+
+  // The descriptive message for the violation
+  // This field is report-only: it is filled in when available and is read-only to API clients.
+  // Since: 11.0
+  string description = 6;
+
+  // Severity of the violation
+  // This field is report-only: it is filled in when available and is read-only to API clients.
+  // Since: 11.0
+  kiapi.common.types.RuleSeverity severity = 7;
+
+  // True if the violation is suppressed by an exclusion
+  // This field is report-only: it is filled in when available and is read-only to API clients.
+  // Since: 11.0
+  bool excluded = 8;
+
+  // Since: 11.0
+  kiapi.common.types.MarkerType marker_type = 9;
 
   // The id of the PCB_MARKER on the board.  Only set for markers read from a board (GetDrcMarkers,
   // RunBoardJobDrc); ignored when a marker is sent to KiCad as part of an exclusion.  Markers are
   // rebuilt (with new ids) every time the checker runs, so ids from before a run are stale.
-  // Since 11.0
-  kiapi.common.types.KIID id = 5;
-
-  // Effective severity of this marker (after custom rules and exclusions are applied)
-  // Since 11.0
-  kiapi.common.types.RuleSeverity severity = 6;
-
-  // True if the marker has been excluded by the user
-  // Since 11.0
-  bool excluded = 7;
+  // Since: 11.0
+  kiapi.common.types.KIID id = 10;
 
   // Comment attached to the exclusion, if excluded
-  // Since 11.0
-  string exclusion_comment = 8;
-
-  // Human-readable description of the violation
-  // Since 11.0
-  string description = 9;
-  // May be up to 4 items involved
-  repeated kiapi.common.types.KIID items = 3;
-  kiapi.board.types.BoardLayer layer = 4;
+  // Since: 11.0
+  string exclusion_comment = 11;
 }
 
 message DrcSeveritySetting
@@ -264,6 +282,8 @@ enum CustomRuleLayerMode
 
 enum CustomRuleConstraintType
 {
+  option allow_alias = true;
+
   CRCT_UNKNOWN = 0;
   CRCT_CLEARANCE = 1;
   CRCT_CREEPAGE = 2;
@@ -274,7 +294,10 @@ enum CustomRuleConstraintType
   CRCT_COURTYARD_CLEARANCE = 7;
   CRCT_SILK_CLEARANCE = 8;
   CRCT_TEXT_HEIGHT = 9;
-  CRCT_TEXT_THICKNESS = 10;
+  // Since: 11.0
+  CRCT_LINE_WIDTH = 10;
+  // Replaced by CRCT_LINE_WIDTH, which also covers graphic shapes
+  CRCT_TEXT_THICKNESS = 10 [deprecated = true];
   CRCT_TRACK_WIDTH = 11;
   CRCT_TRACK_SEGMENT_LENGTH = 12;
   CRCT_ANNULAR_WIDTH = 13;

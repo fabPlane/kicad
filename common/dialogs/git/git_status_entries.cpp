@@ -49,6 +49,7 @@
 #include <eda_base_frame.h>
 #include <frame_type.h>
 #include <git/kicad_git_common.h>
+#include <git/kigit_ignore.h>
 #include <git/git_status_handler.h>
 #include <git/project_git_utils.h>
 #include <i18n_utility.h>
@@ -134,34 +135,23 @@ std::vector<FILE_CHECKLIST_ENTRY> BuildGitChangeEntries( KIGIT_COMMON& aCommon, 
         relativePath.Replace( wxS( "\\" ), wxS( "/" ) );
 #endif
 
-        // Only files git does not know at all are hidden. One that is tracked, or staged to be,
-        // is carried by a commit and blocks a merge, so hiding it would leave the user with
-        // nothing to commit and no way forward.
-        bool untracked = ( fileStatus.gitStatus & GIT_STATUS_WT_NEW )
-                         && !( fileStatus.gitStatus & GIT_STATUS_INDEX_NEW );
-
-        if( untracked )
+        if( KIGIT::PROJECT_GIT_UTILS::IsHiddenTransient( relativePath, *prefix, fileStatus.gitStatus,
+                                                         fileStatus.isDirectory ) )
         {
-            // Use the session prefix so a project opened through a symlink has the same paths.
-            const wxString pathPrefix = relativePath.Left( prefix->length() );
+            continue;
+        }
 
-#ifdef __WINDOWS__
-            bool inProject = pathPrefix.CmpNoCase( *prefix ) == 0;
-#else
-            bool inProject = pathPrefix == *prefix;
-#endif
-
-            if( inProject
-                && KIGIT::PROJECT_GIT_UTILS::IsTransientGitFile( wxFileName( relativePath.Mid( prefix->length() ) ) ) )
-            {
-                continue;
-            }
+        // Committing the row removes the gitlink from the index and keeps the folder on disk
+        if( fileStatus.isDirectory && KIGIT::PROJECT_GIT_UTILS::IsTransientGitlink( aCommon.GetRepo(), relativePath ) )
+        {
+            word = _( "Stop Tracking" );
+            icon = BITMAPS::git_delete;
+            colour = theme.removed.ToColour();
         }
 
         FILE_CHECKLIST_ENTRY entry;
         entry.section = _( "Changes" );
         entry.path = relativePath;
-        entry.label = wxFileName( relativePath ).GetFullName();
         entry.status = word;
         entry.statusColour = colour;
         entry.icon = icon;
@@ -338,7 +328,10 @@ void ReloadOpenEditors( KIWAY& aKiway, const EDITOR_SNAPSHOT& aBefore )
 
     for( const EDITOR_DOC& doc : g_editorDocs )
     {
-        if( !aKiway.Player( doc.frameType, false ) )
+        KIWAY_PLAYER* player = aKiway.Player( doc.frameType, false );
+
+        // A frame that is quitting would reopen its file and leave a lock behind
+        if( !player || player->IsClosing() )
             continue;
 
         // Reloading throws away undo history and the view state, so only do it for a document
@@ -518,7 +511,7 @@ void SwitchProjectToBranch( EDA_BASE_FRAME* aFrame, wxWindow* aParent, const wxS
                 KIGIT_ERROR_MESSAGE resultError;
 
                 {
-                    std::unique_lock<std::mutex> lock = KIGIT::TryLockAction( *common, parent );
+                    KIGIT::ACTION_LOCK lock = KIGIT::TryLockAction( *common, parent );
 
                     if( !lock.owns_lock() )
                         return;
@@ -575,17 +568,18 @@ enum class EDITOR_SCOPE
 
 struct GIT_EDITOR
 {
-    FRAME_T               frameType;
-    const wxChar*         label;
-    std::optional<MAIL_T> saveMail; ///< Library editors cannot be saved by mail.
+    FRAME_T       frameType;
+    const wxChar* label;
+    MAIL_T        saveMail;
+    bool          library;
 };
 
 
 const GIT_EDITOR g_gitEditors[] = {
-    { FRAME_SCH, _HKI( "Schematic Editor" ), MAIL_SCH_SAVE },
-    { FRAME_PCB_EDITOR, _HKI( "PCB Editor" ), MAIL_PCB_SAVE },
-    { FRAME_SCH_SYMBOL_EDITOR, _HKI( "Symbol Editor" ), std::nullopt },
-    { FRAME_FOOTPRINT_EDITOR, _HKI( "Footprint Editor" ), std::nullopt },
+    { FRAME_SCH, _HKI( "Schematic Editor" ), MAIL_SCH_SAVE, false },
+    { FRAME_PCB_EDITOR, _HKI( "PCB Editor" ), MAIL_PCB_SAVE, false },
+    { FRAME_SCH_SYMBOL_EDITOR, _HKI( "Symbol Editor" ), MAIL_LIB_SAVE_ALL, true },
+    { FRAME_FOOTPRINT_EDITOR, _HKI( "Footprint Editor" ), MAIL_LIB_SAVE_ALL, true },
 };
 
 
@@ -596,7 +590,7 @@ std::vector<const GIT_EDITOR*> dirtyEditors( KIWAY& aKiway, EDITOR_SCOPE aScope 
 
     for( const GIT_EDITOR& editor : g_gitEditors )
     {
-        bool document = editor.saveMail.has_value();
+        bool document = !editor.library;
 
         if( ( aScope == EDITOR_SCOPE::DOCUMENTS && !document ) || ( aScope == EDITOR_SCOPE::LIBRARIES && document ) )
         {
@@ -605,11 +599,80 @@ std::vector<const GIT_EDITOR*> dirtyEditors( KIWAY& aKiway, EDITOR_SCOPE aScope 
 
         KIWAY_PLAYER* player = aKiway.Player( editor.frameType, false );
 
-        if( player && player->IsContentModified() )
+        if( !player )
+            continue;
+
+        // A library editor's inactive tabs are invisible to IsContentModified
+        if( editor.library )
+        {
+            std::string payload;
+            aKiway.ExpressMail( editor.frameType, MAIL_LIB_HAS_UNSAVED, payload );
+
+            if( payload == "yes" )
+                dirty.push_back( &editor );
+        }
+        else if( player->IsContentModified() )
+        {
             dirty.push_back( &editor );
+        }
     }
 
     return dirty;
+}
+
+
+enum class EDITOR_SAVE
+{
+    NONE_NEEDED,
+    SAVED,
+    CANCELLED ///< The user cancelled or a save failed
+};
+
+
+/// Offer to save every editor in aScope with unsaved changes before files are rewritten
+EDITOR_SAVE saveEditorsBeforeRewrite( EDA_BASE_FRAME* aFrame, wxWindow* aParent, EDITOR_SCOPE aScope )
+{
+    std::vector<const GIT_EDITOR*> dirty = dirtyEditors( aFrame->Kiway(), aScope );
+
+    if( dirty.empty() )
+        return EDITOR_SAVE::NONE_NEEDED;
+
+    wxString listed;
+
+    for( const GIT_EDITOR* editor : dirty )
+        listed += wxString::Format( wxS( "\n    - %s" ), wxGetTranslation( editor->label ) );
+
+    bool     libraries = aScope == EDITOR_SCOPE::LIBRARIES;
+    wxString message = libraries ? _( "The following editors have unsaved library changes:%s\n\n"
+                                      "This rewrites files on disk. Save the libraries first, "
+                                      "otherwise the next save would overwrite what arrives." )
+                                 : _( "The following editors have unsaved changes:%s\n\n"
+                                      "This rewrites those files on disk. They must be saved "
+                                      "first, otherwise the next save would overwrite what "
+                                      "arrives." );
+
+    wxRichMessageDialog dlg( aParent, wxString::Format( message, listed ),
+                             libraries ? _( "Unsaved Library Changes" ) : _( "Unsaved Changes" ),
+                             wxYES_NO | wxYES_DEFAULT | wxICON_WARNING | wxCENTER );
+    dlg.SetYesNoLabels( libraries ? _( "&Save All and Continue" ) : _( "&Save and Continue" ), _( "Cancel" ) );
+
+    if( dlg.ShowModal() != wxID_YES )
+        return EDITOR_SAVE::CANCELLED;
+
+    for( const GIT_EDITOR* editor : dirty )
+    {
+        std::string payload;
+        aFrame->Kiway().ExpressMail( editor->frameType, editor->saveMail, payload );
+
+        if( payload != "success" )
+        {
+            DisplayErrorMessage( aParent,
+                                 wxString::Format( _( "Could not save %s." ), wxGetTranslation( editor->label ) ) );
+            return EDITOR_SAVE::CANCELLED;
+        }
+    }
+
+    return EDITOR_SAVE::SAVED;
 }
 
 
@@ -708,7 +771,7 @@ wxString GIT_WORKTREE_STATUS::RefusalMessage( const std::vector<wxString>& aUnsa
 
         wxString message = aAllowTrackedChanges
                                    ? _( "The following editors have unsaved changes:%s\n\n"
-                                        "Save or discard those changes before stashing." )
+                                        "Save or discard those changes before continuing." )
                                    : _( "The following editors have unsaved changes:%s\n\n"
                                         "Save or discard those changes first. If saving leaves uncommitted "
                                         "files, commit or stash them before trying again." );
@@ -745,13 +808,29 @@ wxString GIT_WORKTREE_STATUS::RefusalMessage( const std::vector<wxString>& aUnsa
 bool ProjectSafeToRewrite( EDA_BASE_FRAME* aFrame, wxWindow* aParent, const GIT_WORKTREE_STATUS& aStatus,
                            bool aAllowTrackedChanges )
 {
+    wxWindow* parent = aParent ? aParent : aFrame;
+
+    switch( saveEditorsBeforeRewrite( aFrame, parent, EDITOR_SCOPE::LIBRARIES ) )
+    {
+    case EDITOR_SAVE::CANCELLED: return false;
+    case EDITOR_SAVE::NONE_NEEDED: break;
+
+    case EDITOR_SAVE::SAVED:
+        // aStatus predates the save, and the saved edits are now uncommitted changes of their own
+        DisplayInfoMessage( parent, aAllowTrackedChanges
+                                            ? _( "The libraries were saved. Choose the command again to continue." )
+                                            : _( "The libraries were saved. Commit those changes, or set them "
+                                                 "aside with Stash Changes, then choose the command again." ) );
+        return false;
+    }
+
     std::vector<wxString> unsaved = dirtyEditorNames( aFrame->Kiway(), EDITOR_SCOPE::ALL );
     wxString message = aStatus.RefusalMessage( unsaved, aAllowTrackedChanges );
 
     if( message.IsEmpty() )
         return true;
 
-    DisplayInfoMessage( aParent ? aParent : aFrame, message );
+    DisplayInfoMessage( parent, message );
     return false;
 }
 
@@ -761,93 +840,66 @@ bool PrepareEditorsForGitOperation( EDA_BASE_FRAME* aFrame, GIT_EDITOR_PREP aPur
     if( aSavedEditors )
         *aSavedEditors = false;
 
-    // Rewriting a library an editor holds would let its next save overwrite what arrived.
+    // Rewriting a file an editor holds would let its next save overwrite what arrived, so the only choices
+    // are to save or to cancel
     if( aPurpose == GIT_EDITOR_PREP::WORKING_TREE )
     {
-        std::vector<wxString> libraryEditors = LibraryEditorsWithUnsavedChanges( aFrame->Kiway() );
-
-        if( !libraryEditors.empty() )
+        for( EDITOR_SCOPE scope : { EDITOR_SCOPE::LIBRARIES, EDITOR_SCOPE::DOCUMENTS } )
         {
-            wxString listed;
+            EDITOR_SAVE saved = saveEditorsBeforeRewrite( aFrame, aFrame, scope );
 
-            for( const wxString& name : libraryEditors )
-                listed += wxString::Format( wxS( "\n    - %s" ), name );
+            if( saved == EDITOR_SAVE::CANCELLED )
+                return false;
 
-            DisplayInfoMessage( aFrame, wxString::Format( _( "The following editors have unsaved library "
-                                                             "changes:%s\n\nThis rewrites files on disk. Save or "
-                                                             "discard those changes first, then try again." ),
-                                                          listed ) );
-            return false;
+            if( saved == EDITOR_SAVE::SAVED && aSavedEditors )
+                *aSavedEditors = true;
         }
+
+        return true;
     }
 
     std::vector<const GIT_EDITOR*> dirty = dirtyEditors( aFrame->Kiway(), EDITOR_SCOPE::DOCUMENTS );
 
-    if( !dirty.empty() )
+    if( dirty.empty() )
+        return true;
+
+    wxString listed;
+
+    for( const GIT_EDITOR* editor : dirty )
+        listed += wxString::Format( wxS( "\n    - %s" ), wxGetTranslation( editor->label ) );
+
+    wxRichMessageDialog dlg( aFrame,
+                             wxString::Format( _( "The following editors have unsaved changes:%s\n\n"
+                                                  "Save them and review the updated file list before committing?" ),
+                                               listed ),
+                             _( "Unsaved Changes" ), wxYES_NO | wxCANCEL | wxYES_DEFAULT | wxICON_WARNING | wxCENTER );
+    dlg.SetYesNoCancelLabels( _( "&Save and Review" ), _( "Commit &Anyway" ), _( "Cancel" ) );
+
+    int answer = dlg.ShowModal();
+
+    if( answer == wxID_CANCEL )
+        return false;
+
+    if( answer == wxID_YES )
     {
-        wxString listed;
-
         for( const GIT_EDITOR* editor : dirty )
-            listed += wxString::Format( wxS( "\n    - %s" ), wxGetTranslation( editor->label ) );
-
-        wxString message;
-        long     style = wxYES_DEFAULT | wxICON_WARNING | wxCENTER;
-
-        if( aPurpose == GIT_EDITOR_PREP::WORKING_TREE )
         {
-            message = wxString::Format( _( "The following editors have unsaved changes:%s\n\n"
-                                           "This rewrites those files on disk. They must be saved "
-                                           "first, otherwise the next save would overwrite what "
-                                           "arrives." ),
-                                        listed );
-            style |= wxYES_NO;
-        }
-        else
-        {
-            message = wxString::Format( _( "The following editors have unsaved changes:%s\n\n"
-                                           "Save them and review the updated file list before committing?" ),
-                                        listed );
-            style |= wxYES_NO | wxCANCEL;
-        }
+            std::string payload;
+            aFrame->Kiway().ExpressMail( editor->frameType, editor->saveMail, payload );
 
-        wxRichMessageDialog dlg( aFrame, message, _( "Unsaved Changes" ), style );
-
-        if( aPurpose == GIT_EDITOR_PREP::WORKING_TREE )
-            dlg.SetYesNoLabels( _( "&Save and Continue" ), _( "Cancel" ) );
-        else
-            dlg.SetYesNoCancelLabels( _( "&Save and Review" ), _( "Commit &Anyway" ), _( "Cancel" ) );
-
-        int answer = dlg.ShowModal();
-
-        if( answer == wxID_CANCEL )
-            return false;
-
-        // Rewriting the working tree offers no "continue anyway", so anything else is a cancel.
-        if( aPurpose == GIT_EDITOR_PREP::WORKING_TREE && answer != wxID_YES )
-            return false;
-
-        if( answer == wxID_YES )
-        {
-            for( const GIT_EDITOR* editor : dirty )
+            if( payload != "success" )
             {
-                std::string payload;
-                aFrame->Kiway().ExpressMail( editor->frameType, *editor->saveMail, payload );
-
-                if( payload != "success" )
-                {
-                    DisplayErrorMessage(
-                            aFrame, wxString::Format( _( "Could not save %s." ), wxGetTranslation( editor->label ) ) );
-                    return false;
-                }
+                DisplayErrorMessage( aFrame,
+                                     wxString::Format( _( "Could not save %s." ), wxGetTranslation( editor->label ) ) );
+                return false;
             }
-
-            // Include project changes from saving editors only when the user chose to save.
-            if( aPurpose == GIT_EDITOR_PREP::COMMIT )
-                aFrame->GetSettingsManager()->SaveProject();
-
-            if( aSavedEditors )
-                *aSavedEditors = true;
         }
+
+        // Include project changes from saving editors only when the user chose to save.
+        aFrame->GetSettingsManager()->SaveProject();
+
+        if( aSavedEditors )
+            *aSavedEditors = true;
     }
 
     return true;
@@ -1013,9 +1065,9 @@ void loadModalGitDiff( const std::shared_ptr<MODAL_GIT_DIFF_REQUEST>& aRequest, 
 
                 wxString beforeLabel = aCommitHash.IsEmpty()
                                                ? _( "BASE (HEAD)" )
-                                               : wxString::Format( _( "BASE (parent of %s)" ), aCommitHash );
+                                               : wxString::Format( _( "PARENT (of %s)" ), aCommitHash );
                 wxString afterLabel = aCommitHash.IsEmpty() ? _( "WORKING (changes)" )
-                                                            : wxString::Format( _( "WORKING (%s)" ), aCommitHash );
+                                                            : wxString::Format( _( "COMMIT (%s)" ), aCommitHash );
 
                 // The owning kiface loads and displays documents on the UI thread. Keep the
                 // scratch files alive until the modal comparison has closed.
@@ -1029,6 +1081,80 @@ void loadModalGitDiff( const std::shared_ptr<MODAL_GIT_DIFF_REQUEST>& aRequest, 
 }
 
 } // namespace
+
+
+void ChangeGitIgnore( EDA_BASE_FRAME* aFrame, wxWindow* aParent, GIT_IGNORE_CHANGE aChange,
+                      const std::vector<GIT_IGNORE_TARGET>& aTargets )
+{
+    std::shared_ptr<KIGIT_COMMON> common = aFrame->Prj().GetGitCommon();
+
+    if( !common->GetRepo() || aTargets.empty() )
+        return;
+
+    const bool ignoring = aChange == GIT_IGNORE_CHANGE::IGNORE_PATH || aChange == GIT_IGNORE_CHANGE::IGNORE_EXTENSION;
+    const bool byExtension =
+            aChange == GIT_IGNORE_CHANGE::IGNORE_EXTENSION || aChange == GIT_IGNORE_CHANGE::KEEP_EXTENSION;
+    const wxFileName ignoreFile = KIGIT::ProjectIgnoreFile( aFrame->Prj().GetProjectPath() );
+
+    std::vector<wxString> rules;
+
+    for( const GIT_IGNORE_TARGET& target : aTargets )
+    {
+        wxString rule = byExtension ? KIGIT::ExtensionIgnoreRule( target.path )
+                                    : KIGIT::PathIgnoreRule( target.path, target.isDirectory );
+
+        if( !rule.IsEmpty() )
+            rules.push_back( rule );
+    }
+
+    if( rules.empty() )
+        return;
+
+    wxString error;
+    bool     written = ignoring ? KIGIT::AddIgnoreRules( ignoreFile, rules, wxEmptyString, error )
+                                : KIGIT::RemoveIgnoreRules( ignoreFile, rules, error );
+
+    if( !written )
+    {
+        DisplayErrorMessage( aParent, _( "Could not change which files are ignored." ), error );
+        return;
+    }
+
+    common->NotifyRefreshListeners();
+
+    if( ignoring )
+        return;
+
+    std::vector<wxString> stillIgnored;
+
+    {
+        // Only to explain the result, so a busy repository is not worth waiting for.
+        KIGIT::ACTION_LOCK lock = common->TryLockAction();
+
+        if( !lock.owns_lock() )
+            return;
+
+        for( const GIT_IGNORE_TARGET& target : aTargets )
+        {
+            if( KIGIT::IgnoreState( *common, target.path, target.isDirectory ).ignored )
+                stillIgnored.push_back( target.path );
+        }
+    }
+
+    if( stillIgnored.empty() )
+        return;
+
+    const wxString message =
+            stillIgnored.size() == 1
+                    ? wxString::Format( _( "'%s' is still ignored by another rule." ), stillIgnored.front() )
+                    : wxString::Format( _( "%zu of the selected files are still ignored by another rule." ),
+                                        stillIgnored.size() );
+
+    DisplayInfoMessage( aParent, message,
+                        wxString::Format( _( "That rule covers more than this, so it was left in "
+                                             "place. Edit '%s' to change it." ),
+                                          ignoreFile.GetFullPath() ) );
+}
 
 
 void ShowGitFileDiff( EDA_BASE_FRAME* aFrame, const wxString& aRelativePath )

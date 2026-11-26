@@ -26,6 +26,9 @@
  *        (locale handling)
  */
 
+#include <wx/app.h>
+#include <wx/dialog.h>
+#include <wx/eventfilter.h>
 #include <wx/html/htmlwin.h>
 #include <wx/fs_zip.h>
 #include <wx/dir.h>
@@ -50,6 +53,7 @@
 #endif
 #include <api/api_server.h>
 #include <background_jobs_monitor.h>
+#include <bitmap_store.h>
 #include <bitmaps.h>
 #include <build_version.h>
 #include <common.h>
@@ -68,6 +72,7 @@
 #include <pgm_base.h>
 #include <design_block_library_adapter.h>
 #include <policy_keys.h>
+#include <scoped_set_reset.h>
 #include <settings/common_settings.h>
 #include <settings/settings_manager.h>
 #include <string_utils.h>
@@ -161,6 +166,7 @@ PGM_BASE::PGM_BASE()
     m_locale = nullptr;
     m_Printing = false;
     m_Quitting = false;
+    m_sessionEnding = false;
     m_argcUtf8 = 0;
     m_argvUtf8 = nullptr;
     m_splash = nullptr;
@@ -199,6 +205,10 @@ void PGM_BASE::Destroy()
 
         m_libraryPreloadReturn.wait();
     }
+
+    // Freeing thousands of cached libraries one item at a time would hold up the exit for seconds
+    if( m_library_manager )
+        m_library_manager->LeakCachesAtExit();
 
     // Clean up library IO plugins before static destruction
     m_library_manager.reset();
@@ -551,6 +561,27 @@ bool PGM_BASE::InitPgm( bool aHeadless, bool aIsUnitTest )
     if( ADVANCED_CFG::GetCfg().m_UpdateUIEventInterval != 0 )
         wxUpdateUIEvent::SetUpdateInterval( ADVANCED_CFG::GetCfg().m_UpdateUIEventInterval );
 
+#if defined( __WXMSW__ ) || defined( __WXOSX__ )
+    // wx ends a session by closing the top window with an ordinary close event. Calling wx's handler
+    // here instead of Skip() keeps that close inside the flag's scope
+    if( !aHeadless )
+    {
+        App().Bind( wxEVT_QUERY_END_SESSION,
+                    [this]( wxCloseEvent& aEvent )
+                    {
+                        SCOPED_SET_RESET<bool> sessionEnding( m_sessionEnding, true );
+                        App().OnQueryEndSession( aEvent );
+                    } );
+
+        App().Bind( wxEVT_END_SESSION,
+                    [this]( wxCloseEvent& aEvent )
+                    {
+                        SCOPED_SET_RESET<bool> sessionEnding( m_sessionEnding, true );
+                        App().OnEndSession( aEvent );
+                    } );
+    }
+#endif
+
     // Now the application can safely start, show the splash screen
     if( !aHeadless )
         ShowSplash();
@@ -786,8 +817,9 @@ void PGM_BASE::SetLanguagePath()
 
     if( PATHS::RunningFromBuildDir() )
     {
-        wxFileName fn( Pgm().GetExecutablePath() );
-        fn.RemoveLastDir();
+        // On macOS the executable path is the .app bundle, not the build root.
+        wxFileName fn;
+        fn.AssignDir( PATHS::GetStockDataPath( true ) );
         fn.AppendDir( wxT( "translation" ) );
         wxLocale::AddCatalogLookupPathPrefix( fn.GetPath() );
     }
@@ -1084,6 +1116,40 @@ void PGM_BASE::ClearLibraryLoadMessages()
         if( statusBar )
             statusBar->ClearWarningMessages( "load" );
     }
+}
+
+
+int PGM_BASE::FilterAppEvent( wxEvent& aEvent )
+{
+    // Windows hear a theme switch in no set order, and each reloads its icons from the store
+    if( aEvent.GetEventType() == wxEVT_SYS_COLOUR_CHANGED )
+        GetBitmapStore()->ThemeChanged();
+
+    if( aEvent.GetEventType() == wxEVT_SHOW )
+    {
+        wxShowEvent& event = static_cast<wxShowEvent&>( aEvent );
+        wxDialog*    dialog = dynamic_cast<wxDialog*>( event.GetEventObject() );
+
+        if( dialog )
+        {
+            if( event.IsShown() && dialog->IsModal() )
+            {
+                m_ModalDialogs.push_back( dialog );
+            }
+            // Under GTK, sometimes the modal flag is cleared before hiding
+            else if( !event.IsShown() && !m_ModalDialogs.empty() )
+            {
+                // If we close the expected dialog, remove it from our stack
+                if( m_ModalDialogs.back() == dialog )
+                    m_ModalDialogs.pop_back();
+                // If an out-of-order, remove all dialogs added after the closed one
+                else if( auto it = std::ranges::find( m_ModalDialogs, dialog ); it != m_ModalDialogs.end() )
+                    m_ModalDialogs.erase( it, m_ModalDialogs.end() );
+            }
+        }
+    }
+
+    return wxEventFilter::Event_Skip;
 }
 
 

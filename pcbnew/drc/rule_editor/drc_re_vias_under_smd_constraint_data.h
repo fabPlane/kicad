@@ -34,11 +34,11 @@ public:
     {
     }
 
-    explicit DRC_RE_VIAS_UNDER_SMD_CONSTRAINT_DATA( int aId, int aParentId, const wxString& aRuleName,
+    explicit DRC_RE_VIAS_UNDER_SMD_CONSTRAINT_DATA( int aId, const wxString& aRuleName,
                                                     bool aDisallowThroughVias = false, bool aDisallowMicroVias = false,
                                                     bool aDisallowBlindVias = false,
                                                     bool aDisallowBuriedVias = false ) :
-            DRC_RE_BASE_CONSTRAINT_DATA( aId, aParentId, aRuleName ),
+            DRC_RE_BASE_CONSTRAINT_DATA( aId, aRuleName ),
             m_disallowThroughVias( aDisallowThroughVias ),
             m_disallowMicroVias( aDisallowMicroVias ),
             m_disallowBlindVias( aDisallowBlindVias ),
@@ -101,11 +101,13 @@ public:
         return { wxString::Format( wxS( "(constraint disallow %s)" ), items ) };
     }
 
+    wxString GetConditionPredicate() const override { return wxS( "A.Pad_Type == 'SMD'" ); }
+
     wxString GenerateRule( const RULE_GENERATION_CONTEXT& aContext ) override
     {
         RULE_GENERATION_CONTEXT ctx = aContext;
 
-        wxString padTypeCondition = wxS( "A.Pad_Type == 'SMD'" );
+        wxString padTypeCondition = GetConditionPredicate();
 
         if( ctx.conditionExpression.IsEmpty() )
             ctx.conditionExpression = padTypeCondition;

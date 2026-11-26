@@ -19,9 +19,12 @@
 
 #include <widgets/margin_offset_binder.h>
 
+#include <wx/dcclient.h>
 #include <wx/stattext.h>
 #include <wx/textentry.h>
 #include <wx/regex.h>
+#include <algorithm>
+#include <limits>
 #include <eda_units.h>
 #include <eda_draw_frame.h>
 
@@ -62,6 +65,19 @@ MARGIN_OFFSET_BINDER::MARGIN_OFFSET_BINDER( UNITS_PROVIDER* aUnitsProvider, wxWi
     {
         m_eventSource->Connect( EDA_EVT_UNITS_CHANGED, wxCommandEventHandler( MARGIN_OFFSET_BINDER::onUnitsChanged ),
                                 nullptr, this );
+    }
+
+    // UNIT_BINDER sizes the field it binds, which is why the forms leave its size unset. This
+    // field holds an offset and a ratio together, so it is sized for that combined value.
+    if( m_valueCtrl && dynamic_cast<wxTextEntry*>( m_valueCtrl ) )
+    {
+        wxClientDC dc( m_valueCtrl );
+
+        wxSize minSize = m_valueCtrl->GetMinSize();
+        int    minWidth = dc.GetTextExtent( wxT( "-XX.XXXXmm - XX%" ) ).GetWidth();
+
+        if( minSize.GetWidth() < minWidth )
+            m_valueCtrl->SetMinSize( wxSize( minWidth, minSize.GetHeight() ) );
     }
 
     // Update the unit label to indicate combined format
@@ -392,7 +408,7 @@ bool MARGIN_OFFSET_BINDER::parseInput( const wxString& aInput, std::optional<int
                 if( result.ToDouble( &value ) )
                 {
                     // Convert from user units to internal units
-                    int iuValue = EDA_UNIT_UTILS::UI::ValueFromString( *m_iuScale, m_units, term );
+                    long long iuValue = EDA_UNIT_UTILS::UI::ValueFromString( *m_iuScale, m_units, term );
                     totalOffset += sign * iuValue;
                     hasOffset = true;
                     invalidTerm = false;
@@ -406,8 +422,12 @@ bool MARGIN_OFFSET_BINDER::parseInput( const wxString& aInput, std::optional<int
         sign = 1.0;  // Reset sign for next term
     }
 
+    // Clamp rather than wrap, so a range check still sees an oversized value as one
     if( hasOffset )
-        aOffset = static_cast<int>( totalOffset );
+    {
+        aOffset = static_cast<int>( std::clamp<double>( totalOffset, std::numeric_limits<int>::lowest(),
+                                                        std::numeric_limits<int>::max() ) );
+    }
 
     if( hasRatio )
         aRatio = totalRatio;

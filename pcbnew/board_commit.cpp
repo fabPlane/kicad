@@ -23,6 +23,7 @@
 #include <pgm_base.h>
 #include <settings/settings_manager.h>
 #include <board.h>
+#include <board_tables/generated_table_refresh.h>
 #include <component_classes/component_class_manager.h>
 #include <footprint.h>
 #include <lset.h>
@@ -115,6 +116,10 @@ BOARD* BOARD_COMMIT::GetBoard() const
 
 COMMIT& BOARD_COMMIT::Stage( EDA_ITEM* aItem, CHANGE_TYPE aChangeType, BASE_SCREEN* aScreen, RECURSE_MODE aRecurse )
 {
+    // A modified item is edited in place before the push tells the board, and a save can read it in between
+    if( BOARD* board = GetBoard(); board && ( aChangeType & CHT_TYPE ) == CHT_MODIFY && aItem->IsBOARD_ITEM() )
+        board->bumpDrillModelFor( { static_cast<BOARD_ITEM*>( aItem ) } );
+
     if( aRecurse == RECURSE_MODE::RECURSE )
     {
         if( PCB_GROUP* group = dynamic_cast<PCB_GROUP*>( aItem ) )
@@ -247,7 +252,7 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
         return;
 
     bool containsDrillMap = false;
-    bool containsDrillChart = false;
+    bool containsGeneratedTable = false;
 
     for( const COMMIT_LINE& entry : m_entries )
     {
@@ -256,11 +261,8 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
 
         BOARD_ITEM* item = static_cast<BOARD_ITEM*>( entry.m_item );
 
-        if( item->Type() == PCB_DRILL_CHART_T || item->Type() == PCB_DRILL_MAP_T )
-        {
-            containsDrillMap |= item->Type() == PCB_DRILL_MAP_T;
-            containsDrillChart |= item->Type() == PCB_DRILL_CHART_T;
-        }
+        containsDrillMap |= item->Type() == PCB_DRILL_MAP_T;
+        containsGeneratedTable |= IsGeneratedTableType( item->Type() );
     }
 
     undoList.SetDescription( aMessage );
@@ -411,10 +413,9 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
             };
 
     // We don't know that anything will be added to the entered group, but it does no harm to
-    // add it to the commit anyway.
-    if( enteredGroup )
+    // add it to the commit anyway (well, as long as we're not trying to remove it).
+    if( enteredGroup && GetStatus( enteredGroup ) == 0 )
         Modify( enteredGroup );
-
 
     for( COMMIT_LINE& entry : m_entries )
     {
@@ -477,6 +478,11 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
                 if( selTool )
                     selTool->RemoveItemFromSel( boardItem, true /* quiet mode */ );
 
+                // In an undo we're going to re-create from the item, not the image.  That seems wrong, but
+                // it would be a big risky change to make it use the image, so let's just reset the selection
+                // flag for now (so that on undo it comes back selected).
+                boardItem->SetFlags( SELECTED );
+
                 itemsDeselected = true;
             }
 
@@ -508,6 +514,7 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
             case PCB_TABLE_T:
             case PCB_DRILL_CHART_T:
             case PCB_DRILL_MAP_T:
+            case PCB_STACKUP_TABLE_T:
             case PCB_TRACE_T:
             case PCB_ARC_T:
             case PCB_VIA_T:
@@ -789,7 +796,7 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
 
     // A shrinking table deletes the cells past its new end and the selection holds those
     // cells directly, so it has to be resolved again from what is still on the board
-    if( containsDrillChart && selTool )
+    if( containsGeneratedTable && selTool )
         selTool->RebuildSelection();
 
     if( frame )
@@ -893,6 +900,9 @@ EDA_ITEM* BOARD_COMMIT::MakeImage( EDA_ITEM* aItem )
 void BOARD_COMMIT::Revert()
 {
     RevertToCheckpoint( 0 );
+
+    // A save during the commit may have rebuilt tables from the edits just discarded
+    RefreshGeneratedTables( *GetBoard() );
 }
 
 

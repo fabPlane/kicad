@@ -256,9 +256,14 @@ public:
     void RenameFootprintTab( const LIB_ID& aOldId, const LIB_ID& aNewId );
 
     /**
-     * Return true if any footprint editor tab has unsaved changes.
+     * Return true if any footprint editor tab has unsaved changes, or with aLibraryOnly any tab holding a
+     * library footprint.
      */
-    bool HasModifiedFootprintTabs() const;
+    bool HasModifiedFootprintTabs( bool aLibraryOnly = false ) const;
+
+    /// Save every tab with unsaved edits to a library footprint, then return to the tab that was
+    /// active. False when a save failed; the tabs after it are left unsaved.
+    bool SaveModifiedLibraryTabs();
 
     /**
      * Replace the clean open editor tab matching aFootprint, if any, with the saved footprint.
@@ -497,6 +502,14 @@ private:
     FOOTPRINT_EDITOR_TAB_CONTEXT* findOrCreateFootprintInstanceTab( FOOTPRINT* aBoardFootprint );
 
     /**
+     * Replace the active board's footprint with aFootprint and re-point the file watcher at it.
+     *
+     * Takes ownership. Does no tab bookkeeping, so callers that need a tab for aFootprint must open
+     * it first.
+     */
+    void installFootprintOnActiveBoard( FOOTPRINT* aFootprint );
+
+    /**
      * Make aCtx the active tab, borrowing its board without deleting the outgoing one.
      */
     void activateFootprintTab( FOOTPRINT_EDITOR_TAB_CONTEXT* aCtx );
@@ -509,6 +522,9 @@ private:
      * m_pcb references.
      */
     void installFootprintTabBoard( FOOTPRINT_EDITOR_TAB_CONTEXT* aCtx, BOARD* aBoard );
+
+    /// Fold a pad being edited back together, so its primitives are not left as loose copper.
+    void recombineEditedPad();
 
     /**
      * Snapshot the active tab's view/selection, fold the dirty state back into it, and clear

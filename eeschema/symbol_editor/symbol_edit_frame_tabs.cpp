@@ -193,6 +193,10 @@ void SYMBOL_EDIT_FRAME::activateSymbolTab( SYMBOL_EDITOR_TAB_CONTEXT* aContext )
         GetLibTree()->SelectLibId( m_symbol->GetLibId() );
     }
 
+    // A restored or switched-to tab otherwise keeps watching whichever library loaded last
+    LIB_ID watched = m_symbol && !IsSymbolFromSchematic() ? m_symbol->GetLibId() : LIB_ID();
+    setSymWatcher( watched.IsValid() ? &watched : nullptr );
+
     m_toolManager->SetEnvironment( GetScreen(), GetCanvas()->GetView(), GetCanvas()->GetViewControls(),
                                    GetSettings(), this );
 
@@ -502,6 +506,20 @@ bool SYMBOL_EDIT_FRAME::promptAndCloseSymbolTab( int aIdx )
             break;
 
         case wxID_NO:
+            // Edits reach the library buffer as they are made, so discarding them must restore it too
+            if( !ctx->IsTransient() && m_libMgr->IsSymbolModified( ctx->GetName(), ctx->GetLibrary() ) )
+            {
+                const LIB_ID id( ctx->GetLibrary(), ctx->GetName() );
+
+                if( !m_libMgr->CanRevertSymbol( id ) )
+                    return false;
+
+                m_libMgr->RevertSymbol( id );
+
+                if( IsLibraryTreeShown() )
+                    m_treePane->GetLibTree()->RefreshLibTree();
+            }
+
             break;
 
         default:
@@ -602,36 +620,6 @@ bool SYMBOL_EDIT_FRAME::promptToSaveInactiveInstanceTabs()
     activateSymbolTab( originalActive );
 
     return true;
-}
-
-
-void SYMBOL_EDIT_FRAME::closeAllSymbolTabsSilently()
-{
-    if( m_tabContexts.empty() )
-        return;
-
-    m_silentSymbolTabClose = true;
-
-    // Remove through the panel so its widget pages and the contexts stay in sync.
-    m_tabsPanel->CloseAll();
-
-    // Repoint the frame before the active tab's objects return to its soon-deleted context.
-    if( m_activeTab )
-    {
-        ClearUndoRedoList();
-        m_activeTab->AdoptWorkingObjects( m_symbol, static_cast<SCH_SCREEN*>( GetScreen() ) );
-        m_activeTab = nullptr;
-        m_symbol = nullptr;
-        SetScreen( m_dummyScreen );
-    }
-
-    // Free undo/redo for any contexts the panel path did not already close.
-    for( const std::unique_ptr<SYMBOL_EDITOR_TAB_CONTEXT>& ctx : m_tabContexts )
-        clearSymbolTabUndoRedo( *ctx );
-
-    m_tabContexts.clear();
-
-    m_silentSymbolTabClose = false;
 }
 
 

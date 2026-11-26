@@ -191,6 +191,13 @@ KICOMMON_API char* StrPurge( char* text );
  */
 KICOMMON_API wxString GetISO8601CurrentDateTime();
 
+
+enum class CMP_T
+{
+    CASE_SENSITIVE,
+    IGNORE_CASE
+};
+
 /**
  * Compare two strings with alphanumerical content.
  *
@@ -206,26 +213,19 @@ KICOMMON_API wxString GetISO8601CurrentDateTime();
  *         than \a aString2.
  */
 KICOMMON_API int StrNumCmp( const wxString& aString1, const wxString& aString2,
-                            bool aIgnoreCase = false );
-
-
-enum class CASE_SENSITIVITY
-{
-    SENSITIVE,
-    INSENSITIVE
-};
+                            CMP_T aCaseSensitivity = CMP_T::CASE_SENSITIVE );
 
 
 /**
  * Sort a container of wxString objects, in place, using the StrNumCmp() function.
  */
 template <typename T>
-inline void StrNumSort( T& aList, CASE_SENSITIVITY aCaseSensitivity )
+inline void StrNumSort( T& aList, CMP_T aCaseSensitivity )
 {
     std::sort( aList.begin(), aList.end(),
                [aCaseSensitivity]( const wxString& lhs, const wxString& rhs )
                {
-                   return StrNumCmp( lhs, rhs, aCaseSensitivity == CASE_SENSITIVITY::INSENSITIVE ) < 0;
+                   return StrNumCmp( lhs, rhs, aCaseSensitivity ) < 0;
                } );
 }
 
@@ -235,9 +235,8 @@ inline void StrNumSort( T& aList, CASE_SENSITIVITY aCaseSensitivity )
  *
  * @return true if pattern matched otherwise false.
  */
-KICOMMON_API bool WildCompareString( const wxString& pattern,
-                        const wxString& string_to_tst,
-                        bool            case_sensitive = true );
+KICOMMON_API bool WildCompareString( const wxString& pattern, const wxString& string_to_tst,
+                                     bool case_sensitive = true );
 
 /**
  * Compare strings like the strcmp function but handle numbers and modifiers within the
@@ -249,15 +248,22 @@ KICOMMON_API bool WildCompareString( const wxString& pattern,
 KICOMMON_API int ValueStringCompare( const wxString& strFWord, const wxString& strSWord );
 
 /**
+ *
+ * @param aStr
+ * @param aValueOut [out] optional parameter to accept the number if it is a duck.
+ * @return true if aStr can be parsed as a numeric value (including units and scalers, so
+ *         something like "4K7Ω" will return true).
+ */
+KICOMMON_API bool QuacksLikeADuck( const wxString& aStr, double* aValueOut );
+
+/**
  * Break a string into three parts: he alphabetic preamble, the numeric part, and any
  * alphabetic ending.
  *
  * For example C10A is split to C 10 A
  */
-KICOMMON_API int SplitString( const wxString& strToSplit,
-                 wxString* strBeginning,
-                 wxString* strDigits,
-                 wxString* strEnd );
+KICOMMON_API int SplitString( const wxString& strToSplit, wxString* strBeginning, wxString* strDigits,
+                              wxString* strEnd );
 
 /**
  * Gets the trailing int, if any, from a string.
@@ -569,16 +575,5 @@ KICOMMON_API wxString GetVariantFileToken( const wxString& aVariantName );
 KICOMMON_API wxString ExpandVariantOutputPath( const wxString& aPath, const wxString& aVariantName );
 
 KICOMMON_API int SortVariantNames( const wxString& aLhs, const wxString& aRhs );
-
-class IO_ERROR;
-
-/**
- * Parse library load error messages, extracting user-facing information while
- * stripping internal code locations. Mainly used because of nested exceptions from IO plugins.
- *
- * @param aException is the raw IO exception from a loader plugin
- * @return a single-line friendly
- */
-KICOMMON_API wxString ExtractLibraryLoadException( const IO_ERROR& aException );
 
 #endif  // STRING_UTILS_H

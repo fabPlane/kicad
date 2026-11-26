@@ -73,7 +73,12 @@ set( QA_EESCHEMA_SRCS
     sch_io/easyeda/test_easyeda_sch_import.cpp
     sch_io/orcad/test_orcad_sch_import.cpp
     sch_io/cadstar/test_issue14447_arc_connection.cpp
+    sch_io/cadstar/test_issue26025_pin_renumber.cpp
+    sch_io/cadstar/test_issue26030_net_label_split.cpp
+    sch_io/cadstar/test_issue26031_wire_over_pin.cpp
+    sch_io/kicad_sexpr/test_sch_io_kicad_sexpr_leak_cache.cpp
 
+    erc/test_erc_annotation.cpp
     erc/test_erc_empty_label.cpp
     erc/test_erc_empty_power_value.cpp
     erc/test_erc_four_way.cpp
@@ -162,12 +167,14 @@ set( QA_EESCHEMA_SRCS
     test_issue24290_local_labels_across_top_sheets.cpp
     test_issue24217_cli_variant_export.cpp
     test_issue24409_cli_hierarchical_instances.cpp
+    test_issue25978_operating_point_voltages.cpp
     test_issue24760_plot_page_numbers.cpp
     test_issue24858_variant_persistence.cpp
     test_issue24915_job_variant_fields.cpp
     test_issue24943_variant_unit_sync.cpp
     test_issue25119_bom_netlist_variant.cpp
     test_issue25198_multi_top_level_plot.cpp
+    test_job_export_sch_plot_path.cpp
     test_issue25869_variant_lib_symbols.cpp
     test_issue24961_group_promotion.cpp
     test_issue24663_sheet_dnp_fields.cpp
@@ -220,6 +227,7 @@ set( QA_EESCHEMA_SRCS
     test_lib_part.cpp
     test_issue23743_sync_derived_fields.cpp
     test_ee_grid_helper.cpp
+    test_ee_snap_pipeline.cpp
     test_netlist_exporter_kicad.cpp
     test_issue24330_netlist_pin_truncation.cpp
     test_ee_item.cpp
@@ -267,6 +275,7 @@ set( QA_EESCHEMA_SRCS
     test_sch_ellipse_roundtrip.cpp
     test_project_name_instances.cpp
     test_legacy_load.cpp
+    test_outdated_symbols.cpp
     test_symbol_library_adapter.cpp
     test_symbol_library_manager.cpp
     test_symbol_editor_tabs.cpp
@@ -298,6 +307,8 @@ set( QA_EESCHEMA_SRCS
     test_autoplace_fields.cpp
     test_field_case_conflicts.cpp
     test_variant_symbol_compatibility.cpp
+    test_ref_suffix.cpp
+    test_sheet_suffix_properties.cpp
     test_variant_field_resolution.cpp
     test_sch_dynamic_properties.cpp
 

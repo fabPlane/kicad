@@ -828,6 +828,10 @@ bool PANEL_SETUP_LAYERS::transferDataFromWindow()
             default: t = LT_UNDEFINED; break;
             }
 
+            // A user layer loaded as "user" has no type and is shown as auxiliary, so keep it as loaded
+            if( t == LT_AUX && m_pcb->GetLayerType( layer ) == LT_UNDEFINED )
+                t = LT_UNDEFINED;
+
             if( m_pcb->GetLayerType( layer ) != t )
             {
                 m_pcb->SetLayerType( layer, t );
@@ -1209,7 +1213,7 @@ void PANEL_SETUP_LAYERS::addUserDefinedLayer( wxCommandEvent& aEvent )
     PANEL_SETUP_LAYERS_CTLs& ctl = m_layersControls[layer];
 
     // All user-defined layers should have a checkbox
-    wxASSERT( ctl.checkbox );
+    wxCHECK2( ctl.checkbox, return );
     ctl.checkbox->SetValue( true );
 
     wxTextCtrl* textCtrl = dynamic_cast<wxTextCtrl*>( ctl.name );

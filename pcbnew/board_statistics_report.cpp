@@ -117,6 +117,8 @@ void InitializeBoardStatisticsData( BOARD_STATISTICS_DATA& aData )
     aData.padEntries.push_back(
             BOARD_STATISTICS_INFO_ENTRY<PAD_ATTRIB>( PAD_ATTRIB::CONN, _( "Connector:" ), "connector" ) );
     aData.padEntries.push_back( BOARD_STATISTICS_INFO_ENTRY<PAD_ATTRIB>( PAD_ATTRIB::NPTH, _( "NPTH:" ), "npth" ) );
+    aData.padEntries.push_back(
+            BOARD_STATISTICS_INFO_ENTRY<PAD_ATTRIB>( PAD_ATTRIB::NON_COMPONENT, _( "Non-component:" ), "non_component" ) );
 
     aData.padPropertyEntries.push_back(
             BOARD_STATISTICS_INFO_ENTRY<PAD_PROP>( PAD_PROP::CASTELLATED, _( "Castellated:" ), "castellated" ) );
@@ -192,23 +194,49 @@ void ComputeBoardStatistics( BOARD* aBoard, const BOARD_STATISTICS_OPTIONS& aOpt
         updatePadCounts( footprint, aData );
     }
 
-    for( PCB_TRACK* track : aBoard->Tracks() )
+    const TRACKS& tracks = aBoard->Tracks();
+
+    // An arc has to build its shape to know its extents, which is far too expensive to
+    // repeat for every pair it is compared against.
+    std::vector<BOX2I> bboxes;
+    bboxes.reserve( tracks.size() );
+
+    for( PCB_TRACK* track : tracks )
+        bboxes.push_back( track->GetBoundingBox() );
+
+    for( size_t ii = 0; ii < tracks.size(); ++ii )
     {
+        PCB_TRACK* track = tracks[ii];
+
         if( track->Type() == PCB_TRACE_T || track->Type() == PCB_ARC_T )
             aData.minTrackWidth = std::min( aData.minTrackWidth, track->GetWidth() );
 
         if( !track->IsType( trackTypes ) )
             continue;
 
-        for( PCB_TRACK* otherTrack : aBoard->Tracks() )
+        const LSET  trackLayers = track->GetLayerSet() & LSET::AllCuMask();
+        const BOX2I trackBBox = bboxes[ii];
+
+        // The gap between two tracks is the same whichever one is asked first, so each
+        // pair only needs visiting once.
+        for( size_t jj = ii + 1; jj < tracks.size(); ++jj )
         {
+            PCB_TRACK* otherTrack = tracks[jj];
+
             if( track->GetNetCode() == otherTrack->GetNetCode() )
                 continue;
 
             if( !otherTrack->IsType( trackTypes ) )
                 continue;
 
-            LSET commonLayers = track->GetLayerSet() & otherTrack->GetLayerSet() & LSET::AllCuMask();
+            // The boxes enclose the copper, so anything further apart than the smallest gap
+            // found so far cannot improve on it. Squared, to keep this to integer work.
+            BOX2I::ecoord_type best = aData.minClearanceTrackToTrack;
+
+            if( trackBBox.SquaredDistance( bboxes[jj] ) >= best * best )
+                continue;
+
+            LSET commonLayers = trackLayers & otherTrack->GetLayerSet();
 
             for( PCB_LAYER_ID layer : commonLayers.CuStack() )
             {

@@ -353,7 +353,7 @@ void SCH_INSPECTION_TOOL::DiffSymbol( SCH_SYMBOL* symbol )
     dialog->DeleteAllPages();
     dialog->SetUserItemID( symbol->m_Uuid );
 
-    wxString symbolDesc = wxString::Format( _( "Symbol %s" ), symbol->GetField( FIELD_T::REFERENCE )->GetText() );
+    wxString symbolDesc = wxString::Format( _( "Symbol %s" ), symbol->GetCurrentSheetRef() );
     LIB_ID   libId = symbol->GetLibId();
     wxString libName = libId.GetLibNickname();
     wxString symbolName = libId.GetLibItemName();
@@ -500,11 +500,9 @@ DIALOG_KICAD_DIFF::SHEET_SWITCHER makeSchSwitcher( SCHEMATIC* aRef, SCHEMATIC* a
                                                    std::map<KIID, KICAD_DIFF::CATEGORY> aCategories,
                                                    const KICAD_DIFF::DIFF_COLOR_THEME&  aTheme )
 {
-    auto holder = std::make_shared<std::vector<std::unique_ptr<SCH_ITEM>>>();
-
     return [aRef, aComp, modifiedColor = aTheme.modified, removedColor = aTheme.removed,
-            refO = std::move( aRefOverrides ), compO = std::move( aCompOverrides ), cats = std::move( aCategories ),
-            holder]( WIDGET_DIFF_CANVAS& aCanvas, const KIID_PATH& aSheetPath )
+            refO = std::move( aRefOverrides ), compO = std::move( aCompOverrides ),
+            cats = std::move( aCategories )]( WIDGET_DIFF_CANVAS& aCanvas, const KIID_PATH& aSheetPath )
     {
         SCH_SCREEN* compScreen = aComp->RootScreen();
         SCH_SCREEN* refScreen = aRef->RootScreen();
@@ -518,8 +516,8 @@ DIALOG_KICAD_DIFF::SHEET_SWITCHER makeSchSwitcher( SCHEMATIC* aRef, SCHEMATIC* a
                 refScreen = sp->LastScreen();
         }
 
-        aCanvas.SetContextItems( {} );
-        holder->clear();
+        // Removed items exist only in the reference, so the canvas keeps copies of them
+        auto removed = std::make_shared<std::vector<std::unique_ptr<SCH_ITEM>>>();
 
         if( refScreen )
         {
@@ -533,7 +531,7 @@ DIALOG_KICAD_DIFF::SHEET_SWITCHER makeSchSwitcher( SCHEMATIC* aRef, SCHEMATIC* a
                     if( item && item->m_Uuid == kiid )
                     {
                         if( auto* clone = dynamic_cast<SCH_ITEM*>( item->Clone() ) )
-                            holder->emplace_back( clone );
+                            removed->emplace_back( clone );
 
                         break;
                     }
@@ -543,11 +541,11 @@ DIALOG_KICAD_DIFF::SHEET_SWITCHER makeSchSwitcher( SCHEMATIC* aRef, SCHEMATIC* a
 
         std::vector<KIGFX::VIEW_ITEM*> extras;
 
-        for( const auto& clone : *holder )
+        for( const auto& clone : *removed )
             extras.push_back( clone.get() );
 
         KICAD_DIFF::ConfigureSchDiffCanvasContext( aCanvas, nullptr, aComp, modifiedColor, compO, extras, cats, nullptr,
-                                                   compScreen );
+                                                   compScreen, removed );
     };
 }
 
@@ -1328,6 +1326,8 @@ int SCH_INSPECTION_TOOL::ShowDatasheet( const TOOL_EVENT& aEvent )
             return 0;
 
         datasheet = symbol->GetDatasheetField().GetText();
+
+        symbol->AppendParentEmbeddedFiles( filesStack );
         filesStack.push_back( symbol );
     }
     else if( m_frame->IsType( FRAME_SCH_VIEWER ) )
@@ -1338,6 +1338,8 @@ int SCH_INSPECTION_TOOL::ShowDatasheet( const TOOL_EVENT& aEvent )
             return 0;
 
         datasheet = entry->GetDatasheetField().GetText();
+
+        entry->AppendParentEmbeddedFiles( filesStack );
         filesStack.push_back( entry );
     }
     else if( m_frame->IsType( FRAME_SCH ) )
@@ -1352,10 +1354,14 @@ int SCH_INSPECTION_TOOL::ShowDatasheet( const TOOL_EVENT& aEvent )
 
         // Use GetShownText() to resolve any text variables
         datasheet = field->GetShownText( &symbol->Schematic()->CurrentSheet(), FOR_GUI );
+
         filesStack.push_back( symbol->Schematic() );
 
         if( symbol->GetLibSymbolRef() )
-            filesStack.push_back( symbol->GetLibSymbolRef().get() );
+            symbol->GetLibSymbolRef()->AppendParentEmbeddedFiles( filesStack );
+
+        if( symbol->GetEmbeddedFiles() )
+            filesStack.push_back( symbol->GetEmbeddedFiles() );
     }
 
     if( datasheet.IsEmpty() || datasheet == wxS( "~" ) )

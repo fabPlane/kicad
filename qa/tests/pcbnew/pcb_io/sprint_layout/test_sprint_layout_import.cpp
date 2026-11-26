@@ -24,10 +24,13 @@
 #include <pcbnew/pcb_io/sprint_layout/pcb_io_sprint_layout.h>
 #include <pcbnew/pcb_io/sprint_layout/sprint_layout_parser.h>
 
+#include <set>
+
 #include <board.h>
 #include <footprint.h>
 #include <pad.h>
 #include <pcb_shape.h>
+#include <geometry/seg.h>
 #include <pcb_track.h>
 #include <netinfo.h>
 #include <zone.h>
@@ -368,6 +371,46 @@ BOOST_AUTO_TEST_CASE( AllTestFilesLoadWithoutCrash )
             BOOST_CHECK( board != nullptr );
         }
     }
+}
+
+
+// Outline edges drawn more than once must come out once, or DRC calls the outline malformed
+BOOST_AUTO_TEST_CASE( OutlineEdgesAreNotRepeated )
+{
+    std::string dataPath = KI_TEST::GetPcbnewTestDataDir() + "/plugins/sprint_layout/karpaty-rx-pcb6-mainboard-orig.lay6";
+
+    std::unique_ptr<BOARD> board = m_plugin.LoadBoard( dataPath );
+
+    BOOST_REQUIRE( board );
+
+    std::set<SEG> edges;
+
+    for( BOARD_ITEM* item : board->Drawings() )
+    {
+        if( item->GetLayer() != Edge_Cuts || item->Type() != PCB_SHAPE_T )
+            continue;
+
+        PCB_SHAPE* shape = static_cast<PCB_SHAPE*>( item );
+
+        SEG edge( shape->GetStart(), shape->GetEnd() );
+
+        // either direction of an edge is the same edge
+        BOOST_CHECK( edges.insert( std::min( edge, edge.Reversed() ) ).second );
+    }
+}
+
+
+// A board without ground planes must not gain a zone that has no layer
+BOOST_AUTO_TEST_CASE( ZonesHaveLayers )
+{
+    std::string dataPath = KI_TEST::GetPcbnewTestDataDir() + "/plugins/sprint_layout/tfcc.lay6";
+
+    std::unique_ptr<BOARD> board = m_plugin.LoadBoard( dataPath );
+
+    BOOST_REQUIRE( board );
+
+    for( ZONE* zone : board->Zones() )
+        BOOST_CHECK( zone->GetFirstLayer() != UNDEFINED_LAYER );
 }
 
 

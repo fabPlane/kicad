@@ -26,6 +26,7 @@
 #include <ctl_flags.h>
 
 #include <richio.h>
+#include <atomic>
 #include <string>
 #include <optional>
 #include <layer_ids.h>
@@ -223,7 +224,9 @@ class PCB_IO_KICAD_SEXPR;   // forward decl
 //#define SEXPR_BOARD_FILE_VERSION    20260930  // UUID for extruded 3D body
 //#define SEXPR_BOARD_FILE_VERSION    20261017  // Footprint overall height
 //#define SEXPR_BOARD_FILE_VERSION    20261018  // Linked placement rule areas
-#define SEXPR_BOARD_FILE_VERSION      20261025  // Reference image rotation and opacity
+//#define SEXPR_BOARD_FILE_VERSION    20261025  // Reference image rotation and opacity
+//#define SEXPR_BOARD_FILE_VERSION    20261030  // Live stackup tables
+#define SEXPR_BOARD_FILE_VERSION      20261031  // Non-component pads
 
 #define BOARD_FILE_HOST_VERSION       20200825  ///< Earlier files than this include the host tag
 #define LEGACY_ARC_FORMATTING         20210925  ///< These were the last to use old arc formatting
@@ -234,6 +237,18 @@ class PCB_IO_KICAD_SEXPR;   // forward decl
                                                 ///<   in library frame. Earlier files stored them
                                                 ///<   in board frame, so zone outlines need to be
                                                 ///<   un-baked on load.
+
+// The footprint library now has a header and is a separate format from the board file FOOTPRINT
+// object parser and formatter.  If you make any footprint library file format changes that do not
+// affect the board file format, please do not bump the board file format.
+#define SEXPR_FOOTPRINT_LIB_FILE_VERSION  20261031
+
+// A footprint body uses the board format, so a library file stamped older than the board format would
+// run migrations on current data
+static_assert( SEXPR_FOOTPRINT_LIB_FILE_VERSION >= SEXPR_BOARD_FILE_VERSION,
+               "Bump SEXPR_FOOTPRINT_LIB_FILE_VERSION with SEXPR_BOARD_FILE_VERSION" );
+
+
 // clang-format on
 
 // common combinations of the above:
@@ -399,6 +414,13 @@ public:
 
     bool CachesEnumeratedFootprints() const override { return true; }
 
+    void LeakCacheAtExit() override { m_leakCacheAtExit = true; }
+
+    /// Stops a library load between footprint files, and drops what it had read so the next load reads it all
+    void CancelLoad() override { m_loadCancelled.store( true ); }
+
+    void ResumeLoad() noexcept override { m_loadCancelled.store( false ); }
+
     bool FootprintExists( const wxString& aLibraryPath, const wxString& aFootprintName,
                           const std::map<std::string, UTF8>* aProperties = nullptr ) override;
 
@@ -438,6 +460,17 @@ public:
      * @throw IO_ERROR on write error.
      */
     void Format( const BOARD_ITEM* aItem ) const;
+
+    /**
+     * Output \a aFootprint as a complete footprint library file.
+     *
+     * @param aFootprint has its embedded fonts updated to match its settings, so pass a copy of a live footprint.
+     */
+    void FormatFootprintLibFile( FOOTPRINT* aFootprint ) const;
+
+    /// Embed the fonts \a aFootprint asks to embed, or drop its embedded fonts when it does not, as a library
+    /// save does
+    static void SyncEmbeddedFonts( FOOTPRINT* aFootprint );
 
     std::string GetStringOutput( bool doClear )
     {
@@ -504,7 +537,12 @@ private:
 
     void format( const PCB_GRID_ITEM* aGridItem ) const;
 
-    void format( const FOOTPRINT* aFootprint ) const;
+    /**
+     * @param aInLibFile leaves the initial comments and version to the enclosing library file.
+     */
+    void format( const FOOTPRINT* aFootprint, bool aInLibFile = false ) const;
+
+    void formatInitialComments( const FOOTPRINT* aFootprint ) const;
 
     void format( const PAD* aPad ) const;
 
@@ -550,6 +588,8 @@ protected:
     wxString               m_error;      ///< for throwing exceptions
 
     FP_CACHE*              m_cache;      ///< Footprint library cache
+    bool                   m_leakCacheAtExit = false;
+    std::atomic<bool>      m_loadCancelled = false;
 
     LINE_READER*           m_reader;     ///< no ownership
     wxString               m_filename;   ///< for saves only, name is in m_reader for loads

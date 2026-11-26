@@ -98,6 +98,8 @@ public:
         m_adapter = aAdapter;
     }
 
+    bool UsesOtherLibraries() const override { return true; }
+
     bool SupportsConfigurationDialog() const override { return true; }
 
     DIALOG_SHIM* CreateConfigurationDialog( wxWindow* aParent, const wxString& aLibraryPath ) override;
@@ -107,6 +109,8 @@ public:
     void CancelLoad() override;
 
     void ResumeLoad() noexcept override;
+
+    void StopBackgroundRefresh() override { stopBackgroundRefresh(); }
 
     DATABASE_LIB_SETTINGS* Settings() const { return m_settings.get(); }
 

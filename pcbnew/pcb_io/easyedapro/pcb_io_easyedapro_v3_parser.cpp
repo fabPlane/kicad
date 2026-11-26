@@ -329,7 +329,7 @@ std::unique_ptr<PAD> PCB_IO_EASYEDAPRO_V3_PARSER::createV3PAD( FOOTPRINT* aFootp
     if( hasHole )
         PCB_IO_EASYEDAPRO_PARSER::SizeHoleOnlyPad( *pad, aRow.inner.value( "plated", true ) );
 
-    pad->SetThermalSpokeAngle( ANGLE_90 );
+    pad->SetThermalSpokeAngle( PADSTACK::ALL_LAYERS, ANGLE_90 );
 
     return pad;
 }
@@ -1002,7 +1002,7 @@ void PCB_IO_EASYEDAPRO_V3_PARSER::ParseBoard( BOARD* aBoard, const nlohmann::jso
 
             if( !netname.IsEmpty() )
             {
-                aBoard->Add( new NETINFO_ITEM( aBoard, netname, aBoard->GetNetCount() + 1 ), ADD_MODE::APPEND );
+                aBoard->FindOrAddNet( netname, aBoard->GetNetCount() + 1, ADD_MODE::APPEND );
             }
         }
         else if( row.type == wxS( "RULE" ) )

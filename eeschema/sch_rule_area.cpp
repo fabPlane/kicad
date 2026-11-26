@@ -30,6 +30,8 @@
 #include <sch_line.h>
 #include <sch_marker.h>
 #include <sch_rtree.h>
+#include <project.h>
+#include <schematic.h>
 #include <sch_rule_area.h>
 #include <sch_screen.h>
 #include <sch_sheet_path.h>
@@ -90,7 +92,9 @@ void SCH_RULE_AREA::Serialize( google::protobuf::Any& aContainer ) const
     EDA_SHAPE::Serialize( *ruleArea.mutable_shape(), schIUScale );
 
     kiapi::common::PackCustomProperties( ruleArea.mutable_custom_properties(), *this );
-    aContainer.PackFrom( ruleArea );
+
+    if( !aContainer.PackFrom( ruleArea ) )
+        wxFAIL_MSG( wxT( "Failed to pack SCH_RULE_AREA" ) );
 }
 
 
@@ -259,6 +263,225 @@ void SCH_RULE_AREA::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OP
 wxString SCH_RULE_AREA::GetItemDescription( UNITS_PROVIDER* aUnitsProvider, bool aFull ) const
 {
     return _( "Schematic rule area" );
+}
+
+
+void SCH_RULE_AREA_VARIANT::InitializeAttributes( const SCH_RULE_AREA& aRuleArea )
+{
+    m_DNP = aRuleArea.GetDNP();
+    m_ExcludedFromBOM = aRuleArea.GetExcludedFromBOM();
+    m_ExcludedFromSim = aRuleArea.GetExcludedFromSim();
+}
+
+
+bool SCH_RULE_AREA_VARIANT::HasDifferentials( const SCH_RULE_AREA& aRuleArea ) const
+{
+    return m_DNP != aRuleArea.GetDNP() || m_ExcludedFromBOM != aRuleArea.GetExcludedFromBOM()
+           || m_ExcludedFromSim != aRuleArea.GetExcludedFromSim();
+}
+
+
+void SCH_RULE_AREA::swapData( SCH_ITEM* aItem )
+{
+    wxCHECK_RET( aItem->Type() == SCH_RULE_AREA_T,
+                 wxString::Format( wxT( "SCH_RULE_AREA object cannot swap data with %s object." ),
+                                   aItem->GetClass() ) );
+
+    SCH_SHAPE::swapData( aItem );
+
+    SCH_RULE_AREA* ruleArea = static_cast<SCH_RULE_AREA*>( aItem );
+
+    std::swap( m_excludedFromSim, ruleArea->m_excludedFromSim );
+    std::swap( m_excludedFromBOM, ruleArea->m_excludedFromBOM );
+    std::swap( m_excludedFromBoard, ruleArea->m_excludedFromBoard );
+    std::swap( m_DNP, ruleArea->m_DNP );
+    std::swap( m_instances, ruleArea->m_instances );
+}
+
+
+SCH_RULE_AREA_INSTANCE* SCH_RULE_AREA::getInstance( const KIID_PATH& aPath )
+{
+    for( SCH_RULE_AREA_INSTANCE& instance : m_instances )
+    {
+        if( instance.m_Path == aPath )
+            return &instance;
+    }
+
+    return nullptr;
+}
+
+
+const SCH_RULE_AREA_INSTANCE* SCH_RULE_AREA::getInstance( const KIID_PATH& aPath ) const
+{
+    return const_cast<SCH_RULE_AREA*>( this )->getInstance( aPath );
+}
+
+
+bool SCH_RULE_AREA::getVariantAttribute( const SCH_SHEET_PATH* aInstance, const wxString& aVariantName,
+                                         bool SCH_RULE_AREA::*aBase, bool SCH_RULE_AREA_VARIANT::*aOverride ) const
+{
+    if( aInstance && !aVariantName.IsEmpty() )
+    {
+        if( const SCH_RULE_AREA_INSTANCE* instance = getInstance( aInstance->Path() ) )
+        {
+            if( auto it = instance->m_Variants.find( aVariantName ); it != instance->m_Variants.end() )
+                return it->second.*aOverride;
+        }
+    }
+
+    return this->*aBase;
+}
+
+
+void SCH_RULE_AREA::setVariantAttribute( bool aValue, const SCH_SHEET_PATH* aInstance, const wxString& aVariantName,
+                                         bool SCH_RULE_AREA::*aBase, bool SCH_RULE_AREA_VARIANT::*aOverride )
+{
+    if( !aInstance || aVariantName.IsEmpty() )
+    {
+        this->*aBase = aValue;
+        return;
+    }
+
+    SCH_RULE_AREA_INSTANCE* instance = getInstance( aInstance->Path() );
+
+    if( instance )
+    {
+        if( auto it = instance->m_Variants.find( aVariantName ); it != instance->m_Variants.end() )
+        {
+            it->second.*aOverride = aValue;
+            return;
+        }
+    }
+
+    // A variant matching the base resolves the same as none, so it needs no instance data
+    if( aValue == this->*aBase )
+        return;
+
+    // Unlike symbols and sheets, rule areas get instance data only once a variant needs it
+    if( !instance )
+    {
+        instance = &m_instances.emplace_back();
+        instance->m_Path = aInstance->Path();
+
+        if( const SCHEMATIC* schematic = Schematic(); schematic && schematic->IsValid() )
+            instance->m_ProjectName = schematic->Project().GetProjectName();
+    }
+
+    SCH_RULE_AREA_VARIANT& variant = instance->m_Variants[aVariantName];
+    variant.m_Name = aVariantName;
+    variant.InitializeAttributes( *this );
+    variant.*aOverride = aValue;
+}
+
+
+void SCH_RULE_AREA::SetExcludedFromSim( bool aExcludeFromSim, const SCH_SHEET_PATH* aInstance,
+                                        const wxString& aVariantName )
+{
+    setVariantAttribute( aExcludeFromSim, aInstance, aVariantName, &SCH_RULE_AREA::m_excludedFromSim,
+                         &SCH_RULE_AREA_VARIANT::m_ExcludedFromSim );
+}
+
+
+bool SCH_RULE_AREA::GetExcludedFromSim( const SCH_SHEET_PATH* aInstance, const wxString& aVariantName ) const
+{
+    return getVariantAttribute( aInstance, aVariantName, &SCH_RULE_AREA::m_excludedFromSim,
+                                &SCH_RULE_AREA_VARIANT::m_ExcludedFromSim );
+}
+
+
+void SCH_RULE_AREA::SetExcludedFromBOM( bool aExcludeFromBOM, const SCH_SHEET_PATH* aInstance,
+                                        const wxString& aVariantName )
+{
+    setVariantAttribute( aExcludeFromBOM, aInstance, aVariantName, &SCH_RULE_AREA::m_excludedFromBOM,
+                         &SCH_RULE_AREA_VARIANT::m_ExcludedFromBOM );
+}
+
+
+bool SCH_RULE_AREA::GetExcludedFromBOM( const SCH_SHEET_PATH* aInstance, const wxString& aVariantName ) const
+{
+    return getVariantAttribute( aInstance, aVariantName, &SCH_RULE_AREA::m_excludedFromBOM,
+                                &SCH_RULE_AREA_VARIANT::m_ExcludedFromBOM );
+}
+
+
+void SCH_RULE_AREA::SetDNP( bool aDNP, const SCH_SHEET_PATH* aInstance, const wxString& aVariantName )
+{
+    setVariantAttribute( aDNP, aInstance, aVariantName, &SCH_RULE_AREA::m_DNP, &SCH_RULE_AREA_VARIANT::m_DNP );
+}
+
+
+bool SCH_RULE_AREA::GetDNP( const SCH_SHEET_PATH* aInstance, const wxString& aVariantName ) const
+{
+    return getVariantAttribute( aInstance, aVariantName, &SCH_RULE_AREA::m_DNP, &SCH_RULE_AREA_VARIANT::m_DNP );
+}
+
+
+void SCH_RULE_AREA::AddInstance( const SCH_RULE_AREA_INSTANCE& aInstance )
+{
+    if( SCH_RULE_AREA_INSTANCE* existing = getInstance( aInstance.m_Path ) )
+        *existing = aInstance;
+    else
+        m_instances.push_back( aInstance );
+}
+
+
+void SCH_RULE_AREA::DeleteVariant( const wxString& aVariantName )
+{
+    for( SCH_RULE_AREA_INSTANCE& instance : m_instances )
+        instance.m_Variants.erase( aVariantName );
+}
+
+
+void SCH_RULE_AREA::RenameVariant( const wxString& aOldName, const wxString& aNewName )
+{
+    for( SCH_RULE_AREA_INSTANCE& instance : m_instances )
+    {
+        if( auto node = instance.m_Variants.extract( aOldName ) )
+        {
+            node.key() = aNewName;
+            node.mapped().m_Name = aNewName;
+            instance.m_Variants.insert( std::move( node ) );
+        }
+    }
+}
+
+
+void SCH_RULE_AREA::CopyVariant( const wxString& aSourceVariant, const wxString& aNewVariant )
+{
+    for( SCH_RULE_AREA_INSTANCE& instance : m_instances )
+    {
+        if( auto it = instance.m_Variants.find( aSourceVariant ); it != instance.m_Variants.end() )
+        {
+            SCH_RULE_AREA_VARIANT variant = it->second;
+            variant.m_Name = aNewVariant;
+            instance.m_Variants.emplace( aNewVariant, variant );
+        }
+    }
+}
+
+
+bool SCH_RULE_AREA::HasVariant( const wxString& aVariantName ) const
+{
+    return std::ranges::any_of( m_instances,
+                                [&]( const SCH_RULE_AREA_INSTANCE& aInstance )
+                                {
+                                    return aInstance.m_Variants.contains( aVariantName );
+                                } );
+}
+
+
+bool SCH_RULE_AREA::HasVariantDifferentials() const
+{
+    for( const SCH_RULE_AREA_INSTANCE& instance : m_instances )
+    {
+        for( const auto& [name, variant] : instance.m_Variants )
+        {
+            if( variant.HasDifferentials( *this ) )
+                return true;
+        }
+    }
+
+    return false;
 }
 
 

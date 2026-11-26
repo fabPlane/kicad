@@ -323,7 +323,7 @@ void DIALOG_GLOBAL_EDIT_TEARDROPS::visitItem( BOARD_COMMIT* aCommit, BOARD_CONNE
 
     if( m_layerFilterOpt->GetValue() && m_layerFilter->GetLayerSelection() != UNDEFINED_LAYER )
     {
-        if( aItem->GetLayer() != m_layerFilter->GetLayerSelection() )
+        if( aItem->GetLayer() != m_layerFilter->GetLayerIDSelection() )
             return;
     }
 
@@ -385,7 +385,9 @@ bool DIALOG_GLOBAL_EDIT_TEARDROPS::TransferDataFromWindow()
                 visitItem( &commit, pad, false );
             }
             else if( m_smdPads->GetValue() && ( pad->GetAttribute() == PAD_ATTRIB::SMD
-                                                || pad->GetAttribute() == PAD_ATTRIB::CONN ) )
+                                                || pad->GetAttribute() == PAD_ATTRIB::CONN
+                                                || pad->GetAttribute() == PAD_ATTRIB::NON_COMPONENT
+                                             ) )
             {
                 visitItem( &commit, pad, false );
             }

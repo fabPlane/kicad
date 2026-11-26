@@ -27,6 +27,7 @@
 
 class wxRearrangeList;
 class wxBitmapButton;
+class COLOR_SETTINGS;
 
 class JOB_EXPORT_PCB_PLOT;
 
@@ -60,8 +61,11 @@ private:
     void onPlotAllListMoveUp( wxCommandEvent& aEvent );
     void onPlotAllListMoveDown( wxCommandEvent& aEvent );
 
+    void onLayerToggled( wxCommandEvent& event ) override;
+    void onAllCopperLayers( wxCommandEvent& event ) override;
     void onDNPCheckbox( wxCommandEvent& event ) override;
     void onSketchPads( wxCommandEvent& event ) override;
+    void onSVGColorChoice( wxCommandEvent& event ) override;
     void onPDFColorChoice( wxCommandEvent& event ) override;
 
     // other functions
@@ -69,11 +73,20 @@ private:
     void applyPlotSettings();
     PLOT_FORMAT getPlotFormat();
     wxString    getSelectedVariant() const;
+    COLOR_SETTINGS* getColorSettings() const;
+    COLOR_SETTINGS* getEditorColorSettings() const;
 
     void arrangeAllLayersList( const LSEQ& aSeq );
+    void populateColorThemeSelector();
+    void setColorThemeSelection( const wxString& aTheme );
+    bool formatUsesColorTheme();
+    void updateColorThemeControl();
     void transferPlotParamsToJob();
     void updatePdfColorOptions();
     void updateJobOutputLabel();
+    void checkAllCopperLayers();
+    bool allCopperLayersChecked() const;
+    void syncAllCopperLayers();
 
 private:
     PCB_EDIT_FRAME*     m_editFrame;

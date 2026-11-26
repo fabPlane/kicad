@@ -106,6 +106,7 @@ protected:
 
     void focusOnItem( const commands::SelectionSpec& aSpec,
                       commands::FocusOnItemResponse& aResponse ) override;
+
     /// Creates the generator tool if needed (e.g. in headless mode); returns it if available.
     GENERATOR_TOOL* ensureGeneratorTool() const;
 

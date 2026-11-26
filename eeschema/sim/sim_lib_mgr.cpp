@@ -62,8 +62,7 @@ wxString SIM_LIB_MGR::ResolveLibraryPath( const wxString& aLibraryPath, REPORTER
     for( const EMBEDDED_FILES* embeddedFiles : m_embeddedFilesStack )
         embeddedFilesStack.push_back( embeddedFiles );
 
-    wxString resolvedPath = resolver.ResolvePath( aLibraryPath, wxEmptyString,
-                                                  std::move( embeddedFilesStack ) );
+    wxString resolvedPath = resolver.ResolvePath( aLibraryPath, wxEmptyString, std::move( embeddedFilesStack ) );
 
     // If FILENAME_RESOLVER found the file, use that result
     if( !resolvedPath.IsEmpty() )
@@ -222,7 +221,10 @@ SIM_MODEL_INPUT SIM_LIB_MGR::CaptureModelInput( const SCH_SHEET_PATH* aSheetPath
     std::sort( input.inferencePins.begin(), input.inferencePins.end() );
     input.modelPins = SIM_MODEL::PinNumbers( aSymbol.GetAllLibPins() );
     std::sort( input.modelPins.begin(), input.modelPins.end(),
-               []( const wxString& lhs, const wxString& rhs ) { return StrNumCmp( lhs, rhs, true ) < 0; } );
+               []( const wxString& lhs, const wxString& rhs )
+               {
+                   return StrNumCmp( lhs, rhs, CMP_T::IGNORE_CASE ) < 0;
+               } );
     return input;
 }
 

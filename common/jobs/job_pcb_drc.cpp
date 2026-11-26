@@ -34,6 +34,7 @@ JOB_PCB_DRC::JOB_PCB_DRC() :
             new JOB_PARAM<bool>( "report_all_track_errors", &m_reportAllTrackErrors, m_reportAllTrackErrors ) );
     m_params.emplace_back( new JOB_PARAM<bool>( "refill_zones", &m_refillZones, m_refillZones ) );
     m_params.emplace_back( new JOB_PARAM<bool>( "save_board", &m_saveBoard, m_saveBoard ) );
+    m_params.emplace_back( new JOB_PARAM<wxString>( "variant", &m_variant, m_variant ) );
 }
 
 

@@ -22,14 +22,18 @@
 
 #include <git/git_backend.h>
 #include <git/git_compare_handler.h>
+#include <git/git_transfer_busy.h>
 #include <git/kicad_git_errors.h>
+#include <git/kigit_action_lock.h>
 #include <git/kigit_known_hosts.h>
+#include <git/kigit_remote_url.h>
 #include <import_export.h>
 
 #include <git2.h>
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -41,15 +45,6 @@
 
 class LIBGIT_BACKEND;
 struct KIGIT_AUTH_ATTEMPT;
-
-
-/// What libgit2 reported for a failed call, read before anything else can replace it.
-struct KIGIT_ERROR_INFO
-{
-    int      klass = 0; ///< git_error_t
-    int      code = 0;  ///< The failed call's return value
-    wxString message;
-};
 
 
 // One entry in the commit history, as shown by the advanced git window's History page.
@@ -93,6 +88,17 @@ struct KIGIT_AHEAD_BEHIND
 {
     size_t ahead = 0;  ///< Commits only in the first reference.
     size_t behind = 0; ///< Commits only in the second reference.
+};
+
+
+/// Where the current branch stands against its upstream.
+struct KIGIT_UPSTREAM_STATUS
+{
+    bool               hasUpstream = false;
+    KIGIT_AHEAD_BEHIND divergence;          ///< HEAD against its upstream, zero without one.
+
+    /// True when HEAD has commits its upstream does not, or has no upstream yet.
+    bool HasLocalCommits() const { return !hasUpstream || divergence.ahead > 0; }
 };
 
 
@@ -286,26 +292,10 @@ public:
         GIT_STATUS_LAST
     };
 
-    enum class GIT_CONN_TYPE
-    {
-        GIT_CONN_HTTPS = 0,
-        GIT_CONN_SSH,
-        GIT_CONN_LOCAL,
-        GIT_CONN_LAST
-    };
+    using GIT_CONN_TYPE = KIGIT::GIT_CONN_TYPE;
+    using REMOTE_URL = KIGIT::REMOTE_URL;
 
-    /// A transport address with any embedded credentials extracted.
-    struct REMOTE_URL
-    {
-        wxString      url; ///< Keeps the SSH username, scheme and port, but never a password.
-        wxString      username;
-        wxString      password;
-        wxString      hostname;
-        int           port = 0; ///< 0 when the address names none.
-        GIT_CONN_TYPE connType = GIT_CONN_TYPE::GIT_CONN_LOCAL;
-    };
-
-    static REMOTE_URL ParseRemoteURL( const wxString& aURL );
+    static REMOTE_URL ParseRemoteURL( const wxString& aURL ) { return KIGIT::ParseRemoteURL( aURL ); }
 
     wxString GetUsername() const
     {
@@ -313,7 +303,38 @@ public:
         return m_username;
     }
 
+    /// The secret for the remote, read without ever prompting, so it is safe on a transfer worker
     wxString GetPassword();
+
+    /**
+     * Read the remote's secret from the keyring on the UI thread without blocking it, so an unlock prompt
+     * can show before a transfer starts. Returns false when nothing needs reading. Otherwise aRetry runs on
+     * the UI thread once the read finishes, unless aOwner or aCommon has gone by then. A locked,
+     * dismissed or empty keyring still runs aRetry, so the transfer goes ahead and prompts as usual.
+     */
+    static bool DeferForSecret( const std::shared_ptr<KIGIT_COMMON>& aCommon, const std::weak_ptr<bool>& aOwner,
+                                std::function<void()> aRetry );
+
+    /**
+     * Tell open sessions on realm aRealm that a password for aUsername was saved. A session naming no user
+     * adopts aUsername when it is the server's account, and one naming aUsername reads the keyring again.
+     */
+    static void CredentialSaved( const wxString& aRealm, const wxString& aUsername );
+
+    /**
+     * Read the secret for aUsername from the legacy full remote URL entry, or else from aRemote's credential
+     * realm. aDone runs on the UI thread.
+     */
+    static void ReadSecretAsync( const wxString& aRemote, const wxString& aUsername,
+                                 std::function<void( bool aFound, const wxString& aSecret )> aDone );
+
+    /// False while the keyring has not been read for the current remote
+    bool SecretRead() const
+    {
+        std::lock_guard<std::mutex> lock( m_credentialsMutex );
+        return secretReadLocked();
+    }
+
     GIT_CONN_TYPE GetConnType() const;
 
     /// For a remote whose address names no transport, the user picks one in the prompt.
@@ -341,6 +362,11 @@ public:
     /// The key the next attempt will try first, for the credential prompt to show. Empty when no
     /// key file can be offered.
     wxString GetFirstOfferedSSHKey() const;
+
+    /// The encrypted key the server last accepted for this remote, so the credential prompt asks for the
+    /// right passphrase. Empty when no server has accepted one.
+    wxString GetAcceptedSSHKey() const;
+    void     SetAcceptedSSHKey( const wxString& aKey );
 
     /// The remote the credential prompt was opened for. Read as one, so a transfer syncing the
     /// URL on another thread cannot leave the fields describing two remotes.
@@ -371,17 +397,24 @@ public:
      */
     bool ApplyPromptedCredentials( const CREDENTIAL_IDENTITY& aFor, const PROMPTED_CREDENTIALS& aEntered );
 
-    // Holds a temporary variable that can be used by the authentication callback
-    // to remember which types of authentication have been tested so that we
-    // don't loop forever.
-    std::atomic<unsigned>& TestedTypes() { return m_testedTypes; }
+    /// Saves a credential under the remote a server accepted it for. Transfer threads hold and drop it, so it may
+    /// capture plain values only, never a window or anything else wx owns
+    using CREDENTIAL_SAVER =
+            std::function<void( const wxString& aRemote, const wxString& aUsername, const wxString& aPassword )>;
+
+    /**
+     * Run aSave on the main thread with the next password or passphrase a server accepts, so one it refuses is
+     * never kept. A refusal cancels it, a later call replaces it, and an empty one cancels it.
+     */
+    void SaveWhenAccepted( CREDENTIAL_SAVER aSave );
 
     /// True when HEAD has commits its upstream does not, or has no upstream yet.
     /// False for a detached or unborn HEAD.
     bool HasLocalCommits() const;
 
-    /// True when the upstream branch has commits the current branch does not.
-    bool HasUpstreamCommits() const;
+    /// The current branch against its upstream. No value for a detached or unborn HEAD, or when
+    /// git fails, so a missing upstream is not mistaken for an error.
+    std::optional<KIGIT_UPSTREAM_STATUS> UpstreamStatus() const;
 
     /// True when the repository is set to rebase rather than merge when getting changes.
     bool IsPullRebaseConfigured() const;
@@ -540,6 +573,9 @@ public:
     /// fallback policy used by push/pull/fetch paths.
     wxString GetRemoteNameOrDefault() const;
 
+    /// The address a push to aRemoteName connects to, its push URL or else its URL. Empty without one
+    wxString GetPushUrl( const wxString& aRemoteName ) const;
+
     /**
      * Keep symlinks in the repository path so Git status paths match the project tree.
      */
@@ -566,11 +602,13 @@ public:
     /// The command that trusts a repository another user owns, when that is why attaching failed.
     const wxString& GetAttachTrustCommand() const { return m_attachTrustCommand; }
 
-    void ResetNextKey()
-    {
-        std::lock_guard<std::mutex> lock( m_credentialsMutex );
-        m_nextPublicKey = 0;
-    }
+    /// Start the next attempt from the first key, with the key that last connected to the current
+    /// remote moved up.
+    void ResetNextKey();
+
+    /// Remember the key that connected for @p aAttempt, so the next connection offers it first, and save the
+    /// password it sent if SaveWhenAccepted() asked.
+    void RememberWorkingCredential( const KIGIT_AUTH_ATTEMPT& aAttempt );
 
     /// By value, so the caller never holds a pointer into the vector.
     wxString GetNextPublicKey();
@@ -582,6 +620,7 @@ public:
             m_remote = aRemote;
             m_password.clear();
             m_secretFetched = false;
+            m_acceptedSSHKey.clear();
             updateConnectionTypeUnlocked();
         }
 
@@ -595,19 +634,8 @@ public:
         return m_remote;
     }
 
-    /// Offer the agent's keys once, then the next key file, recording in aAttempt which file was offered.
-    int HandleSSHKeyAuthentication( git_cred** aOut, const wxString& aUsername, KIGIT_AUTH_ATTEMPT& aAttempt );
-
-    int HandlePlaintextAuthentication( git_cred** aOut, const wxString& aUsername );
-
-    int HandleSSHAgentAuthentication( git_cred** aOut, const wxString& aUsername );
-
     /// libgit2's last message, without credentials from any URL it quotes, so it is safe to show or trace.
     static wxString GetLastGitError();
-
-    /// The error libgit2 holds for a call that returned aCode. Read it straight after the call, because the
-    /// callbacks and cleanup that follow can replace it.
-    static KIGIT_ERROR_INFO GetLastGitErrorInfo( int aCode );
 
     /// One token per operation. Born uncancelled, so nothing has to be reset before an
     /// operation starts and one operation's cancel cannot reach another.
@@ -671,25 +699,41 @@ public:
     /// another host or its port is not valid.
     int SSHPortFor( const wxString& aHost ) const;
 
-    std::unique_lock<std::mutex> TryLockAction()
-    {
-        return std::unique_lock<std::mutex>( m_gitActionMutex, std::try_to_lock );
-    }
+    /// Take the action lock now or not at all, whether this process or another holds it
+    KIGIT::ACTION_LOCK TryLockAction();
 
     /// Long enough for a status read to finish, short enough that a window does not look hung.
     static constexpr std::chrono::milliseconds ACTION_LOCK_WAIT{ 2000 };
 
     /// TryLockAction that keeps trying for aWait before giving up. For the UI thread, where a
     /// blocking LockAction could wait out a whole network timeout.
-    std::unique_lock<std::mutex> TryLockActionFor( std::chrono::milliseconds aWait );
+    KIGIT::ACTION_LOCK TryLockActionFor( std::chrono::milliseconds aWait );
 
-    std::unique_lock<std::mutex> LockAction() { return std::unique_lock<std::mutex>( m_gitActionMutex ); }
+    /// This process's holders only, so another process's git action never delays it. For reading
+    /// the repository or freeing it, never for changing it.
+    KIGIT::ACTION_LOCK TryLockActionLocal()
+    {
+        return KIGIT::ACTION_LOCK( std::unique_lock<std::mutex>( m_gitActionMutex, std::try_to_lock ) );
+    }
+
+    KIGIT::ACTION_LOCK LockActionLocal()
+    {
+        return KIGIT::ACTION_LOCK( std::unique_lock<std::mutex>( m_gitActionMutex ) );
+    }
+
+    /// Wait for this process's holder, then for a while for another process. The mutex stays held
+    /// either way; owns_lock() is false when another process kept the repository past the wait or
+    /// the repository's lock file cannot be used.
+    KIGIT::ACTION_LOCK LockAction();
 
     // Views showing working-tree state register here, so a commit, push or pull in one of them
     // refreshes the others. UI thread only, so the list needs no lock.
     void AddRefreshListener( void* aOwner, std::function<void()> aCallback );
     void RemoveRefreshListener( void* aOwner );
     void NotifyRefreshListeners();
+
+    /// The transfers running on this repository, which every window shows and may cancel. UI thread only
+    GIT_TRANSFER_BUSY& Transfers() { return m_transfers; }
 
 protected:
     git_repository* m_repo;
@@ -707,7 +751,9 @@ protected:
     wxString m_username;
     wxString m_password;
 
-    std::atomic<unsigned> m_testedTypes;
+    /// The repository's lock shared with other processes, or null when there is no repository yet.
+    /// Call with m_gitActionMutex held.
+    std::unique_ptr<KIGIT::REPO_ACTION_LOCK> repoActionLock() const;
 
     std::mutex m_gitActionMutex;
 
@@ -716,7 +762,12 @@ protected:
     /// it. Separate from m_gitActionMutex, which the worker holds while the callback runs.
     mutable std::mutex m_credentialsMutex;
 
+    CREDENTIAL_SAVER m_saveWhenAccepted; ///< Guarded by m_credentialsMutex
+
     std::vector<std::pair<void*, std::function<void()>>> m_refreshListeners;
+    bool                                                 m_notifying = false;
+
+    GIT_TRANSFER_BUSY m_transfers;
 
     // Make git handlers friends so they can access the mutex
     friend class GIT_PUSH_HANDLER;
@@ -734,13 +785,20 @@ private:
         return m_activeCancel;
     }
 
+    /// SecretRead() for a caller already holding m_credentialsMutex
+    bool secretReadLocked() const
+    {
+        return m_secretFetched || m_connType == GIT_CONN_TYPE::GIT_CONN_LOCAL || m_remote.IsEmpty();
+    }
+
     /// Remote to use when HEAD names no upstream, empty when several remotes leave it ambiguous.
     wxString remoteNameWithoutUpstream() const;
 
     void updatePublicKeys();
 
-    /// Rebuild m_publicKeys as the project key, when offerable, then the discovered keys, and restart
-    /// from the first. The caller holds m_credentialsMutex.
+    /// Rebuild m_publicKeys as the project key, when offerable, then the key that last connected to
+    /// m_remote, then the discovered keys, and restart from the first. The caller holds
+    /// m_credentialsMutex.
     void rebuildPublicKeysUnlocked();
     void updateConnectionType();
 
@@ -751,6 +809,7 @@ private:
     std::vector<wxString> m_publicKeys;
     wxString m_publicKeysHost; // The host m_publicKeys was gathered for
     wxString m_projectSSHKey;  // Kept when its file is missing, so the setting is not lost
+    wxString              m_acceptedSSHKey; // An encrypted key the server took for m_remote, still to be unlocked
     int m_nextPublicKey;
     bool m_secretFetched;
 
@@ -759,36 +818,10 @@ private:
     mutable std::mutex m_operationMutex;
     CANCEL_TOKEN       m_activeCancel;
     bool               m_shutdown = false;
-
-    // Create a dummy flag to tell if we have tested ssh agent credentials separately
-    // from the ssh key credentials. Our own bit, so it must clear every git_credential_t
-    // value. The highest is GIT_CREDENTIAL_SSH_MEMORY at 1 << 6.
-    static const unsigned KIGIT_CREDENTIAL_SSH_AGENT = 1u << ( sizeof( unsigned ) * 8 - 1 );
 };
-
-extern "C" APIEXPORT int  progress_cb( const char* str, int len, void* data );
-extern "C" APIEXPORT void clone_progress_cb( const char* str, size_t len, size_t total, void* data );
-extern "C" APIEXPORT int transfer_progress_cb( const git_transfer_progress* aStats, void* aPayload );
-extern "C" APIEXPORT int update_cb( const char* aRefname, const git_oid* aFirst, const git_oid* aSecond,
-                                    void* aPayload );
-extern "C" APIEXPORT int push_transfer_progress_cb( unsigned int aCurrent, unsigned int aTotal,
-                                                    size_t aBytes, void* aPayload );
-extern "C" APIEXPORT int push_update_reference_cb( const char* aRefname, const char* aStatus,
-                                                   void* aPayload );
 
 extern "C" APIEXPORT int fetchhead_foreach_cb( const char*, const char*,
                                                const git_oid* aOID, unsigned int aIsMerge, void* aPayload );
-extern "C" APIEXPORT int credentials_cb( git_cred** aOut, const char* aUrl, const char* aUsername,
-                                         unsigned int aAllowedTypes, void* aPayload );
-
-/**
- * Check an SSH host key against known_hosts, which decides alone. A listed key returns 0, and any other
- * state fails with GIT_ECERTIFICATE and is recorded with KIGIT_REPO_MIXIN::SetHostKeyFailure. A key KiCad
- * cannot read, or a host or port that does not match the synced remote, fails without a record. Other
- * certificates, such as HTTPS ones, are left to libgit2. Never returns a positive value, which libgit2 1.9
- * takes as accepting an unverified SSH host.
- */
-extern "C" APIEXPORT int certificate_check_cb( git_cert* aCert, int aValid, const char* aHost, void* aPayload );
 
 
 class wxWindow;
@@ -797,13 +830,8 @@ class wxWindow;
 namespace KIGIT
 {
 
-/**
- * Report whether an SSH private key is protected by a passphrase.
- *
- * @p aKeyText is the whole contents of the private key file. Anything not
- * recognised as a private key is reported as unencrypted.
- */
-APIEXPORT bool IsPrivateKeyEncrypted( const wxString& aKeyText );
+/// git's core.sshCommand for @p aRepo, or from the user's git config when @p aRepo is null. Empty when unset.
+APIEXPORT wxString ConfiguredSSHCommand( git_repository* aRepo );
 
 
 /**
@@ -820,7 +848,7 @@ APIEXPORT wxWindow*& ActiveAdvancedGitWindow();
  *
  * Runs git_revparse_single followed by git_object_peel( GIT_OBJECT_TREE ), so a
  * commit, tag or tree ref all resolve to the underlying tree.  Returns nullptr
- * on error and logs via wxLogTrace( traceGit ).
+ * on error and logs via wxLogTrace( KIGIT::traceKigit ).
  *
  * The caller owns the returned tree and must free it with git_tree_free (wrap
  * in KIGIT::GitTreePtr for RAII).  The return type is a raw pointer rather than
@@ -863,6 +891,13 @@ APIEXPORT wxString ComposeCommitMessage( const wxString& aSummary, const wxStrin
 
 /// Split a commit message into its first line and the description after the first blank line.
 APIEXPORT void SplitCommitMessage( const wxString& aMessage, wxString& aSummary, wxString& aDescription );
+
+/// The trailers git interpret-trailers finds at the end of aMessage, as key and value, in order
+APIEXPORT std::vector<std::pair<std::string, std::string>> MessageTrailers( const std::string& aMessage );
+
+/// True for a full ref name under which a Design Workspace keeps its records, such as claims and release tags.
+/// Moving or deleting one by hand would rewrite what the team agreed on.
+APIEXPORT bool IsKicadRecordRef( const wxString& aName );
 
 /// Empty when aName is a branch name git would accept, otherwise why it would not, in the
 /// words to show the user.

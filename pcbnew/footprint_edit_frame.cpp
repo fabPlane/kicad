@@ -921,6 +921,17 @@ bool FOOTPRINT_EDIT_FRAME::prepareFootprintTabHandoff( FOOTPRINT* aFootprint, bo
 }
 
 
+void FOOTPRINT_EDIT_FRAME::installFootprintOnActiveBoard( FOOTPRINT* aFootprint )
+{
+    ReloadFootprint( aFootprint );
+
+    if( IsCurrentFPFromBoard() )
+        setFPWatcher( nullptr );
+    else
+        setFPWatcher( aFootprint );
+}
+
+
 void FOOTPRINT_EDIT_FRAME::AddFootprintToBoard( FOOTPRINT* aFootprint )
 {
     // Opening from the library is a preview that the next library-open reuses; editing promotes it
@@ -928,12 +939,7 @@ void FOOTPRINT_EDIT_FRAME::AddFootprintToBoard( FOOTPRINT* aFootprint )
     if( prepareFootprintTabHandoff( aFootprint, m_tabsPanel != nullptr ) )
         findOrCreateFootprintTab( aFootprint->GetFPID(), true );
 
-    ReloadFootprint( aFootprint );
-
-    if( IsCurrentFPFromBoard() )
-        setFPWatcher( nullptr );
-    else
-        setFPWatcher( aFootprint );
+    installFootprintOnActiveBoard( aFootprint );
 }
 
 
@@ -1029,12 +1035,22 @@ void FOOTPRINT_EDIT_FRAME::activateFootprintTab( FOOTPRINT_EDITOR_TAB_CONTEXT* a
 }
 
 
+void FOOTPRINT_EDIT_FRAME::recombineEditedPad()
+{
+    PAD_TOOL* padTool = m_toolManager ? m_toolManager->GetTool<PAD_TOOL>() : nullptr;
+
+    if( padTool && padTool->InPadEditMode() )
+        m_toolManager->RunAction( PCB_ACTIONS::recombinePad );
+}
+
+
 void FOOTPRINT_EDIT_FRAME::installFootprintTabBoard( FOOTPRINT_EDITOR_TAB_CONTEXT* aCtx, BOARD* aBoard )
 {
     // Install the successor board and tool environment before the caller frees the outgoing context
     // so no tool Reset() or repaint ever sees a freed or null m_pcb. Never calls the base SetBoard,
     // which would delete m_pcb and reset tools while the model still aliases it.
 
+    recombineEditedPad();
     detachActiveFootprintTab();
 
     // Drop selection and unwind a mid-draw tool while the outgoing board is still valid (#24975).
@@ -1527,19 +1543,15 @@ void FOOTPRINT_EDIT_FRAME::RenameFootprintTab( const LIB_ID& aOldId, const LIB_I
 }
 
 
-bool FOOTPRINT_EDIT_FRAME::HasModifiedFootprintTabs() const
+bool FOOTPRINT_EDIT_FRAME::HasModifiedFootprintTabs( bool aLibraryOnly ) const
 {
     for( const std::unique_ptr<FOOTPRINT_EDITOR_TAB_CONTEXT>& ctx : m_tabContexts )
     {
-        if( ctx.get() == m_activeTab )
-        {
-            if( GetScreen() && GetScreen()->IsContentModified() )
-                return true;
-        }
-        else if( ctx->IsModified() )
-        {
+        if( aLibraryOnly && ctx->IsFromBoard() )
+            continue;
+
+        if( ctx.get() == m_activeTab ? IsContentModified() : ctx->IsModified() )
             return true;
-        }
     }
 
     return false;
@@ -1586,6 +1598,37 @@ void FOOTPRINT_EDIT_FRAME::RefreshLibraryFootprintTab( const FOOTPRINT& aFootpri
     UpdateView();
     GetCanvas()->ForceRefresh();
     Update3DView( true, true );
+}
+
+
+bool FOOTPRINT_EDIT_FRAME::SaveModifiedLibraryTabs()
+{
+    FOOTPRINT_EDITOR_TAB_CONTEXT* original = m_activeTab;
+    bool                          saved = true;
+
+    for( const std::unique_ptr<FOOTPRINT_EDITOR_TAB_CONTEXT>& ctx : m_tabContexts )
+    {
+        if( ctx->IsFromBoard() || !( ctx.get() == m_activeTab ? IsContentModified() : ctx->IsModified() ) )
+            continue;
+
+        if( ctx.get() != m_activeTab )
+            activateFootprintTab( ctx.get() );
+
+        FOOTPRINT* footprint = GetBoard() ? GetBoard()->GetFirstFootprint() : nullptr;
+
+        if( !footprint || !SaveFootprint( footprint ) )
+        {
+            saved = false;
+            break;
+        }
+
+        ClearModify();
+    }
+
+    if( original && m_activeTab != original )
+        activateFootprintTab( original );
+
+    return saved;
 }
 
 
@@ -1896,8 +1939,7 @@ bool FOOTPRINT_EDIT_FRAME::canCloseWindow( wxCloseEvent& aEvent )
 {
     // Shutdown blocks must be determined and vetoed as early as possible, before any modal prompt.
     // IsContentModified only sees the active tab, so also account for dirty inactive tabs.
-    if( KIPLATFORM::APP::SupportsShutdownBlockReason() && aEvent.GetId() == wxEVT_QUERY_END_SESSION
-                                                       && ( IsContentModified() || hasDirtyInactiveTabs() ) )
+    if( isBlockableSessionEnd() && ( IsContentModified() || hasDirtyInactiveTabs() ) )
     {
         aEvent.Veto();
         return false;
@@ -2051,7 +2093,8 @@ void FOOTPRINT_EDIT_FRAME::SyncLibraryTree( [[maybe_unused]] bool aProgress )
     FOOTPRINT_LIBRARY_ADAPTER*     footprints = PROJECT_PCB::FootprintLibAdapter( &Prj() );
     FP_TREE_SYNCHRONIZING_ADAPTER* adapter = static_cast<FP_TREE_SYNCHRONIZING_ADAPTER*>( m_adapter.get() );
     LIB_ID                         target = GetTargetFPID();
-    bool                           targetSelected = ( target == GetLibTree()->GetSelectedLibId() );
+    bool                           targetSelected = !target.GetLibNickname().empty()
+                                                    && target == GetLibTree()->GetSelectedLibId();
     std::vector<LIB_ID>            expanded = GetLibTree()->GetExpandedLibraries();
 
     // Unselect before syncing to avoid null reference in the adapter
@@ -2067,6 +2110,10 @@ void FOOTPRINT_EDIT_FRAME::SyncLibraryTree( [[maybe_unused]] bool aProgress )
     // Sync() collapsed the tree, so re-expand the libraries that were open before it.
     for( const LIB_ID& libId : expanded )
         GetLibTree()->ExpandLibId( libId );
+
+    // A filter selects its best match, which tree actions would take for the user's choice
+    if( !targetSelected )
+        GetLibTree()->Unselect();
 
     if( target.IsValid() )
     {
@@ -2173,7 +2220,7 @@ void FOOTPRINT_EDIT_FRAME::setupUIConditions()
     ACTION_MANAGER*       mgr = m_toolManager->GetActionManager();
     PCB_EDITOR_CONDITIONS cond( this );
 
-    wxASSERT( mgr );
+    wxCHECK2( mgr, return );
 
 #define ENABLE( x ) ACTION_CONDITIONS().Enable( x )
 #define CHECK( x )  ACTION_CONDITIONS().Check( x )
@@ -2241,6 +2288,7 @@ void FOOTPRINT_EDIT_FRAME::setupUIConditions()
 
     // clang-format off
     mgr->SetConditions( ACTIONS::saveAs,                 ENABLE( footprintTargettedCond ) );
+    mgr->SetConditions( ACTIONS::exportForOlderVersion, ENABLE( footprintTargettedCond ) );
     mgr->SetConditions( ACTIONS::revert,                 ENABLE( cond.ContentModified() ) );
     mgr->SetConditions( ACTIONS::save,                   ENABLE( SELECTION_CONDITIONS::ShowAlways ) );
     mgr->SetConditions( PCB_ACTIONS::editLibFpInFpEditor,ENABLE( footprintFromBoardCond ) );
@@ -2267,6 +2315,7 @@ void FOOTPRINT_EDIT_FRAME::setupUIConditions()
     mgr->SetConditions( PCB_ACTIONS::rotateCcw,          ENABLE( SELECTION_CONDITIONS::NotEmpty ).HotkeyEnable( cond.HasItems() ) );
     mgr->SetConditions( PCB_ACTIONS::mirrorH,            ENABLE( SELECTION_CONDITIONS::NotEmpty ).HotkeyEnable( cond.HasItems() ) );
     mgr->SetConditions( PCB_ACTIONS::mirrorV,            ENABLE( SELECTION_CONDITIONS::NotEmpty ).HotkeyEnable( cond.HasItems() ) );
+    mgr->SetConditions( PCB_ACTIONS::mirrorInteractive,  ENABLE( SELECTION_CONDITIONS::NotEmpty ).HotkeyEnable( cond.HasItems() ) );
     mgr->SetConditions( ACTIONS::group,                  ENABLE( SELECTION_CONDITIONS::MoreThan( 1 ) ) );
     mgr->SetConditions( ACTIONS::ungroup,                ENABLE( SELECTION_CONDITIONS::HasType( PCB_GROUP_T ) ) );
 

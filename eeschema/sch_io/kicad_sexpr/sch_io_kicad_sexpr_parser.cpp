@@ -2734,7 +2734,7 @@ void SCH_IO_KICAD_SEXPR_PARSER::parseTITLE_BLOCK( TITLE_BLOCK& aTitleBlock )
 }
 
 
-SCH_FIELD* SCH_IO_KICAD_SEXPR_PARSER::parseSchField( SCH_ITEM* aParent )
+SCH_FIELD* SCH_IO_KICAD_SEXPR_PARSER::parseSchField( SCH_ITEM* aParent, std::set<FIELD_T>* aReadMandatoryFields )
 {
     wxCHECK_MSG( CurTok() == T_property, nullptr,
                  "Cannot parse " + GetTokenString( CurTok() ) + " as a property token." );
@@ -2782,12 +2782,37 @@ SCH_FIELD* SCH_IO_KICAD_SEXPR_PARSER::parseSchField( SCH_ITEM* aParent )
     // Correctly set the ID based on the untranslated field name
     if( aParent->Type() == SCH_SYMBOL_T )
     {
+        bool mandatoryNameTaken = false;
+
         for( FIELD_T id : MANDATORY_FIELDS )
         {
             if( name.CmpNoCase( GetDefaultFieldName( id, UNTRANSLATED ) ) == 0 )
             {
-                fieldId = id;
+                // Claiming it again would overwrite the one the file already gave us.
+                if( aReadMandatoryFields && aReadMandatoryFields->count( id ) )
+                    mandatoryNameTaken = true;
+                else
+                    fieldId = id;
+
                 break;
+            }
+        }
+
+        if( fieldId != FIELD_T::USER && aReadMandatoryFields )
+            aReadMandatoryFields->insert( fieldId );
+
+        // Give it a name of its own so the editor can show both.
+        if( mandatoryNameTaken )
+        {
+            SCH_SYMBOL*    symbol = static_cast<SCH_SYMBOL*>( aParent );
+            const wxString baseName = name;
+
+            for( int ii = 1; ii < 10; ii++ )
+            {
+                name = wxString::Format( wxS( "%s_%d" ), baseName, ii );
+
+                if( !symbol->GetField( name ) )
+                    break;
             }
         }
     }
@@ -2958,6 +2983,10 @@ SCH_SHEET_PIN* SCH_IO_KICAD_SEXPR_PARSER::parseSchSheetPin( SCH_SHEET* aSheet )
             NeedSYMBOL();
             const_cast<KIID&>( sheetPin->m_Uuid ) = parseKIID();
             NeedRIGHT();
+            break;
+
+        case T_custom_property:
+            parseCustomProperty( sheetPin.get() );
             break;
 
         default:
@@ -3583,7 +3612,7 @@ SCH_SYMBOL* SCH_IO_KICAD_SEXPR_PARSER::parseSchematicSymbol()
     SCH_FIELD* field;
     std::unique_ptr<SCH_SYMBOL> symbol = std::make_unique<SCH_SYMBOL>();
     TRANSFORM transform;
-    std::set<int> fieldIDsRead;
+    std::set<FIELD_T>           fieldIDsRead;
 
     // We'll reset this if we find a fields_autoplaced token
     symbol->SetFieldsAutoplaced( AUTOPLACE_NONE );
@@ -4012,7 +4041,7 @@ SCH_SYMBOL* SCH_IO_KICAD_SEXPR_PARSER::parseSchematicSymbol()
         case T_property:
             // The field parent symbol must be set and its orientation must be set before
             // the field positions are set.
-            field = parseSchField( symbol.get() );
+            field = parseSchField( symbol.get(), &fieldIDsRead );
 
             // Exclude from simulation used to be managed by a Sim.Enable field set to "0" when
             // simulation was disabled.
@@ -4074,6 +4103,7 @@ SCH_SYMBOL* SCH_IO_KICAD_SEXPR_PARSER::parseSchematicSymbol()
             wxString number;
             KIID     uuid;
             wxString alt;
+            std::map<wxString, wxString> pin_properties;
 
             NeedSYMBOL();
             number = FromUTF8();
@@ -4104,12 +4134,25 @@ SCH_SYMBOL* SCH_IO_KICAD_SEXPR_PARSER::parseSchematicSymbol()
                     NeedRIGHT();
                     break;
 
+                case T_custom_property:
+                {
+                    NeedSYMBOL();
+                    wxString key = FromUTF8();
+                    NeedSYMBOL();
+                    wxString value = FromUTF8();
+                    pin_properties[key] = value;
+                    NeedRIGHT();
+                    break;
+                }
+
                 default:
                     Expecting( "alternate or uuid" );
                 }
             }
 
-            symbol->GetRawPins().emplace_back( std::make_unique<SCH_PIN>( symbol.get(), number, alt, uuid ) );
+            std::unique_ptr<SCH_PIN>& pin =
+                    symbol->GetRawPins().emplace_back( std::make_unique<SCH_PIN>( symbol.get(), number, alt, uuid ) );
+            pin->SetCustomProperties( pin_properties );
             break;
         }
 
@@ -5241,8 +5284,90 @@ SCH_RULE_AREA* SCH_IO_KICAD_SEXPR_PARSER::parseSchRuleArea()
             parseCustomProperty( ruleArea.get() );
             break;
 
+        case T_instances:
+            for( token = NextTok(); token != T_RIGHT; token = NextTok() )
+            {
+                if( token != T_LEFT )
+                    Expecting( T_LEFT );
+
+                if( NextTok() != T_project )
+                    Expecting( "project" );
+
+                NeedSYMBOL();
+                wxString projectName = FromUTF8();
+
+                for( token = NextTok(); token != T_RIGHT; token = NextTok() )
+                {
+                    if( token != T_LEFT )
+                        Expecting( T_LEFT );
+
+                    if( NextTok() != T_path )
+                        Expecting( "path" );
+
+                    SCH_RULE_AREA_INSTANCE instance;
+                    instance.m_ProjectName = projectName;
+                    NeedSYMBOL();
+                    instance.m_Path = KIID_PATH( FromUTF8() );
+
+                    for( token = NextTok(); token != T_RIGHT; token = NextTok() )
+                    {
+                        if( token != T_LEFT )
+                            Expecting( T_LEFT );
+
+                        if( NextTok() != T_variant )
+                            Expecting( "variant" );
+
+                        // Variants store only differentials and the base flags precede the instances
+                        SCH_RULE_AREA_VARIANT variant;
+                        variant.InitializeAttributes( *ruleArea );
+
+                        for( token = NextTok(); token != T_RIGHT; token = NextTok() )
+                        {
+                            if( token != T_LEFT )
+                                Expecting( T_LEFT );
+
+                            token = NextTok();
+
+                            switch( token )
+                            {
+                            case T_name:
+                                NeedSYMBOL();
+                                variant.m_Name = FromUTF8();
+                                NeedRIGHT();
+                                break;
+
+                            case T_dnp:
+                                variant.m_DNP = parseBool();
+                                NeedRIGHT();
+                                break;
+
+                            case T_exclude_from_sim:
+                                variant.m_ExcludedFromSim = parseBool();
+                                NeedRIGHT();
+                                break;
+
+                            case T_in_bom:
+                                variant.m_ExcludedFromBOM = !parseBool();
+                                NeedRIGHT();
+                                break;
+
+                            default:
+                                Expecting( "name, dnp, exclude_from_sim, or in_bom" );
+                            }
+                        }
+
+                        if( !variant.m_Name.IsEmpty() )
+                            instance.m_Variants[variant.m_Name] = variant;
+                    }
+
+                    ruleArea->AddInstance( instance );
+                }
+            }
+
+            break;
+
         default:
-            Expecting( "polyline, exclude_from_sim, on_board, in_bom, dnp, locked, or custom_property" );
+            Expecting( "polyline, exclude_from_sim, on_board, in_bom, dnp, locked, custom_property, or instances" );
         }
     }
 
@@ -5427,7 +5552,7 @@ void SCH_IO_KICAD_SEXPR_PARSER::parseEllipseBody( SCH_SHAPE* aShape, bool aIsArc
             if( !aIsSchematic )
                 Expecting( "uuid only valid in schematic context" );
             NeedSYMBOL();
-            const_cast<KIID&>( aShape->m_Uuid ) = KIID( FromUTF8() );
+            const_cast<KIID&>( aShape->m_Uuid ) = parseKIID();
             NeedRIGHT();
             break;
 
@@ -6056,7 +6181,7 @@ void SCH_IO_KICAD_SEXPR_PARSER::parseSchNetChain()
 
     wxString netClass;
     COLOR4D  color = COLOR4D::UNSPECIFIED;
-    wxString fromRef, fromPin, toRef, toPin;
+    wxString fromRefDes, fromPinNum, toRefDes, toPinNum;
     std::set<wxString> memberNets;
 
     for( T tok = NextTok(); tok != T_RIGHT; tok = NextTok() )
@@ -6067,17 +6192,17 @@ void SCH_IO_KICAD_SEXPR_PARSER::parseSchNetChain()
         if( tok == T_from )
         {
             NeedSYMBOLorNUMBER();
-            fromRef = From_UTF8( CurText() );
+            fromRefDes = From_UTF8( CurText() );
             NeedSYMBOLorNUMBER();
-            fromPin = From_UTF8( CurText() );
+            fromPinNum = From_UTF8( CurText() );
             NeedRIGHT();
         }
         else if( tok == T_to )
         {
             NeedSYMBOLorNUMBER();
-            toRef = From_UTF8( CurText() );
+            toRefDes = From_UTF8( CurText() );
             NeedSYMBOLorNUMBER();
-            toPin = From_UTF8( CurText() );
+            toPinNum = From_UTF8( CurText() );
             NeedRIGHT();
         }
         else if( tok == T_net_class )
@@ -6125,9 +6250,9 @@ void SCH_IO_KICAD_SEXPR_PARSER::parseSchNetChain()
         }
     }
 
-    if( !fromRef.IsEmpty() && !toRef.IsEmpty() )
+    if( !fromRefDes.IsEmpty() && !toRefDes.IsEmpty() )
     {
-        m_netChainTerminalRefs[name] = { { fromRef, fromPin }, { toRef, toPin } };
+        m_netChainTerminalRefs[name] = { { fromRefDes, fromPinNum }, { toRefDes, toPinNum } };
     }
 
     if( !netClass.IsEmpty() )

@@ -32,7 +32,8 @@ const int pcbCalculatorSchemaVersion = 0;
 PCB_CALCULATOR_SETTINGS::PCB_CALCULATOR_SETTINGS() :
         APP_SETTINGS_BASE( "pcb_calculator", pcbCalculatorSchemaVersion ), m_Attenuators(),
         m_BoardClassUnits( 0 ), m_ColorCodeTolerance( 0 ), m_Electrical(), m_LastPage( 1 ),
-        m_Regulators(), m_cableSize(), m_wavelength(), m_TrackWidth(), m_TransLine(), m_ViaSize()
+        m_Regulators(), m_cableSize(), m_wavelength(), m_TrackWidth(), m_TransLine(), m_ViaSize(),
+        m_RDivider()
 {
     // Build settings:
     m_params.emplace_back( new PARAM<int>( "board_class_units", &m_BoardClassUnits, 0 ) );
@@ -315,6 +316,14 @@ PCB_CALCULATOR_SETTINGS::PCB_CALCULATOR_SETTINGS() :
 
     m_params.emplace_back( new PARAM<bool>( "corrosion_table.show_symbols",
             &m_CorrosionTable.show_symbols, true ) );
+
+    m_params.emplace_back( new PARAM<int>( "r_divider.mode", &m_RDivider.mode, 0 ) );
+    m_params.emplace_back( new PARAM<wxString>( "r_divider.ratio", &m_RDivider.ratio, "1" ) );
+    m_params.emplace_back( new PARAM<wxString>( "r_divider.vin", &m_RDivider.vin, "5" ) );
+    m_params.emplace_back( new PARAM<wxString>( "r_divider.vout", &m_RDivider.vout, "1.2" ) );
+    m_params.emplace_back( new PARAM<int>( "r_divider.impedance_type", &m_RDivider.impedanceType, 0 ) );
+    m_params.emplace_back( new PARAM<wxString>( "r_divider.impedance", &m_RDivider.impedance, "100" ) );
+    m_params.emplace_back( new PARAM<int>( "r_divider.series", &m_RDivider.series, 4 ) ); // ESERIES::E24
 }
 
 

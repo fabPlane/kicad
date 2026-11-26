@@ -59,6 +59,10 @@ DIALOG_BARCODE_PROPERTIES::DIALOG_BARCODE_PROPERTIES( PCB_BASE_FRAME* aParent, P
 
     m_board = m_parent->GetBoard();
 
+    // Configure display origin transforms
+    m_posX.SetCoordType( ORIGIN_TRANSFORMS::ABS_X_COORD );
+    m_posY.SetCoordType( ORIGIN_TRANSFORMS::ABS_Y_COORD );
+
     // Use the board as parent so text variables like ${PART_NUMBER} can be resolved
     // in the preview. The dummy barcode is not actually added to the board.
     m_dummyBarcode = new PCB_BARCODE( m_board );
@@ -261,7 +265,7 @@ bool DIALOG_BARCODE_PROPERTIES::transferDataToBarcode( PCB_BARCODE* aBarcode )
 
     aBarcode->SetText( m_textInput->GetValue() );
     aBarcode->SetLocked( m_cbLocked->GetValue() );
-    aBarcode->SetLayer( ToLAYER_ID( m_cbLayer->GetLayerSelection() ) );
+    aBarcode->SetLayer( m_cbLayer->GetLayerIDSelection() );
 
     // Position
     aBarcode->SetPosition( VECTOR2I( m_posX.GetIntValue(), m_posY.GetIntValue() ) );

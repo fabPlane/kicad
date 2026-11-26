@@ -25,6 +25,7 @@
  * regardless of whether the build directory is inside the source tree.
  */
 
+#include <qa_utils/timing.h>
 #include <qa_utils/wx_utils/unit_test_utils.h>
 #include <text_eval/text_eval_wrapper.h>
 #include <text_eval/text_eval_vcs.h>
@@ -52,8 +53,7 @@ static const char* TEST_COMMIT_MSG   = "Initial test commit";
  */
 struct VCS_TEST_FIXTURE : KI_TEST::GIT_TEST_FIXTURE
 {
-    VCS_TEST_FIXTURE() :
-            m_originalDir( wxGetCwd() )
+    VCS_TEST_FIXTURE()
     {
         KIGIT::GitRepositoryPtr repo =
                 KI_TEST::InitGitRepository( TempPath(), "main", TEST_AUTHOR_NAME, TEST_AUTHOR_EMAIL );
@@ -62,14 +62,11 @@ struct VCS_TEST_FIXTURE : KI_TEST::GIT_TEST_FIXTURE
         BOOST_REQUIRE( wxSetWorkingDirectory( TempPath() ) );
     }
 
-    ~VCS_TEST_FIXTURE() { wxSetWorkingDirectory( m_originalDir ); }
-
     const wxString& tempDir() const { return TempPath(); }
 
 private:
     // These tests exercise cwd-based discovery independently of projects loaded by other tests.
     TEXT_EVAL_VCS::CONTEXT_PATH_SCOPE m_context{ wxString() };
-    wxString                          m_originalDir;
 };
 
 
@@ -275,22 +272,24 @@ BOOST_AUTO_TEST_CASE( VcsPerformance )
 {
     EXPRESSION_EVALUATOR evaluator;
 
-    auto start = std::chrono::high_resolution_clock::now();
-
-    for( int i = 0; i < 100; ++i )
-    {
-        auto result = evaluator.Evaluate( "@{vcsidentifier(7)}" );
-        BOOST_CHECK( !evaluator.HasErrors() );
-    }
-
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>( end - start );
+    long long duration = KI_TEST::ProcessCpuMsOf(
+            [&]()
+            {
+                for( int i = 0; i < 100; ++i )
+                {
+                    auto result = evaluator.Evaluate( "@{vcsidentifier(7)}" );
+                    BOOST_CHECK( !evaluator.HasErrors() );
+                }
+            } );
 
     // Sanitizer instrumentation changes execution cost, not the evaluation contract
 #if defined( KICAD_SANITIZE_THREADS ) || defined( KICAD_SANITIZE_ADDRESS )
-    BOOST_TEST_MESSAGE( "Instrumented VCS evaluation: " << duration.count() << " ms" );
+    BOOST_TEST_MESSAGE( "Instrumented VCS evaluation: " << duration << " ms" );
 #else
-    BOOST_CHECK_LT( duration.count(), 2000 );
+    BOOST_TEST_MESSAGE( "VCS evaluation: " << duration << " ms" );
+
+    if( KI_TEST::TimingBoundsApply() )
+        BOOST_CHECK_LT( duration, 2000 );
 #endif
 }
 

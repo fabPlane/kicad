@@ -556,8 +556,9 @@ void PCB_EDIT_FRAME::SendSelectItemsToSch( const std::deque<EDA_ITEM*>& aItems, 
     else
     {
         std::string payload;
-        kiapi::common::PackKiwayApiMessage( sync, payload );
-        Kiway().ExpressMail( FRAME_SCH, MAIL_SELECTION, payload, this );
+
+        if( kiapi::common::PackKiwayApiMessage( sync, payload ) )
+            Kiway().ExpressMail( FRAME_SCH, MAIL_SELECTION, payload, this );
     }
 }
 
@@ -575,8 +576,9 @@ void PCB_EDIT_FRAME::SendCrossProbeNetName( const wxString& aNetName )
     else
     {
         std::string payload;
-        kiapi::common::PackKiwayApiMessage( message, payload );
-        Kiway().ExpressMail( FRAME_SCH, MAIL_CROSS_PROBE, payload, this );
+
+        if( kiapi::common::PackKiwayApiMessage( message, payload ) )
+            Kiway().ExpressMail( FRAME_SCH, MAIL_CROSS_PROBE, payload, this );
     }
 }
 
@@ -630,8 +632,9 @@ void PCB_EDIT_FRAME::SendCrossProbeItem( BOARD_ITEM* aSyncItem )
     else
     {
         std::string payload;
-        kiapi::common::PackKiwayApiMessage( message, payload );
-        Kiway().ExpressMail( FRAME_SCH, MAIL_CROSS_PROBE, payload, this );
+
+        if( kiapi::common::PackKiwayApiMessage( message, payload ) )
+            Kiway().ExpressMail( FRAME_SCH, MAIL_CROSS_PROBE, payload, this );
     }
 }
 
@@ -946,19 +949,7 @@ void PCB_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
     }
 
     case MAIL_PCB_PROJECT_SETTINGS_CHANGED:
-        // The settings were reread, but every net caches its resolved netclass, so routing would
-        // keep the old widths and clearances until they resynchronize.
-        GetBoard()->SynchronizeTuningProfileProperties();
-        GetBoard()->SynchronizeNetsAndNetClasses( true );
-
-        if( !GetBoard()->SynchronizeComponentClasses( std::unordered_set<wxString>() ) )
-            wxLogTrace( traceGit, wxS( "Could not load component class assignment rules" ) );
-
-        Prj().IncrementNetclassesTicker();
-        Prj().IncrementTextVarsTicker();
-
-        GetCanvas()->GetView()->UpdateAllItems( KIGFX::ALL );
-        GetCanvas()->Refresh();
+        ReloadProjectFileSettings();
         break;
 
     case MAIL_RELOAD_LIB:

@@ -650,14 +650,14 @@ BOOST_AUTO_TEST_CASE( BBox_FallbackOrderOursThenTheirsThenAncestor )
 
 // BuildConflictDetailText --------------------------------------------------
 
-BOOST_AUTO_TEST_CASE( DetailText_ContainsIdAndKind )
+BOOST_AUTO_TEST_CASE( DetailText_ContainsKindButNoRawId )
 {
     ITEM_RESOLUTION r;
     r.id   = MakePath( 4100 );
     r.kind = ITEM_RES::TAKE_OURS;
 
     wxString text = BuildConflictDetailText( r );
-    BOOST_CHECK( text.Contains( r.id.AsString() ) );
+    BOOST_CHECK( !text.Contains( r.id.AsString() ) );
 
     // Run the comparison strings through `_()` so the assertions stay
     // locale-stable: if a translation is loaded, both the production
@@ -719,6 +719,42 @@ BOOST_AUTO_TEST_CASE( DetailText_KnownResolutionKindsProduceText )
                                  << static_cast<int>( kind ) );
         BOOST_CHECK( text.Contains( expectedCountLine ) );
     }
+}
+
+
+BOOST_AUTO_TEST_CASE( SettleLibraryMerges_ResolvesCombinedAndAsksForTheRest )
+{
+    const KIID_PATH combined = LibraryItemKiidPath( wxS( "Combined" ) );
+    const KIID_PATH clashing = LibraryItemKiidPath( wxS( "Clashing" ) );
+
+    MERGE_PLAN plan;
+
+    for( const KIID_PATH& id : { combined, clashing } )
+    {
+        ITEM_RESOLUTION action;
+        action.id = id;
+        action.kind = ITEM_RES::MERGE_PROPS;
+        plan.actions.push_back( action );
+        plan.unresolved.push_back( id );
+    }
+
+    SettleLibraryMerges(
+            plan,
+            [&]( const KIID_PATH& aId )
+            {
+                return aId == combined;
+            },
+            []( const KIID_PATH& )
+            {
+                return std::set<wxString>{ wxS( "Pin 1" ) };
+            } );
+
+    BOOST_CHECK( plan.actions[0].kind == ITEM_RES::MERGE_PROPS );
+    BOOST_CHECK( plan.actions[1].kind == ITEM_RES::KEEP );
+    BOOST_REQUIRE_EQUAL( plan.actions[1].props.size(), 1 );
+    BOOST_CHECK( plan.actions[1].props[0].name == wxS( "Pin 1" ) );
+    BOOST_REQUIRE_EQUAL( plan.unresolved.size(), 1 );
+    BOOST_CHECK( plan.unresolved[0] == clashing );
 }
 
 

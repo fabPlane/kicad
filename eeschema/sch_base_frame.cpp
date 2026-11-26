@@ -242,7 +242,7 @@ const TITLE_BLOCK& SCH_BASE_FRAME::GetTitleBlock() const
 
 void SCH_BASE_FRAME::SetTitleBlock( const TITLE_BLOCK& aTitleBlock )
 {
-    wxASSERT( GetScreen() );
+    wxCHECK2( GetScreen(), return );
     GetScreen()->SetTitleBlock( aTitleBlock );
 }
 
@@ -699,13 +699,13 @@ void SCH_BASE_FRAME::GetLibraryItemsForListDialog( wxArrayString& aHeaders,
     std::sort( aItemsToDisplay.begin(), aItemsToDisplay.end(),
                []( const wxArrayString& a, const wxArrayString& b )
                {
-                   return StrNumCmp( a[0], b[0], true ) < 0;
+                   return StrNumCmp( a[0], b[0], CMP_T::IGNORE_CASE ) < 0;
                } );
 
     std::sort( unpinned.begin(), unpinned.end(),
                []( const wxArrayString& a, const wxArrayString& b )
                {
-                   return StrNumCmp( a[0], b[0], true ) < 0;
+                   return StrNumCmp( a[0], b[0], CMP_T::IGNORE_CASE ) < 0;
                } );
 
     std::ranges::copy( unpinned, std::back_inserter( aItemsToDisplay ) );
@@ -806,6 +806,27 @@ const TOOL_ACTION* SCH_BASE_FRAME::drawArcAction( ARC_DRAW_MODE aMode ) const
 
 void SCH_BASE_FRAME::setSymWatcher( const LIB_ID* aID )
 {
+    std::optional<wxString> uri;
+
+    if( aID )
+        uri = Pgm().GetLibraryManager().GetFullURI( LIBRARY_TABLE_TYPE::SYMBOL, aID->GetLibNickname() );
+
+    wxString tmp = uri ? ExpandEnvVarSubstitutions( *uri, &Prj() ) : wxString();
+
+    // Re-arming the same library would take a change still in the debounce as the new baseline
+    if( m_watcher && uri )
+    {
+        wxFileName target;
+
+        if( wxFileName::DirExists( tmp ) )
+            target.AssignDir( tmp );
+        else
+            target.Assign( tmp );
+
+        if( target == m_watcherFileName )
+            return;
+    }
+
     Unbind( wxEVT_FSWATCHER, &SCH_BASE_FRAME::OnSymChange, this );
 
     if( m_watcher )
@@ -819,16 +840,13 @@ void SCH_BASE_FRAME::setSymWatcher( const LIB_ID* aID )
     if( !aID )
         return;
 
-    LIBRARY_MANAGER& manager = Pgm().GetLibraryManager();
-    std::optional<wxString> uri = manager.GetFullURI( LIBRARY_TABLE_TYPE::SYMBOL, aID->GetLibNickname() );
-
     if( !uri )
     {
         wxLogTrace( traceLibWatch, "Could not get URI for library %s", wxString( aID->GetLibNickname().c_str() ) );
         return;
     }
 
-    wxString tmp = ExpandEnvVarSubstitutions( *uri, &Prj() );
+    m_watcherLibName = aID->GetLibNickname().wx_str();
 
     wxLogTrace( traceLibWatch, "Setting up watcher for %s", tmp );
 
@@ -973,7 +991,7 @@ void SCH_BASE_FRAME::OnSymChangeDebounceTimer( wxTimerEvent& aEvent )
 
     m_inSymChangeTimerEvent = true;
 
-    if( !GetScreen()->IsContentModified()
+    if( !hasUnsavedLibraryEdits( m_watcherLibName )
           || IsOK( this, _( "The library containing the current symbol has changed.\n"
                             "Do you want to reload the library?" ) ) )
     {

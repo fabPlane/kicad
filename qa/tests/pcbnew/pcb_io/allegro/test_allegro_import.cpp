@@ -1058,6 +1058,53 @@ BOOST_AUTO_TEST_CASE( RectsZoneVsCopperPolygon )
 
 
 /**
+ * Calculated fills absent from a boundary's pointer array still join their source zone
+ * through the shared 0x2C table.
+ */
+BOOST_AUTO_TEST_CASE( UnlinkedCalculatedFillsJoinZones )
+{
+    std::unique_ptr<BOARD> board = LoadAllegroBoard( "ABX00162_UNOQ/20250806_UNOQ.brd" );
+    BOOST_REQUIRE( board );
+
+    int fixedCopperPolygons = 0;
+
+    for( const BOARD_ITEM* item : board->Drawings() )
+    {
+        if( item->Type() == PCB_SHAPE_T && IsCopperLayer( item->GetLayer() )
+            && static_cast<const PCB_SHAPE*>( item )->GetShape() == SHAPE_T::POLY )
+        {
+            fixedCopperPolygons++;
+        }
+    }
+
+    // These 62 copper drawings have no confirmed zone owner in this fixture.
+    BOOST_CHECK_EQUAL( fixedCopperPolygons, 62 );
+}
+
+
+BOOST_AUTO_TEST_CASE( CopperZonesInheritNetClearance )
+{
+    std::unique_ptr<BOARD> board = LoadAllegroBoard( "ABX00162_UNOQ/20250806_UNOQ.brd" );
+    BOOST_REQUIRE( board );
+
+    int copperZones = 0;
+    int unexpectedClearances = 0;
+
+    for( const ZONE* zone : board->Zones() )
+    {
+        if( zone->GetIsRuleArea() || !zone->IsOnCopperLayer() )
+            continue;
+
+        copperZones++;
+        unexpectedClearances += zone->GetLocalClearance().value_or( -1 ) != 0;
+    }
+
+    BOOST_CHECK_GT( copperZones, 0 );
+    BOOST_CHECK_EQUAL( unexpectedClearances, 0 );
+}
+
+
+/**
  * Test that copper_text.brd imports the "TESTING" text on F.Cu.
  */
 BOOST_AUTO_TEST_CASE( CopperText )
@@ -1229,6 +1276,29 @@ BOOST_AUTO_TEST_CASE( Footprint3DModels )
     BOOST_CHECK_CLOSE( conn.m_Rotation.x, -90.0, 1e-6 );
     BOOST_CHECK_SMALL( conn.m_Rotation.y, 1e-9 );
     BOOST_CHECK_CLOSE( conn.m_Rotation.z, -90.0, 1e-6 );
+}
+
+
+/**
+ * Constraint set netclasses must be assigned to nets and inherited by the diff pair classes.
+ * https://gitlab.com/kicad/code/kicad/-/issues/25654
+ */
+BOOST_AUTO_TEST_CASE( ConstraintSetsAreAssigned )
+{
+    std::unique_ptr<BOARD> board = LoadAllegroBoard( "issue25654/MIPI_Camera_Sub.brd" );
+
+    BOOST_REQUIRE( board != nullptr );
+
+    std::shared_ptr<NET_SETTINGS> netSettings = board->GetDesignSettings().m_NetSettings;
+
+    BOOST_REQUIRE( netSettings->HasNetclass( wxS( "DP_CSI_A_CLK" ) ) );
+    BOOST_CHECK_EQUAL( netSettings->GetNetclasses().at( wxS( "DP_CSI_A_CLK" ) )->GetClearance(), 177800 );
+
+    for( NETINFO_ITEM* net : board->GetNetInfo() )
+    {
+        if( net->GetNetCode() > 0 )
+            BOOST_CHECK_NE( net->GetNetClass()->GetName(), NETCLASS::Default );
+    }
 }
 
 
@@ -1867,6 +1937,18 @@ struct ALG_REFERENCE_DATA
         return static_cast<int>( val );
     }
 
+    static const ALG_REFERENCE_DATA& GetCached( const std::string& aPath )
+    {
+        static std::map<std::string, ALG_REFERENCE_DATA> cache;
+
+        auto it = cache.find( aPath );
+
+        if( it == cache.end() )
+            it = cache.emplace( aPath, ParseAlgFile( aPath ) ).first;
+
+        return it->second;
+    }
+
     static ALG_REFERENCE_DATA ParseAlgFile( const std::string& aPath )
     {
         ALG_REFERENCE_DATA data;
@@ -2071,7 +2153,7 @@ BOOST_AUTO_TEST_CASE( AlgReferenceNetNames )
     {
         BOOST_TEST_MESSAGE( "Validating net names: " << brdFile );
 
-        ALG_REFERENCE_DATA algData = ALG_REFERENCE_DATA::ParseAlgFile( algFile );
+        const ALG_REFERENCE_DATA& algData = ALG_REFERENCE_DATA::GetCached( algFile );
         BOOST_REQUIRE_GT( algData.netNames.size(), 0u );
 
         BOARD* board = GetCachedBoard( brdFile );
@@ -2119,7 +2201,7 @@ BOOST_AUTO_TEST_CASE( AlgReferenceComponentPlacement )
     {
         BOOST_TEST_MESSAGE( "Validating components: " << brdFile );
 
-        ALG_REFERENCE_DATA algData = ALG_REFERENCE_DATA::ParseAlgFile( algFile );
+        const ALG_REFERENCE_DATA& algData = ALG_REFERENCE_DATA::GetCached( algFile );
         BOOST_REQUIRE_GT( algData.refDes.size(), 0u );
 
         BOARD* board = GetCachedBoard( brdFile );
@@ -2252,6 +2334,18 @@ struct ALG_OUTLINE_DATA
         maxY = std::max( maxY, aY );
     }
 
+    static const ALG_OUTLINE_DATA& GetCached( const std::string& aPath )
+    {
+        static std::map<std::string, ALG_OUTLINE_DATA> cache;
+
+        auto it = cache.find( aPath );
+
+        if( it == cache.end() )
+            it = cache.emplace( aPath, ParseAlgOutlines( aPath ) ).first;
+
+        return it->second;
+    }
+
     static ALG_OUTLINE_DATA ParseAlgOutlines( const std::string& aPath )
     {
         ALG_OUTLINE_DATA data;
@@ -2376,7 +2470,7 @@ BOOST_AUTO_TEST_CASE( OutlineSegmentCount )
     {
         BOOST_TEST_CONTEXT( "Board: " << brdFile )
         {
-            ALG_OUTLINE_DATA algOutlines = ALG_OUTLINE_DATA::ParseAlgOutlines( algFile );
+            const ALG_OUTLINE_DATA& algOutlines = ALG_OUTLINE_DATA::GetCached( algFile );
 
             if( algOutlines.designOutlineCount == 0 && algOutlines.outlineCount == 0 )
             {
@@ -2428,7 +2522,7 @@ BOOST_AUTO_TEST_CASE( OutlineBoundingBox )
     {
         BOOST_TEST_CONTEXT( "Board: " << brdFile )
         {
-            ALG_OUTLINE_DATA algOutlines = ALG_OUTLINE_DATA::ParseAlgOutlines( algFile );
+            const ALG_OUTLINE_DATA& algOutlines = ALG_OUTLINE_DATA::GetCached( algFile );
 
             if( algOutlines.designOutlineCount == 0 )
             {
@@ -2512,7 +2606,7 @@ BOOST_AUTO_TEST_CASE( OutlineEndpoints )
     {
         BOOST_TEST_CONTEXT( "Board: " << brdFile )
         {
-            ALG_OUTLINE_DATA algOutlines = ALG_OUTLINE_DATA::ParseAlgOutlines( algFile );
+            const ALG_OUTLINE_DATA& algOutlines = ALG_OUTLINE_DATA::GetCached( algFile );
 
             if( algOutlines.designOutlineCount == 0 )
                 continue;
@@ -2731,7 +2825,7 @@ BOOST_AUTO_TEST_CASE( ZoneCountMatchesAlg )
     {
         BOOST_TEST_CONTEXT( "Zone count: " << brdFile )
         {
-            ALG_REFERENCE_DATA algData = ALG_REFERENCE_DATA::ParseAlgFile( algFile );
+            const ALG_REFERENCE_DATA& algData = ALG_REFERENCE_DATA::GetCached( algFile );
 
             BOARD* board = GetCachedBoard( brdFile );
             BOOST_REQUIRE( board );
@@ -2769,7 +2863,7 @@ BOOST_AUTO_TEST_CASE( ZoneLayerDistribution )
     {
         BOOST_TEST_CONTEXT( "Zone layers: " << brdFile )
         {
-            ALG_REFERENCE_DATA algData = ALG_REFERENCE_DATA::ParseAlgFile( algFile );
+            const ALG_REFERENCE_DATA& algData = ALG_REFERENCE_DATA::GetCached( algFile );
 
             BOARD* board = GetCachedBoard( brdFile );
             BOOST_REQUIRE( board );
@@ -2822,7 +2916,7 @@ BOOST_AUTO_TEST_CASE( ZoneBoundingBoxes )
     {
         BOOST_TEST_CONTEXT( "Zone bboxes: " << brdFile )
         {
-            ALG_REFERENCE_DATA algData = ALG_REFERENCE_DATA::ParseAlgFile( algFile );
+            const ALG_REFERENCE_DATA& algData = ALG_REFERENCE_DATA::GetCached( algFile );
 
             BOARD* board = GetCachedBoard( brdFile );
             BOOST_REQUIRE( board );

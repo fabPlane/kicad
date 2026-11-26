@@ -86,9 +86,22 @@ typedef std::vector< COMPONENT_NET > COMPONENT_NETS;
 
 struct NETLIST_GROUP
 {
+    /**
+     * @param aUuid is the group's uuid as the netlist declares it, either an instance path or a
+     *              bare uuid.  It fixes both #path and #uuid, which have to agree.
+     */
+    NETLIST_GROUP( const wxString& aName, const wxString& aUuid, const LIB_ID& aLibId,
+                   std::vector<KIID_PATH> aMembers );
+
     wxString name;
+
+    // The group's identity on the board
     KIID uuid;
+
     LIB_ID            libId;
+
+    // The path other items use to refer to this group (sheet path + group uuid)
+    KIID_PATH path;
 
     // Full instance paths of the member symbols (sheet path + symbol uuid)
     std::vector<KIID_PATH> members;
@@ -155,21 +168,25 @@ public:
 
     void SetValue( const wxString& aValue ) { m_value = aValue; }
     const wxString& GetValue() const { return m_value; }
+    wxString        GetValue( const wxString& aVariantName ) const;
 
     void SetFields( nlohmann::ordered_map<wxString, wxString> aFields )
     {
         m_fields = std::move( aFields );
     }
     const nlohmann::ordered_map<wxString, wxString>& GetFields() const { return m_fields; }
+    nlohmann::ordered_map<wxString, wxString>        GetFields( const wxString& aVariantName ) const;
 
     void SetProperties( std::map<wxString, wxString> aProps )
     {
         m_properties = std::move( aProps );
     }
     const std::map<wxString, wxString>& GetProperties() const { return m_properties; }
+    std::map<wxString, wxString>        GetProperties( const wxString& aVariantName ) const;
 
     void SetFPID( const LIB_ID& aFPID ) { m_fpid = aFPID;  }
     const LIB_ID& GetFPID() const { return m_fpid; }
+    LIB_ID        GetFPID( const wxString& aVariantName ) const;
 
     void SetAltFPID( const LIB_ID& aFPID ) { m_altFpid = aFPID; }
     const LIB_ID& GetAltFPID() const { return m_altFpid; }
@@ -442,6 +459,24 @@ public:
      * @return a pointer to the #NETLIST_GROUP that matches \a aUuid if found.  Otherwise NULL.
      */
     NETLIST_GROUP* GetGroupByUuid( const KIID& aUuid );
+
+    /**
+     * @brief Return a #NETLIST_GROUP by \a aPath.
+     *
+     * @param aPath is the KIID_PATH [ sheetUUID, .., groupUUID ] the group was declared with.
+     *
+     * @return a pointer to the #NETLIST_GROUP that matches \a aPath if found.  Otherwise NULL.
+     */
+    NETLIST_GROUP* GetGroupByPath( const KIID_PATH& aPath );
+
+    /**
+     * @brief Return the #NETLIST_GROUP that lists \a aMemberPath among its members.
+     *
+     * @param aMemberPath is the KIID_PATH of a symbol or of a nested group.
+     *
+     * @return a pointer to the #NETLIST_GROUP holding \a aMemberPath if found. Otherwise NULL.
+     */
+    NETLIST_GROUP* GetParentGroup( const KIID_PATH& aMemberPath );
 
     /**
      * After groups and components are parsed, apply the group memberships to the

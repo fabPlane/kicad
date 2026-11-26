@@ -44,6 +44,7 @@
 #include <settings/common_settings.h>
 #include <refdes_tracker.h>
 #include <schematic.h>
+#include <mail_type.h>
 #include <schematic_text_var_adapter.h>
 #include <sch_bus_entry.h>
 #include <sch_commit.h>
@@ -67,6 +68,7 @@
 #include <text_eval/text_eval_wrapper.h>
 #include <tool/tool_manager.h>
 #include <undo_redo_container.h>
+#include <wildcards_and_files_ext.h>
 #include <local_history.h>
 #include <richio.h>
 #include <sch_io/sch_io_mgr.h>
@@ -74,6 +76,7 @@
 #include <sch_io/sch_io.h>
 
 #include <connectivity/conn_facade.h>
+#include <wx/filename.h>
 #include <wx/log.h>
 
 SCHEMATIC::SCHEMATIC( PROJECT* aPrj ) :
@@ -118,7 +121,12 @@ SCHEMATIC::SCHEMATIC( PROJECT* aPrj ) :
 
                 if( field->GetId() == FIELD_T::REFERENCE )
                 {
-                    symbol->SetRef( &sheetPath, newValue );
+                    wxString base;
+
+                    if( symbol->BaseRefFromUser( sheetPath, newValue, base ).IsEmpty() )
+                        symbol->SetUserRef( sheetPath, base );
+                    else
+                        symbol->SetRef( &sheetPath, newValue );
 
                     // The user might want to change all the units to the new ref.  Or they
                     // might not.  Since we have no way of knowing, we default to the most
@@ -183,6 +191,7 @@ void SCHEMATIC::Reset()
     m_rootSheet = nullptr;
     m_topLevelSheets.clear();
     m_hierarchy.clear();
+    RefreshRefSuffixes();
 
     m_connectionGraph->Reset();
     m_currentSheet->clear();
@@ -235,7 +244,7 @@ void SCHEMATIC::SetProject( PROJECT* aPrj )
 
 void SCHEMATIC::CacheExistingAnnotation()
 {
-    wxASSERT( m_project );
+    wxCHECK2( m_project, return );
 
     // Cache all existing annotations in the REFDES_TRACKER
     std::shared_ptr<REFDES_TRACKER> refdesTracker = m_project->GetProjectFile().m_SchematicSettings->m_refDesTracker;
@@ -263,10 +272,19 @@ bool SCHEMATIC::Contains( const SCH_REFERENCE& aRef ) const
     /// Famous last words...
     sheets.GetSymbols( references, SYMBOL_FILTER_NON_POWER );
 
+    // Bases can differ where composed references meet, as U1 on _M2 and U1_M2 on the root, so the
+    // package is the composed reference and the unit is compared by number
+    auto packageUnit =
+            []( const SCH_REFERENCE& aReference )
+            {
+                int unit = aReference.GetSymbol()->GetUnitCount() > 1 ? aReference.GetUnit() : 0;
+                return std::make_pair( aReference.GetComposedRef(), unit );
+            };
+
     return std::any_of( references.begin(), references.end(),
                         [&]( const SCH_REFERENCE& ref )
                         {
-                            return ref.GetCanonicalRef( true ) == aRef.GetCanonicalRef( true );
+                            return packageUnit( ref ) == packageUnit( aRef );
                         } );
 }
 
@@ -437,6 +455,10 @@ void SCHEMATIC::SetTopLevelSheets( const std::vector<SCH_SHEET*>& aSheets )
     ensureCurrentSheetIsTopLevel();
     rebuildHierarchyState( true );
 
+    // A single top level sheet recovered its packages when it loaded
+    if( validSheets.size() > 1 )
+        m_hierarchy.RecoverPackageRefs();
+
     m_settingTopLevelSheets = wasAlreadySetting;
 }
 
@@ -501,6 +523,7 @@ void SCHEMATIC::AdoptContent( SCHEMATIC_CONTENT&& aContent ) noexcept
     }
 
     m_hierarchy.swap( aContent.hierarchy );
+    RefreshRefSuffixes();
 
     if( aContent.currentSheet )
         m_currentSheet->Swap( *aContent.currentSheet );
@@ -603,6 +626,310 @@ void SCHEMATIC::RefreshHierarchy()
 
     if( m_textVarAdapter )
         m_textVarAdapter->SyncToHierarchy();
+
+    RefreshRefSuffixes();
+}
+
+
+void SCHEMATIC::RefreshRefSuffixes()
+{
+    SCH_SYMBOL::BumpRefGeneration();
+
+    m_refSuffixes.clear();
+    m_refSuffixesBySheetHash.clear();
+    m_hasRefSuffixFields = false;
+
+    for( const SCH_SHEET_PATH& path : m_hierarchy )
+    {
+        if( const SCH_FIELD* field = std::as_const( *path.Last() ).GetField( FIELD_T::SHEET_REF_SUFFIX ) )
+            m_hasRefSuffixFields |= !field->GetText().IsEmpty();
+
+        wxString suffix = path.ComposeRefSuffix();
+
+        m_refSuffixesBySheetHash.emplace( path.GetCurrentHash(), suffix );
+
+        if( !suffix.IsEmpty() )
+            m_refSuffixes.emplace( path.Path(), std::move( suffix ) );
+    }
+}
+
+
+const wxString* SCHEMATIC::findRefSuffix( const SCH_SHEET_PATH& aPath ) const
+{
+    if( !HasRefSuffixes() )
+        return nullptr;
+
+    if( auto it = m_refSuffixesBySheetHash.find( aPath.GetCurrentHash() ); it != m_refSuffixesBySheetHash.end() )
+        return &it->second;
+
+    // A path built apart from the hierarchy may hash differently, as one differing only in the virtual root does
+    auto it = m_refSuffixes.find( aPath.PathRef() );
+
+    return it == m_refSuffixes.end() ? nullptr : &it->second;
+}
+
+
+wxString SCHEMATIC::GetRefSuffix( const SCH_SHEET_PATH& aPath ) const
+{
+    const wxString* suffix = findRefSuffix( aPath );
+
+    return suffix ? *suffix : wxString();
+}
+
+
+void SCHEMATIC::AppendRefSuffix( wxString& aRef, const SCH_SHEET_PATH& aPath ) const
+{
+    if( const wxString* suffix = findRefSuffix( aPath ) )
+        aRef += *suffix;
+}
+
+
+wxString SCHEMATIC::GetRefSuffix( const KIID_PATH& aPath ) const
+{
+    // Designs without suffixes skip the path hash
+    if( !HasRefSuffixes() )
+        return wxEmptyString;
+
+    auto it = m_refSuffixes.find( aPath );
+
+    return it == m_refSuffixes.end() ? wxString() : it->second;
+}
+
+
+std::optional<wxString> SCHEMATIC::spanningPackageSuffix( const SCH_SYMBOL* aSymbol, const KIID_PATH& aPath ) const
+{
+    if( aSymbol->GetUnitCount() <= 1 )
+        return std::nullopt;
+
+    std::lock_guard<std::mutex> lock( m_packageSuffixesMutex );
+    updatePackageSuffixes();
+
+    if( m_packageSuffixes.empty() )
+        return std::nullopt;
+
+    if( auto it = m_packageSuffixes.find( { aSymbol->m_Uuid, aPath } ); it != m_packageSuffixes.end() )
+        return it->second;
+
+    return std::nullopt;
+}
+
+
+wxString SCHEMATIC::GetPackageRefSuffix( const SCH_SYMBOL* aSymbol, const SCH_SHEET_PATH& aPath ) const
+{
+    if( !HasRefSuffixes() )
+        return wxEmptyString;
+
+    if( std::optional<wxString> suffix = spanningPackageSuffix( aSymbol, aPath.PathRef() ) )
+        return *suffix;
+
+    return GetRefSuffix( aPath );
+}
+
+
+wxString SCHEMATIC::GetPackageRefSuffix( const SCH_SYMBOL* aSymbol, const KIID_PATH& aPath ) const
+{
+    if( !HasRefSuffixes() )
+        return wxEmptyString;
+
+    if( std::optional<wxString> suffix = spanningPackageSuffix( aSymbol, aPath ) )
+        return *suffix;
+
+    return GetRefSuffix( aPath );
+}
+
+
+wxString SCHEMATIC::GetUnitRefSuffix( const SCH_SYMBOL* aSymbol, const SCH_SHEET_PATH& aPath, int aUnit ) const
+{
+    if( !HasRefSuffixes() )
+        return wxEmptyString;
+
+    {
+        std::lock_guard<std::mutex> lock( m_packageSuffixesMutex );
+        updatePackageSuffixes();
+
+        auto group = m_packageUnitSuffixes.find( { aSymbol->GetBaseRef( &aPath ), aSymbol->GetLibId().Format() } );
+
+        if( group != m_packageUnitSuffixes.end() )
+        {
+            if( auto unit = group->second.find( aUnit ); unit != group->second.end() )
+                return unit->second;
+        }
+    }
+
+    // An unplaced unit belongs to the package as a whole
+    return GetPackageRefSuffix( aSymbol, aPath );
+}
+
+
+bool SCHEMATIC::CopiesSelectDifferentUnits( const SCH_SYMBOL* aSymbol ) const
+{
+    if( aSymbol->GetUnitCount() < 2 )
+        return false;
+
+    std::lock_guard<std::mutex> lock( m_packageSuffixesMutex );
+    updatePackageSuffixes();
+    return m_unitSplitSymbols.contains( aSymbol->m_Uuid );
+}
+
+
+std::string SCHEMATIC::FormatRefSuffixes() const
+{
+    std::map<KIID_PATH, std::vector<std::pair<KIID, wxString>>> packagesOn;
+
+    for( const auto& [key, suffix] : PackageRefSuffixes() )
+        packagesOn[key.second].emplace_back( key.first, suffix );
+
+    std::string reply = std::string( MAIL_SCH_REF_SUFFIXES_TAG ) + "\n";
+
+    for( const SCH_SHEET_PATH& path : m_hierarchy )
+    {
+        const wxString sheet = path.PathAsString();
+        reply += sheet.ToStdString() + "\t" + std::string( GetRefSuffix( path ).ToUTF8() ) + "\n";
+
+        // A footprint placed from such an instance carries the package suffix in its reference
+        for( const auto& [symbol, suffix] : packagesOn[path.Path()] )
+            reply += ( sheet + symbol.AsString() ).ToStdString() + "\t" + std::string( suffix.ToUTF8() ) + "\n";
+    }
+
+    return reply;
+}
+
+
+std::set<KIID> SCHEMATIC::SplitUnitSymbols() const
+{
+    std::lock_guard<std::mutex> lock( m_packageSuffixesMutex );
+    updatePackageSuffixes();
+    return m_unitSplitSymbols;
+}
+
+
+std::map<std::pair<KIID, KIID_PATH>, wxString> SCHEMATIC::PackageRefSuffixes() const
+{
+    if( !HasRefSuffixes() )
+        return {};
+
+    std::lock_guard<std::mutex> lock( m_packageSuffixesMutex );
+    updatePackageSuffixes();
+    return m_packageSuffixes;
+}
+
+
+void SCHEMATIC::updatePackageSuffixes() const
+{
+    const uint64_t generation = SCH_SYMBOL::RefGeneration();
+
+    if( m_packageSuffixesGeneration == generation )
+        return;
+
+    struct MEMBER
+    {
+        KIID      symbol;
+        KIID_PATH path;
+        int       unit;
+        wxString  suffix;
+    };
+
+    std::map<std::pair<wxString, wxString>, std::vector<MEMBER>> groups;
+    std::map<std::pair<wxString, wxString>, std::set<int>>       units;
+    std::set<std::pair<wxString, wxString>>                      repeated;
+    std::map<KIID, int>                                          firstUnit;
+
+    // Reused sheets share a screen, so scan each screen once
+    std::unordered_map<const SCH_SCREEN*, std::vector<const SCH_SYMBOL*>> multiUnitSymbols;
+
+    m_unitSplitSymbols.clear();
+
+    for( const SCH_SHEET_PATH& path : m_hierarchy )
+    {
+        auto [screenSymbols, scan] = multiUnitSymbols.try_emplace( path.LastScreen() );
+
+        if( scan )
+        {
+            for( SCH_ITEM* item : path.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+            {
+                const SCH_SYMBOL* symbol = static_cast<const SCH_SYMBOL*>( item );
+
+                if( symbol->GetUnitCount() > 1 )
+                    screenSymbols->second.push_back( symbol );
+            }
+        }
+
+        for( const SCH_SYMBOL* symbol : screenSymbols->second )
+        {
+            SCH_SYMBOL_INSTANCE instance;
+
+            if( !symbol->GetInstance( instance, path.PathRef() ) )
+                continue;
+
+            if( auto [it, inserted] = firstUnit.emplace( symbol->m_Uuid, instance.m_Unit );
+                    !inserted && it->second != instance.m_Unit )
+            {
+                m_unitSplitSymbols.insert( symbol->m_Uuid );
+            }
+
+            if( instance.m_Reference.IsEmpty() || instance.m_Reference.EndsWith( wxS( "?" ) ) )
+                continue;
+
+            std::pair<wxString, wxString> key( instance.m_Reference, symbol->GetLibId().Format() );
+
+            if( !units[key].insert( instance.m_Unit ).second )
+                repeated.insert( key );
+
+            const wxString* suffix = findRefSuffix( path );
+
+            groups[key].push_back( { symbol->m_Uuid, path.PathRef(), instance.m_Unit, suffix ? *suffix : wxString() } );
+        }
+    }
+
+    m_packageSuffixes.clear();
+    m_packageUnitSuffixes.clear();
+
+    for( const auto& [key, members] : groups )
+    {
+        if( repeated.count( key ) )
+            continue;
+
+        wxString lowest = members.front().suffix;
+
+        for( const MEMBER& member : members )
+            lowest = std::min( lowest, member.suffix );
+
+        for( const MEMBER& member : members )
+        {
+            if( member.suffix != lowest )
+                m_packageSuffixes[{ member.symbol, member.path }] = lowest;
+        }
+
+        if( std::ranges::any_of( members, [&]( const MEMBER& m ) { return m.suffix != lowest; } ) )
+        {
+            for( const MEMBER& member : members )
+                m_packageUnitSuffixes[key][member.unit] = member.suffix;
+        }
+    }
+
+    m_packageSuffixesGeneration = generation;
+}
+
+
+std::vector<std::pair<SCH_SHEET_PATH, SCH_SHEET_PATH>> SCHEMATIC::RefSuffixCollisions( bool aIncludeEmpty ) const
+{
+    std::vector<std::pair<SCH_SHEET_PATH, SCH_SHEET_PATH>>                  collisions;
+    std::map<std::pair<const SCH_SCREEN*, wxString>, const SCH_SHEET_PATH*> firstUse;
+
+    for( const SCH_SHEET_PATH& path : m_hierarchy )
+    {
+        const wxString suffix = GetRefSuffix( path );
+
+        if( suffix.IsEmpty() && !aIncludeEmpty )
+            continue;
+
+        auto [it, inserted] = firstUse.emplace( std::make_pair( path.LastScreen(), suffix ), &path );
+
+        if( !inserted )
+            collisions.emplace_back( path, *it->second );
+    }
+
+    return collisions;
 }
 
 
@@ -1330,7 +1657,10 @@ void SCHEMATIC::SetBusAliases( const std::vector<std::shared_ptr<BUS_ALIAS>>& aA
     updateProjectBusAliases();
 
     if( m_project )
+    {
         m_project->GetProjectFile().m_BusAliasesDefined = true;
+        m_busAliasesFromTable = true;
+    }
 }
 
 
@@ -1343,6 +1673,7 @@ bool SCHEMATIC::HasProjectBusAliases() const
 void SCHEMATIC::loadBusAliasesFromProject()
 {
     m_busAliases.clear();
+    m_busAliasesFromTable = HasProjectBusAliases();
 
     if( !m_project )
         return;
@@ -1358,6 +1689,39 @@ void SCHEMATIC::loadBusAliasesFromProject()
 
         m_busAliases.push_back( busAlias );
     }
+}
+
+
+SCHEMATIC::BUS_ALIAS_RELOAD SCHEMATIC::ReloadProjectBusAliases()
+{
+    if( !m_project )
+        return BUS_ALIAS_RELOAD::UNCHANGED;
+
+    if( !HasProjectBusAliases() )
+    {
+        // The reread cleared the project copy, and a save without it would drop the aliases in use
+        updateProjectBusAliases();
+
+        if( !m_busAliasesFromTable )
+            return BUS_ALIAS_RELOAD::UNCHANGED;
+
+        // Kept as a table, so an empty one still suppresses the sheets' legacy aliases on reopen
+        m_project->GetProjectFile().m_BusAliasesDefined = true;
+        return BUS_ALIAS_RELOAD::TABLE_REMOVED;
+    }
+
+    std::map<wxString, std::vector<wxString>> inUse;
+
+    for( const std::shared_ptr<BUS_ALIAS>& alias : m_busAliases )
+    {
+        if( alias )
+            inUse.insert_or_assign( alias->GetName(), alias->Members() );
+    }
+
+    loadBusAliasesFromProject();
+
+    return inUse != m_project->GetProjectFile().m_BusAliases ? BUS_ALIAS_RELOAD::CHANGED
+                                                              : BUS_ALIAS_RELOAD::UNCHANGED;
 }
 
 
@@ -1446,7 +1810,7 @@ bool SCHEMATIC::resolveCrossReference( wxString* token, int aDepth ) const
     KIID_PATH      path( ref );
     KIID           uuid( 0 );
 
-    if( path.size() > 1 )
+    if( path.size() > 0 )
         uuid = path.back();
 
     SCH_SHEET_PATH sheetPath;
@@ -1529,31 +1893,26 @@ bool SCHEMATIC::resolveCrossReference( wxString* token, int aDepth ) const
                     {
                         for( SCH_ITEM* item : sheet.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
                         {
-                            SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
-                            wxString    symbolRef = symbol->GetRef( &sheet, false );
+                            SCH_SYMBOL*    symbol = static_cast<SCH_SYMBOL*>( item );
+                            const wxString baseRef = symbol->GetRef( &sheet, false );
 
-                            if( !symbol->GetLibSymbolRef() || symbolRef.StartsWith( wxT( "#" ) ) )
+                            if( !symbol->GetLibSymbolRef() || baseRef.StartsWith( wxT( "#" ) ) )
                                 continue;
 
-                            // Try exact match first
-                            if( symbolRef == ref )
+                            // A unit reference (J601A) names one unit exactly
+                            if( symbol->GetRef( &sheet, true ) == ref )
                             {
                                 foundSymbol = symbol;
                                 foundPath = sheet;
                                 return;
                             }
 
-                            // For multi-unit symbols, try matching parent reference (e.g., J601 matches J601A)
-                            if( symbolRef.StartsWith( ref ) && symbolRef.Length() == ref.Length() + 1 )
+                            // The parent reference (J601) names any unit, so keep looking for an
+                            // exact match
+                            if( !foundSymbol && baseRef == ref )
                             {
-                                wxChar lastChar = symbolRef.Last();
-
-                                if( lastChar >= 'A' && lastChar <= 'Z' )
-                                {
-                                    foundSymbol = symbol;
-                                    foundPath = sheet;
-                                    // Don't break - continue looking for exact match
-                                }
+                                foundSymbol = symbol;
+                                foundPath = sheet;
                             }
                         }
                     }
@@ -2169,6 +2528,45 @@ void SCHEMATIC::ResolveERCExclusionsPostUpdate()
     // Once we have the ERC Exclusions, record them in the project file so that
     // they are retained even before the schematic is saved (PCB Editor can also save the project)
     RecordERCExclusions();
+}
+
+
+std::vector<SCH_MARKER*> SCHEMATIC::ReloadERCExclusions()
+{
+    // The reread file carries every exclusion the old unresolved list held
+    m_unresolvedErcExclusions.clear();
+
+    std::vector<std::pair<SCH_MARKER*, SCH_SCREEN*>> wereExcluded;
+    SCH_SCREENS                                       screens( Root() );
+
+    for( SCH_SCREEN* screen = screens.GetFirst(); screen; screen = screens.GetNext() )
+    {
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_MARKER_T ) )
+        {
+            SCH_MARKER* marker = static_cast<SCH_MARKER*>( item );
+
+            if( marker->IsExcluded() )
+            {
+                wereExcluded.emplace_back( marker, screen );
+                marker->SetExcluded( false );
+            }
+        }
+    }
+
+    ResolveERCExclusionsPostUpdate();
+
+    std::vector<SCH_MARKER*> stale;
+
+    for( auto& [marker, screen] : wereExcluded )
+    {
+        if( !marker->IsExcluded() )
+        {
+            screen->Remove( marker );
+            stale.push_back( marker );
+        }
+    }
+
+    return stale;
 }
 
 
@@ -2943,6 +3341,70 @@ SCH_SHEET* SCHEMATIC::GetTopLevelSheet( int aIndex ) const
 }
 
 
+std::vector<TOP_LEVEL_SHEET_INFO> SCHEMATIC::TopLevelSheetInfos() const
+{
+    std::vector<TOP_LEVEL_SHEET_INFO> infos;
+    wxString                          projectPath = m_project ? m_project->GetProjectPath() : wxString();
+
+    for( SCH_SHEET* sheet : GetTopLevelSheets() )
+    {
+        if( !sheet->GetScreen() )
+            continue;
+
+        // A top-level sheet's file is its screen's; the SHEET_FILENAME field is for instances
+        wxFileName sheetFn( sheet->GetScreen()->GetFileName() );
+
+        if( sheetFn.IsAbsolute() )
+            sheetFn.MakeRelativeTo( projectPath );
+
+        infos.emplace_back( sheet->m_Uuid, sheet->GetName(), sheetFn.GetFullPath() );
+    }
+
+    return infos;
+}
+
+
+bool SCHEMATIC::TopLevelSheetsMatch( const std::vector<TOP_LEVEL_SHEET_INFO>& aSheets ) const
+{
+    std::vector<TOP_LEVEL_SHEET_INFO> loaded = TopLevelSheetInfos();
+
+    if( loaded.size() != aSheets.size() )
+        return false;
+
+    wxString projectPath = m_project ? m_project->GetProjectPath() : wxString();
+
+    for( size_t ii = 0; ii < loaded.size(); ++ii )
+    {
+        wxFileName have( loaded[ii].filename );
+        have.MakeAbsolute( projectPath );
+
+        wxFileName want = TopLevelSheetFile( aSheets[ii], projectPath,
+                                             have.GetExt() == FILEEXT::LegacySchematicFileExtension );
+
+        if( ( aSheets[ii].uuid != niluuid && aSheets[ii].uuid != loaded[ii].uuid )
+                || aSheets[ii].name != loaded[ii].name || !have.SameAs( want ) )
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
+wxFileName SCHEMATIC::TopLevelSheetFile( const TOP_LEVEL_SHEET_INFO& aSheet, const wxString& aProjectPath,
+                                         bool aLegacy )
+{
+    wxFileName fn( aSheet.filename );
+    fn.MakeAbsolute( aProjectPath );
+
+    if( aLegacy )
+        fn.SetExt( FILEEXT::LegacySchematicFileExtension );
+
+    return fn;
+}
+
+
 bool SCHEMATIC::IsTopLevelSheetUuid( const KIID& aUuid ) const
 {
     if( !m_rootSheet )
@@ -3181,22 +3643,24 @@ void SCHEMATIC::AddVariant( const wxString& aVariantName )
 }
 
 
-void SCHEMATIC::DeleteVariant( const wxString& aVariantName, SCH_COMMIT* aCommit )
+void SCHEMATIC::DeleteVariantDefinition( const wxString& aVariantName )
 {
-    if( aCommit )
-    {
-        wxCHECK( m_rootSheet, /* void */ );
-
-        SCH_SCREENS allScreens( m_rootSheet );
-
-        allScreens.DeleteVariant( aVariantName, aCommit );
-    }
-
     if( m_currentVariant == aVariantName )
         SetCurrentVariant( wxEmptyString );
 
     m_variantNames.erase( aVariantName );
     Settings().m_VariantDescriptions.erase( aVariantName );
+}
+
+
+void SCHEMATIC::DeleteVariant( const wxString& aVariantName, SCH_COMMIT* aCommit )
+{
+    wxCHECK( m_rootSheet, /* void */ );
+
+    SCH_SCREENS allScreens( m_rootSheet );
+
+    allScreens.DeleteVariant( aVariantName, aCommit );
+    DeleteVariantDefinition( aVariantName );
 }
 
 
@@ -3298,6 +3762,24 @@ void SCHEMATIC::LoadVariants()
 }
 
 
+bool SCHEMATIC::ReloadProjectVariants()
+{
+    std::set<wxString> before;
+    before.swap( m_variantNames );
+    LoadVariants();
+
+    bool changed = m_variantNames != before;
+
+    if( !m_currentVariant.IsEmpty() && !m_variantNames.contains( m_currentVariant ) )
+    {
+        SetCurrentVariant( wxEmptyString );
+        changed = true;
+    }
+
+    return changed;
+}
+
+
 void SCHEMATIC::SaveToHistory( const wxString& aProjectPath, std::vector<HISTORY_FILE_DATA>& aFileData )
 {
     if( !IsValid() )
@@ -3352,7 +3834,8 @@ void SCHEMATIC::SaveToHistory( const wxString& aProjectPath, std::vector<HISTORY
 
         wxString absPath = abs.GetFullPath();
 
-        if( absPath.IsEmpty() || !absPath.StartsWith( projPath ) )
+        if( absPath.IsEmpty()
+            || !absPath.Left( projPath.length() ).IsSameAs( projPath, wxFileName::IsCaseSensitive() ) )
             continue;
 
         wxString rel = absPath.Mid( projPath.length() );

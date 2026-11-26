@@ -24,6 +24,7 @@
 #include <qa_utils/wx_utils/unit_test_utils.h>
 #include <schematic_utils/schematic_file_util.h>
 
+#include <diff_merge/sym_item_diff.h>
 #include <diff_merge/sym_lib_differ.h>
 #include <diff_merge/kicad_diff_types.h>
 #include <diff_merge/sch_geometry_extractor.h>
@@ -36,6 +37,9 @@
 #include <json_common.h>
 
 #include <wx/filename.h>
+
+#include <functional>
+#include <set>
 
 
 using namespace KICAD_DIFF;
@@ -273,6 +277,36 @@ BOOST_AUTO_TEST_CASE( ModifiedSymbolCarriesPinChildDelta )
 }
 
 
+// Symbol compare ignores unit and body style names, so only the deltas show a rename
+BOOST_AUTO_TEST_CASE( UnitAndBodyStyleNamesAreDetected )
+{
+    auto [ownersA, mapA] = SYM_LIB_DIFFER::LoadLibrary( getFixturePath() );
+    auto [ownersB, mapB] = SYM_LIB_DIFFER::LoadLibrary( getFixturePath() );
+
+    auto victim = std::ranges::find_if( ownersB,
+                                        []( const std::unique_ptr<LIB_SYMBOL>& aOwner )
+                                        {
+                                            return aOwner && !aOwner->IsDerived();
+                                        } );
+
+    BOOST_REQUIRE( victim != ownersB.end() );
+
+    ( *victim )->GetUnitDisplayNames()[1] = wxS( "QA_Unit" );
+    ( *victim )->SetBodyStyleNames( { wxS( "QA_Normal" ), wxS( "QA_Alternate" ) } );
+
+    std::set<wxString> names;
+
+    for( const ITEM_CHANGE& change : SYM_LIB_DIFFER( mapA, mapB ).Diff().changes )
+    {
+        for( const PROPERTY_DELTA& delta : change.properties )
+            names.insert( delta.name );
+    }
+
+    BOOST_CHECK( names.contains( wxS( "Unit Names" ) ) );
+    BOOST_CHECK( names.contains( wxS( "Body Style Names" ) ) );
+}
+
+
 BOOST_AUTO_TEST_CASE( PinNameChangeIsDetected )
 {
     auto [ownersA, mapA] = SYM_LIB_DIFFER::LoadLibrary( getFixturePath() );
@@ -377,6 +411,152 @@ BOOST_AUTO_TEST_CASE( AddedGraphicYieldsSingleAddedElement )
     BOOST_CHECK_EQUAL( added, 1 );
     BOOST_CHECK_EQUAL( removed, 0 );
     BOOST_CHECK_EQUAL( modified, 0 );
+}
+
+
+// Edit the index'th plain symbol with pins, the same symbol in every load of one library
+static void editSymbol( const std::vector<std::unique_ptr<LIB_SYMBOL>>& aOwners, size_t aIndex,
+                        const std::function<void( LIB_SYMBOL& )>& aEdit )
+{
+    for( const std::unique_ptr<LIB_SYMBOL>& owner : aOwners )
+    {
+        if( !owner || owner->IsDerived() || owner->GetGraphicalPins( ALL_UNITS, ALL_BODY_STYLES ).empty() )
+            continue;
+
+        if( aIndex-- == 0 )
+        {
+            aEdit( *owner );
+            return;
+        }
+    }
+
+    BOOST_FAIL( "the library has too few symbols with pins" );
+}
+
+
+// A merge that drops either side's edit to a symbol the other side left alone must not pass for clean
+BOOST_AUTO_TEST_CASE( MergeKeepsBothSidesRejectsADroppedEdit )
+{
+    auto [ancestorOwners, ancestor] = SYM_LIB_DIFFER::LoadLibrary( getFixturePath() );
+    auto [oursOwners, ours] = SYM_LIB_DIFFER::LoadLibrary( getFixturePath() );
+    auto [theirsOwners, theirs] = SYM_LIB_DIFFER::LoadLibrary( getFixturePath() );
+    auto [mergedOwners, merged] = SYM_LIB_DIFFER::LoadLibrary( getFixturePath() );
+
+    auto movePin = []( LIB_SYMBOL& aSymbol )
+    {
+        aSymbol.GetGraphicalPins( ALL_UNITS, ALL_BODY_STYLES ).front()->Move( VECTOR2I( 1270, 0 ) );
+    };
+
+    // Footprint filters are neither a registered property nor an element
+    auto setFilters = []( LIB_SYMBOL& aSymbol )
+    {
+        wxString str_filter( "QA_Filter_*" );
+        aSymbol.SetFPFilters( wxArrayString( 1, &str_filter ) );
+    };
+
+    editSymbol( oursOwners, 0, movePin );
+    editSymbol( theirsOwners, 1, setFilters );
+    editSymbol( mergedOwners, 0, movePin );
+    editSymbol( mergedOwners, 1, setFilters );
+
+    BOOST_CHECK( SYM_LIB_DIFFER::MergeKeepsBothSides( ancestor, ours, theirs, merged ) );
+    BOOST_CHECK( !SYM_LIB_DIFFER::MergeKeepsBothSides( ancestor, ours, theirs, ours ) );
+}
+
+
+// State the change record misses must still block the combine, or the merge drops it silently
+BOOST_AUTO_TEST_CASE( CombineSymbolEditsRejectsUnreportedState )
+{
+    auto [owners, symbols] = SYM_LIB_DIFFER::LoadLibrary( getFixturePath() );
+    const LIB_SYMBOL* ancestor = nullptr;
+
+    for( const auto& [name, symbol] : symbols )
+    {
+        if( !symbol->IsDerived() )
+        {
+            ancestor = symbol;
+            break;
+        }
+    }
+
+    BOOST_REQUIRE( ancestor );
+
+    LIB_SYMBOL ours( *ancestor );
+    LIB_SYMBOL theirs( *ancestor );
+
+    ours.GetDatasheetField().SetText( wxS( "https://example.com/qa.pdf" ) );
+    theirs.GetFootprintField().SetText( wxS( "QA:Footprint" ) );
+
+    auto fieldEdit = []( const wxString& aField )
+    {
+        ITEM_CHANGE child;
+        child.typeName = _( "Field" );
+        child.refdes = aField;
+
+        ITEM_CHANGE change;
+        change.children.push_back( std::move( child ) );
+        return change;
+    };
+
+    const ITEM_CHANGE ourChange = fieldEdit( wxS( "Datasheet" ) );
+    const ITEM_CHANGE theirChange = fieldEdit( wxS( "Footprint" ) );
+
+    std::unique_ptr<LIB_SYMBOL> merged = CombineSymbolEdits( *ancestor, ours, theirs, ourChange, theirChange );
+
+    BOOST_REQUIRE( merged );
+    BOOST_CHECK_EQUAL( merged->GetFootprintField().GetText(), wxS( "QA:Footprint" ) );
+
+    theirs.SetBodyStyleNames( { wxS( "QA_Normal" ), wxS( "QA_Alternate" ) } );
+
+    BOOST_CHECK( !CombineSymbolEdits( *ancestor, ours, theirs, ourChange, theirChange ) );
+}
+
+
+// A lower unit count from one side must not combine with an edit the other side makes to a dropped unit
+BOOST_AUTO_TEST_CASE( CombineSymbolEditsKeepsTheOtherSidesEdits )
+{
+    auto [owners, symbols] = SYM_LIB_DIFFER::LoadLibrary( getFixturePath() );
+
+    auto plain = std::ranges::find_if( owners,
+                                       []( const std::unique_ptr<LIB_SYMBOL>& aOwner )
+                                       {
+                                           return aOwner && !aOwner->IsDerived() && aOwner->GetUnitCount() == 1;
+                                       } );
+
+    BOOST_REQUIRE( plain != owners.end() );
+
+    LIB_SYMBOL ancestor( **plain );
+    ancestor.SetUnitCount( 2, false );
+
+    LIB_SYMBOL ours( ancestor );
+    LIB_SYMBOL theirs( ancestor );
+
+    SCH_PIN* pin = new SCH_PIN( &ours );
+    pin->SetUnit( 2 );
+    pin->SetNumber( wxS( "QA" ) );
+    ours.AddDrawItem( pin );
+
+    theirs.SetUnitCount( 1, false );
+
+    const wxString name = ancestor.GetName();
+
+    auto changeTo = [&]( const LIB_SYMBOL& aAfter )
+    {
+        DOCUMENT_DIFF diff = SYM_LIB_DIFFER( { { name, &ancestor } }, { { name, &aAfter } } ).Diff();
+        BOOST_REQUIRE_EQUAL( diff.changes.size(), 1 );
+        return diff.changes.front();
+    };
+
+    const ITEM_CHANGE ourChange = changeTo( ours );
+    const ITEM_CHANGE theirChange = changeTo( theirs );
+
+    BOOST_CHECK( !CombineSymbolEdits( ancestor, ours, theirs, ourChange, theirChange ) );
+
+    // The unit count keeps a dropped unit's name in memory but not in the file
+    LIB_SYMBOL named( ancestor );
+    named.GetUnitDisplayNames()[2] = wxS( "QA_Unit" );
+
+    BOOST_CHECK( !CombineSymbolEdits( ancestor, named, theirs, changeTo( named ), theirChange ) );
 }
 
 

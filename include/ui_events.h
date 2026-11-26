@@ -26,4 +26,11 @@
 wxDECLARE_EXPORTED_EVENT( KICOMMON_API, EDA_EVT_UNITS_CHANGED, wxCommandEvent );
 wxDECLARE_EXPORTED_EVENT( KICOMMON_API, EDA_LANG_CHANGED, wxCommandEvent );
 
+/// Asks the frame it is sent to, and not its parents, to show the event string as an error infobar.  Left
+/// unhandled when that frame has no infobar or one is already showing, so the sender can fall back.
+wxDECLARE_EXPORTED_EVENT( KICOMMON_API, EDA_EVT_SHOW_ERROR_INFOBAR, wxCommandEvent );
+
+/// As EDA_EVT_SHOW_ERROR_INFOBAR, for a warning.
+wxDECLARE_EXPORTED_EVENT( KICOMMON_API, EDA_EVT_SHOW_WARNING_INFOBAR, wxCommandEvent );
+
 #endif

@@ -64,6 +64,37 @@
 static WX_STRING_REPORTER s_reporter;
 
 
+/// A #REPORTER that keeps each line's severity so the console can be filtered.
+class SIM_SEVERITY_STRING_REPORTER : public REPORTER
+{
+public:
+    REPORTER& Report( const wxString& aText, SEVERITY aSeverity = RPT_SEVERITY_UNDEFINED ) override
+    {
+        REPORTER::Report( aText, aSeverity );
+
+        // Each reported message is its own line.
+        m_entries.push_back( { aSeverity, aText + wxS( "\n" ) } );
+        return *this;
+    }
+
+    void Clear() override
+    {
+        REPORTER::Clear();
+        m_entries.clear();
+    }
+
+    std::vector<SIM_CONSOLE_ENTRY> TakePendingEntries()
+    {
+        std::vector<SIM_CONSOLE_ENTRY> entries = std::move( m_entries );
+        m_entries.clear();
+        return entries;
+    }
+
+private:
+    std::vector<SIM_CONSOLE_ENTRY> m_entries;
+};
+
+
 class SIM_CONSOLE_REPORTER : public SYNC_REPORTER
 {
 public:
@@ -72,18 +103,15 @@ public:
     {
     }
 
-    wxString TakePendingMessages()
+    std::vector<SIM_CONSOLE_ENTRY> TakePendingEntries()
     {
         std::lock_guard lock( m_mutex );
 
-        wxString messages = m_strRep.GetMessages();
-        m_strRep.Clear();
-
-        return messages;
+        return m_strRep.TakePendingEntries();
     }
 
 private:
-    WX_STRING_REPORTER m_strRep;
+    SIM_SEVERITY_STRING_REPORTER m_strRep;
 };
 
 
@@ -146,7 +174,8 @@ SIMULATOR_FRAME::SIMULATOR_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     mainSizer->Add( m_infoBar, 0, wxEXPAND, 0 );
 
     m_tbTopMain = new ACTION_TOOLBAR( this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
-                                      wxAUI_TB_DEFAULT_STYLE|wxAUI_TB_HORZ_LAYOUT|wxAUI_TB_PLAIN_BACKGROUND );
+                                      wxAUI_TB_DEFAULT_STYLE | wxAUI_TB_HORZ_LAYOUT | wxAUI_TB_PLAIN_BACKGROUND
+                                              | wxAUI_TB_OVERFLOW );
     m_tbTopMain->Realize();
     mainSizer->Add( m_tbTopMain, 0, wxEXPAND, 5 );
 
@@ -209,6 +238,18 @@ SIMULATOR_FRAME::SIMULATOR_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
 
     m_ui->InitWorkbook();
     m_ui->FlushSimConsole();
+
+    // InitWorkbook() bypasses SIMULATOR_FRAME::LoadWorkbook()'s modified-flag reset.
+    CallAfter(
+            [this]()
+            {
+                // Showing the frame can still resize it, and sash gravity would shift the restored positions
+                m_ui->SetSubWindowsSashSize();
+
+                m_workbookModified = false;
+                UpdateTitle();
+            } );
+
     UpdateTitle();
 }
 
@@ -562,6 +603,24 @@ const std::vector<wxString> SIMULATOR_FRAME::Signals()
 }
 
 
+const std::vector<wxString>& SIMULATOR_FRAME::NativeSignals()
+{
+    return m_ui->NativeSignals();
+}
+
+
+const std::vector<wxString>& SIMULATOR_FRAME::Netnames()
+{
+    return m_ui->Netnames();
+}
+
+
+std::vector<wxString> SIMULATOR_FRAME::DeviceVoltages()
+{
+    return m_ui->DeviceVoltages();
+}
+
+
 const std::map<int, wxString>& SIMULATOR_FRAME::UserDefinedSignals()
 {
     return m_ui->UserDefinedSignals();
@@ -738,7 +797,7 @@ void SIMULATOR_FRAME::setupUIConditions()
     EDA_BASE_FRAME::setupUIConditions();
 
     ACTION_MANAGER*   mgr = m_toolManager->GetActionManager();
-    wxASSERT( mgr );
+    wxCHECK2( mgr, return );
 
     auto showGridCondition =
             [this]( const SELECTION& aSel )
@@ -780,6 +839,12 @@ void SIMULATOR_FRAME::setupUIConditions()
                 SIM_PLOT_TAB* plotTab = dynamic_cast<SIM_PLOT_TAB*>( GetCurrentSimTab() );
                 return plotTab && plotTab->GetSimType() == ST_SP;
             };
+
+    auto trackCursorCondition = [this]( const SELECTION& aSel )
+    {
+        SIM_PLOT_TAB* plotTab = dynamic_cast<SIM_PLOT_TAB*>( GetCurrentSimTab() );
+        return plotTab && plotTab->IsTrackCursorEnabled();
+    };
 
     auto simRunning =
             [this]( const SELECTION& aSel )
@@ -866,6 +931,7 @@ void SIMULATOR_FRAME::setupUIConditions()
     mgr->SetConditions( SCH_ACTIONS::toggleSmithChart,
                         ACTION_CONDITIONS().Check( smithChartCondition ).Enable( haveSPPlot ) );
     mgr->SetConditions( SCH_ACTIONS::toggleDarkModePlots,   CHECK( darkModePlotCondition ) );
+    mgr->SetConditions( SCH_ACTIONS::toggleTrackCursor,     CHECK( trackCursorCondition ) );
 
     mgr->SetConditions( SCH_ACTIONS::newAnalysisTab,        ENABLE( SELECTION_CONDITIONS::ShowAlways ) );
     mgr->SetConditions( SCH_ACTIONS::simAnalysisProperties, ENABLE( haveSim ) );
@@ -886,9 +952,9 @@ void SIMULATOR_FRAME::onSimStarted( wxCommandEvent& aEvent )
 }
 
 
-wxString SIMULATOR_FRAME::TakeSimReportMessages()
+std::vector<SIM_CONSOLE_ENTRY> SIMULATOR_FRAME::TakeSimReportEntries()
 {
-    return m_consoleReporter->TakePendingMessages();
+    return m_consoleReporter->TakePendingEntries();
 }
 
 

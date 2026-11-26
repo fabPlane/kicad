@@ -271,7 +271,11 @@ struct FILE_HEADER
 {
     struct LAYER_MAP_ENTRY
     {
+        // Meaning unknown. Small value.
         uint32_t m_A;
+
+        // Key of the 0x2A LAYER_LIST block holding the subclass names for this
+        // class.
         uint32_t m_LayerList0x2A;
     };
 
@@ -282,7 +286,11 @@ struct FILE_HEADER
      */
     struct LINKED_LIST
     {
+        // Chain terminator: a chain ends when a block's next key equals this value.
+        // It is normally not the key of any block.
         uint32_t m_Tail;
+
+        // Key of the first block in the chain, or 0 if the chain is empty.
         uint32_t m_Head;
     };
 
@@ -314,13 +322,9 @@ struct FILE_HEADER
     COND_GE<FMT_VER::V_180, uint32_t> m_StringCount_V18;
     COND_GE<FMT_VER::V_180, uint32_t> m_Unknown2g_V18;          // 0x00
 
-    // V180 has 6 additional linked lists in the header
-    // 5 of them are at the start
-    COND_GE<FMT_VER::V_180, LINKED_LIST> m_LL_V18_1;
-    COND_GE<FMT_VER::V_180, LINKED_LIST> m_LL_V18_2;
-    COND_GE<FMT_VER::V_180, LINKED_LIST> m_LL_V18_3;
-    COND_GE<FMT_VER::V_180, LINKED_LIST> m_LL_V18_4;
-    COND_GE<FMT_VER::V_180, LINKED_LIST> m_LL_V18_5;
+    // V18 inserts 9 words between the fields above and the linked lists. They are not
+    // list descriptors, and their meaning has not been determined.
+    COND_GE<FMT_VER::V_180, std::array<uint32_t, 9>> m_Unknown2h_V18;
 
     // Linked lists grouping top-level elements by type
     LINKED_LIST m_LL_0x04;              // Net assignments
@@ -341,27 +345,19 @@ struct FILE_HEADER
     LINKED_LIST m_LL_0x2C;              // Tables
     LINKED_LIST m_LL_0x0C_2;            // Secondary pin definitions
     LINKED_LIST m_LL_Unknown3;
+    LINKED_LIST m_LL_0x35;              // 0x35 file records.
+    LINKED_LIST m_LL_0x36;              // Definition tables
+    LINKED_LIST m_LL_Unknown4;
+    LINKED_LIST m_LL_Unknown5;
+    LINKED_LIST m_LL_0x0A_2;            // A second DRC element list
 
-    // For some reason the 0x35 extents are recorded in the header
-    COND_LT<FMT_VER::V_180, uint32_t> m_0x35_Start_preV18;
-    COND_LT<FMT_VER::V_180, uint32_t> m_0x35_End_preV18;
+    // Only V18 onwards has this one. It holds field objects, which earlier versions
+    // keep in m_LL_0x03_0x30 instead.
+    COND_GE<FMT_VER::V_180, LINKED_LIST> m_LL_0x03_2;
 
-    COND_GE<FMT_VER::V_180, LINKED_LIST> m_LL_Unknown5_V18;
-    LINKED_LIST m_LL_0x36;
-    COND_LT<FMT_VER::V_180, LINKED_LIST> m_LL_Unknown5_preV18;
-
-    LINKED_LIST m_LL_Unknown6;
-    LINKED_LIST m_LL_0x0A_2;
-
-    COND_LT<FMT_VER::V_180, uint32_t> m_Unknown3;
-
-    COND_GE<FMT_VER::V_180, LINKED_LIST> m_LL_V18_6;
-
-    COND_GE<FMT_VER::V_180, uint32_t> m_0x35_Start_V18;
+    uint32_t m_Unknown_LlTrailer;
 
     COND_GE<FMT_VER::V_181, std::array<uint32_t, 8>> m_Unknown_V181;
-
-    COND_GE<FMT_VER::V_180, uint32_t> m_0x35_End_V18;
 
     // Fixed length string field
     std::array<char, 60> m_AllegroVersion;
@@ -397,12 +393,21 @@ struct FILE_HEADER
     uint32_t m_UnitsDivisor;
 
     /**
-     * The layer maps is a list of groups of two numbers.
+     * All versions of Allegro PCB files observed so far have 28 layer map entries,
+     * indexed by Allegro layer CLASS.
      *
-     * All files so far seem to have 25 entries, but unsure if that
-     * is a universal value. But there's no obvious nearby value of '25'.
+     * But this appears to be embedded in a region with space for up to 64 entries,
+     * so this could be either reserved or normally-unused space. So if we find
+     * layer maps with values in this region is could be possible.
      */
-    std::array<LAYER_MAP_ENTRY, 25> m_LayerMap;
+    static constexpr size_t LAYER_MAP_ENTRY_COUNT = 28;
+
+    /**
+     * The layer map is a list of entry counts for each Allegro layer class.
+     *
+     * Entries with a zero in either field are considered empty.
+     */
+    std::array<LAYER_MAP_ENTRY, LAYER_MAP_ENTRY_COUNT> m_LayerMap;
 
     uint32_t GetStringsCount() const
     {
@@ -418,14 +423,6 @@ struct FILE_HEADER
             return m_0x27_End_V18.value();
 
         return m_0x27_End_preV18.value();
-    }
-
-    const LINKED_LIST& GetUnknown5() const
-    {
-        if( m_LL_Unknown5_V18.has_value() )
-            return m_LL_Unknown5_V18.value();
-
-        return m_LL_Unknown5_preV18.value();
     }
 };
 
@@ -651,6 +648,8 @@ enum FIELD_KEYS
     LOGICAL_PATH = 0x37,
     MIN_LINE_WIDTH = 0x55,
     NET_SCHEDULE = 0x77,          ///< Net class/schedule assignment
+    CLIP_N = 0x87,                ///< Next CLIP_n value
+    CLIP_DRAWING = 0x88,          ///< Items pasted from a clipboard, holds CLIP_<n> or FALSE
     MAX_LINE_WIDTH = 0x173,
     MIN_NECK_WIDTH = 0x5c,
     MAX_NECK_LENGTH = 0x1fb,
@@ -806,8 +805,8 @@ struct BLK_0x08_PIN_NUMBER
 
 
 /**
- * Intermediate link between copper fills and their parent shapes. Appears in fill-to-shape
- * resolution chains. Not directly imported.
+ * Found in net-assignment chains for ETCH shapes, pads, and vias on tested boards.
+ * Despite this struct's name, it does not link a calculated fill to its source BOUNDARY.
  */
 struct BLK_0x09_FILL_LINK
 {
@@ -980,25 +979,37 @@ struct BLK_0x0F_FUNCTION_SLOT
 
     uint32_t m_Key;
 
-    uint32_t m_SlotName;
+    uint32_t m_SlotNameStrId;
 
+    /// Always zero so far.
     COND_GE<FMT_VER::V_174, uint32_t> m_Unknown1;
 
-    std::array<char, 32> m_CompDeviceType;
+    /// Component device type as a fixed-length string (V190 and below)
+    COND_LT<FMT_VER::V_190, std::array<char, 32>> m_CompDeviceType;
+    /// Pointer to the component device type string (V190 and above)
+    COND_GE<FMT_VER::V_190, uint32_t> m_CompDeviceTypeStrId;
 
-    COND_GE<FMT_VER::V_190, uint32_t> m_CompDeviceTypePtr;
+    // Next slot in this component's chain, or the owning 0x06 when last
+    uint32_t m_Next;
 
-    COND_GE<FMT_VER::V_172, uint32_t> m_Next;
+    // Direct back-reference to the owning 0x06 (V172+)
+    COND_GE<FMT_VER::V_172, uint32_t> m_ParentComponentPtr;
 
-    uint32_t m_Ptr0x06;
-    uint32_t m_Ptr0x11;
+    /// Pointer to the head of the pin name list (0x11) for this slot
+    /// For example an ORGATE may have "O", "I1", "I0" as its pin names.
+    uint32_t m_PinNamePtr;
 
+    /// Always zero so far.
     uint32_t m_Unknown2;
 
-    std::string GetCompDeviceTypeStr() const
+    /// Get the component device type as a string (in V190 and below)
+    std::optional<std::string> GetCompDeviceTypeStr() const
     {
+        if( !m_CompDeviceType.has_value() )
+            return std::nullopt;
+
         // The string is stored as a fixed-length array, but is null-terminated
-        return std::string( m_CompDeviceType.data(), strnlen( m_CompDeviceType.data(), m_CompDeviceType.size() ) );
+        return std::string( m_CompDeviceType->data(), strnlen( m_CompDeviceType->data(), m_CompDeviceType->size() ) );
     }
 };
 
@@ -1014,14 +1025,22 @@ struct BLK_0x10_FUNCTION_INST
 
     uint32_t m_Key;
 
-    COND_GE<FMT_VER::V_172, uint32_t> m_Unknown1;
+    /// Next function instance of the same component, or the owning 0x07 at the end
+    COND_GE<FMT_VER::V_172, uint32_t> m_Next;
 
+    /// Pointer to the component instance (0x07) this function instance belongs to
     uint32_t m_ComponentInstPtr;
 
-    COND_GE<FMT_VER::V_174, uint32_t> m_Unknown2;
+    /// Always zero so far.
+    COND_GE<FMT_VER::V_174, uint32_t> m_Unknown1;
 
-    uint32_t m_PtrX12;
-    uint32_t m_Unknown3;
+    /// Pointer to the first pin instance (0x12) for this function instance
+    /// Zero in versions above V172
+    uint32_t m_FirstPinInstance16x;
+    /// Pointer to the first pin instance (0x12) for this function instance
+    /// Zero in versions below V172
+    uint32_t m_FirstPinInstance;
+
     uint32_t m_FunctionName;
     uint32_t m_Slots; // 0x0F?
     uint32_t m_Fields;     // Presumably a pointer to a string
@@ -1052,22 +1071,30 @@ struct BLK_0x11_PIN_NAME
 
 
 /**
- * Cross-reference between objects. Exact semantics not fully understood; appears in
- * component and function instance chains.
+ * Three-way cross-reference between a placed pad, a function instance, and a pin name.
+ *
+ * 0x10 FUNCTION_INST object have a list of 0x12 PIN_INSTANCE objects.
  */
-struct BLK_0x12_XREF
+struct BLK_0x12_PIN_INST
 {
     static constexpr uint8_t BLOCK_TYPE_CODE = 0x12;
 
     uint8_t  m_Type;
     uint16_t m_R;
     uint32_t m_Key;
-    uint32_t m_Ptr1;
-    uint32_t m_Ptr2;
-    uint32_t m_Ptr3;
+    /// Pointer to the next 0x12 PIN_INST object or back to the parent
+    /// 0x10 FUNCTION_INST object
+    uint32_t m_Next;
+    /// Pointer to 0x11 PIN_NAME object
+    uint32_t m_PtrPinName;
+    /// Pointer to the 0x32 PLACED_PAD object
+    uint32_t m_PtrPad;
+    /// Always zero so far.
     uint32_t m_Unknown1;
 
+    /// Always zero so far.
     COND_GE<FMT_VER::V_165, uint32_t> m_Unknown2;
+    /// Always zero so far.
     COND_GE<FMT_VER::V_174, uint32_t> m_Unknown3;
 };
 
@@ -1712,8 +1739,10 @@ struct BLK_0x24_RECT
 
 
 /**
- * Match group indirection for differential pairs and match groups.
- * NET.m_MatchGroupPtr -> 0x26 -> m_GroupPtr -> 0x2C TABLE -> group name string (V172+).
+ * Indirection used for match groups and, on tested boards, calculated copper fills.
+ * For a NET match group: NET.m_MatchGroupPtr -> this block -> m_GroupPtr -> 0x2C TABLE.
+ * For a fill: ETCH shape.m_TablePtr -> this block -> m_GroupPtr -> the same 0x2C TABLE
+ * as its source BOUNDARY. The exact Cadence name for this record is not known.
  */
 struct BLK_0x26_MATCH_GROUP
 {
@@ -1738,13 +1767,24 @@ struct BLK_0x26_MATCH_GROUP
  * material stackup, color palette, and constraint manager state. NOT a heap pointer table.
  *
  * Pre-V172 uses runtime heap pointer format. V172+ uses compact indices that match
- * geometric block keys. The block extends to an offset defined in the header (m_0x27_End).
- * Not imported directly since it is a display/navigation structure, not design data.
+ * geometric block keys. The block extends to an offset defined in the header (m_0x27_End),
+ * or to the end of the file when that offset is zero. Not imported directly since it is a
+ * display/navigation structure, not design data.
  */
 struct BLK_0x27_CSTRMGR_XREF
 {
     static constexpr uint8_t BLOCK_TYPE_CODE = 0x27;
 
+    /**
+     * Non-zero values from the table, in file order.
+     *
+     * Values in this table appear to be references to other blocks, specifically of "non-container"
+     * types like SEGMENT, ARC, 0x31 strings, 0x32 placed pads, 0x23 ratlines etc.
+     *
+     * Depending on what these values are and how they are used (if useful at all), we may
+     * need to store them in a map, vector of vectors, or some other structure to represent
+     * the relationships.
+     */
     std::vector<uint32_t> m_Refs;
 };
 
@@ -1755,8 +1795,8 @@ struct BLK_0x27_CSTRMGR_XREF
  * m_LL_Shapes), computed copper fills (on net assignment chains), board outline, keepout
  * areas, place bounds, and custom pad shapes (shape symbol type 0x16).
  *
- * Zone net resolution follows m_Ptr7 (V172+) or m_Ptr7_16x (pre-V172) through a
- * 0x2C TABLE and 0x37 pointer array to reach the owning 0x1B NET.
+ * A BOUNDARY's m_TablePtr (V172+) or m_TablePtr_16x (pre-V172) leads through a
+ * 0x2C TABLE and 0x37 pointer array to its 0x1B NET record when one is present.
  */
 struct BLK_0x28_SHAPE
 {
@@ -2111,6 +2151,9 @@ struct BLK_0x30_STR_WRAPPER
 
     COND_LT<FMT_VER::V_172, uint32_t> m_PtrGroup_16x;
 
+    /// Zero or key of a 0x3E block.
+    COND_GE<FMT_VER::V_181, uint32_t> m_Ptr0x3E_V181;
+
     uint32_t GetGroupPtr() const
     {
         return m_PtrGroup_17x.value_or( m_PtrGroup_16x.value_or( 0 ) );
@@ -2177,12 +2220,26 @@ struct BLK_0x32_PLACED_PAD
     uint32_t m_ParentFp;
     uint32_t m_Track;
     uint32_t m_PadPtr;
-    uint32_t m_Ptr6;
+
+    /**
+     * 0x12 pin instance binding this pad to a function instance and pin name, 0 if unnamed.
+     *
+     * The field is always present, but non-zero only before V_172.
+     */
+    uint32_t m_PinInstance;
+
     uint32_t m_Ratline;
     uint32_t m_PtrPinNumber;
     uint32_t m_NextInCompInst;
 
-    COND_GE<FMT_VER::V_172, uint32_t> m_Unknown2;
+    /**
+     * The 0x07 component instance that owns this pad, duplicating the parent 0x2D's
+     * m_InstRef.
+     *
+     * Zero for pads owned by an 0x2B library definition instead of
+     * a placed instance.
+     */
+    COND_GE<FMT_VER::V_172, uint32_t> m_ComponentInst;
 
     uint32_t m_NameText;
     uint32_t m_Ptr11;
@@ -2251,16 +2308,36 @@ struct BLK_0x34_KEEPOUT
 
 /**
  * File path references to Allegro log and report files (terminator.log, eclrpt.txt).
- * Content is a 120-byte fixed buffer with null-terminated path strings. Not imported.
  */
 struct BLK_0x35_FILE_REF
 {
     static constexpr uint8_t BLOCK_TYPE_CODE = 0x35;
 
     uint8_t  m_T2;
-    uint16_t m_T3;
+    uint16_t m_T3; // Always 0x01 so far
 
-    std::array<uint8_t, 120> m_Content;
+    uint32_t m_Next;
+
+    uint32_t m_Unknown1; // 0x7fffffff usually
+
+    std::array<char, 20> m_LogFile; // Usually "terminator.log"
+
+    uint32_t m_Unknown2; // 0x01010101 usually
+
+    std::array<char, 20> m_UnusedFile;    // Always 0x00
+    std::array<char, 20> m_EclReportFile; // "eclrpt.txt"
+    std::array<char, 20> m_EclLogFile;    // "eclrep.log"
+
+    uint32_t m_Unknown3;
+
+    std::array<char, 8> m_Version; // Always '1.0'
+
+    uint32_t m_Unknown4;
+    uint32_t m_Unknown5;
+    uint32_t m_Unknown6;
+
+    /// Key of this record.
+    uint32_t m_Key;
 };
 
 
@@ -2382,9 +2459,11 @@ struct BLK_0x36_DEF_TABLE
 
 
 /**
- * Fixed-capacity pointer array (100 entries). Used in zone net resolution where
- * m_Ptrs[0] points to the owning 0x1B NET block. m_Count indicates how many entries
- * are valid.
+ * Pointer array. Used in zone net resolution where m_Ptrs[0] points to the owning
+ * 0x1B NET block. m_Count indicates how many entries are valid, counted from the
+ * start.
+ *
+ * m_Capacity is usually 100, but a 25.1 board was seen with 4096 (TinyCircularTMR).
  */
 struct BLK_0x37_PTR_ARRAY
 {
@@ -2401,7 +2480,7 @@ struct BLK_0x37_PTR_ARRAY
 
     COND_GE<FMT_VER::V_174, uint32_t> m_Unknown3;
 
-    std::array<uint32_t, 100> m_Ptrs;
+    std::vector<uint32_t> m_Ptrs;
 };
 
 

@@ -99,6 +99,9 @@
 
 bool SCH_EDIT_FRAME::ReloadFromDisk()
 {
+    if( IsClosing() )
+        return false;
+
     wxString file = Schematic().GetFileName();
 
     if( file.IsEmpty() )
@@ -106,6 +109,20 @@ bool SCH_EDIT_FRAME::ReloadFromDisk()
 
     // Resolve the filename before changing sheets.
     file = Prj().AbsolutePath( file );
+
+    // A pull can replace the first top-level sheet, and the load follows the project's list anyway
+    bool legacy = wxFileName( file ).GetExt() == FILEEXT::LegacySchematicFileExtension;
+
+    for( const TOP_LEVEL_SHEET_INFO& info : Prj().GetProjectFile().GetTopLevelSheets() )
+    {
+        wxFileName listed = SCHEMATIC::TopLevelSheetFile( info, Prj().GetProjectPath(), legacy );
+
+        if( listed.IsFileReadable() )
+        {
+            file = listed.GetFullPath();
+            break;
+        }
+    }
 
     if( GetCurrentSheet().Last() != &Schematic().Root() )
     {
@@ -122,6 +139,36 @@ bool SCH_EDIT_FRAME::ReloadFromDisk()
 
     ReleaseFile();
     return OpenProjectFiles( std::vector<wxString>( 1, file ), KICTL_REVERT );
+}
+
+
+bool SCH_EDIT_FRAME::ConfirmReloadFromDisk( const wxString& aMessage, const wxString& aTitle )
+{
+    if( !IsContentModified() )
+        return true;
+
+    wxMessageDialog dlg( this, aMessage, aTitle, wxYES_NO | wxNO_DEFAULT | wxICON_WARNING | wxCENTER );
+    dlg.SetYesNoLabels( _( "&Reload" ), _( "&Keep My Edits" ) );
+
+    return dlg.ShowModal() == wxID_YES;
+}
+
+
+bool SCH_EDIT_FRAME::TopLevelSheetsChangedOnDisk()
+{
+    PROJECT_FILE& projectFile = Prj().GetProjectFile();
+
+    if( !projectFile.TopLevelSheetsChangedOnLoad() )
+        return false;
+
+    // A list that only spells the open sheets differently is settled, so a later local edit is not taken for it
+    if( Schematic().TopLevelSheetsMatch( projectFile.GetTopLevelSheets() ) )
+    {
+        projectFile.AcknowledgeTopLevelSheetChange();
+        return false;
+    }
+
+    return true;
 }
 
 
@@ -212,7 +259,8 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
     WX_STRING_REPORTER loadReporter;
     LOAD_INFO_REPORTER_SCOPE loadReporterScope( &loadReporter );
 
-    bool differentProject = pro.GetFullPath() != Prj().GetProjectFullName();
+    // A revert reloads the open project, whose first top-level sheet need not share its name
+    bool differentProject = !( aCtl & KICTL_REVERT ) && pro.GetFullPath() != Prj().GetProjectFullName();
 
     // This is for handling standalone mode schematic changes
     if( differentProject )
@@ -241,7 +289,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
     // Crash-recovery: when zip-format autosave is active, look for autosave files newer
     // than the saved schematic and offer to recover them before any sheet is loaded.
     if( !is_new )
-        CheckForAutosaveFiles( wx_filename.GetPath(), { FILEEXT::KiCadSchematicFileExtension } );
+        CheckForAutosaveFiles( wx_filename.GetPath(), { FILEEXT::KiCadSchematicFileExtension }, aCtl );
 
     // Start a new schematic object now that we sorted out our project
     std::unique_ptr<SCHEMATIC> newSchematic = std::make_unique<SCHEMATIC>( &Prj() );
@@ -347,14 +395,9 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                     // Load each top-level sheet
                     for( const TOP_LEVEL_SHEET_INFO& sheetInfo : topLevelSheets )
                     {
-                        wxFileName sheetFileName( sheetInfo.filename );
-                        sheetFileName.MakeAbsolute( Prj().GetProjectPath() );
-
-                        // When loading legacy schematic files, ensure we are referencing the correct extension
-                        if( schFileType == SCH_IO_MGR::SCH_LEGACY )
-                            sheetFileName.SetExt( FILEEXT::LegacySchematicFileExtension );
-
-                        wxString sheetPath = sheetFileName.GetFullPath();
+                        wxString sheetPath = SCHEMATIC::TopLevelSheetFile( sheetInfo, Prj().GetProjectPath(),
+                                                                           schFileType == SCH_IO_MGR::SCH_LEGACY )
+                                                     .GetFullPath();
 
                         if( !wxFileName::FileExists( sheetPath ) )
                         {
@@ -657,11 +700,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
             // Update all symbol library links for all sheets.
             schematic.UpdateSymbolLinks( &loadReporter );
 
-            m_infoBar->RemoveAllButtons();
-            m_infoBar->AddCloseButton();
-            m_infoBar->ShowMessage( _( "This file was created by an older version of KiCad. "
-                                       "It will be converted to the new format when saved." ),
-                                    wxICON_WARNING, WX_INFOBAR::MESSAGE_TYPE::OUTDATED_SAVE );
+            showOutdatedFormatInfo( false );
 
             // Legacy schematic can have duplicate time stamps so fix that before converting
             // to the s-expression format.
@@ -682,13 +721,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                 first_screen = schematic.GetNext();
 
             if( first_screen && first_screen->GetFileFormatVersionAtLoad() < SEXPR_SCHEMATIC_FILE_VERSION )
-            {
-                m_infoBar->RemoveAllButtons();
-                m_infoBar->AddCloseButton();
-                m_infoBar->ShowMessage( _( "This file was created by an older version of KiCad. "
-                                           "It will be converted to the new format when saved." ),
-                                        wxICON_WARNING, WX_INFOBAR::MESSAGE_TYPE::OUTDATED_SAVE );
-            }
+                showOutdatedFormatInfo( true );
 
             for( SCH_SCREEN* screen = schematic.GetFirst(); screen; screen = schematic.GetNext() )
                 screen->UpdateLocalLibSymbolLinks();
@@ -711,7 +744,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                 screen->MigrateSimModels();
 
             Schematic().LoadVariants();
-            UpdateVariantSelectionCtrl( Schematic().GetVariantNamesForUI() );
+            SyncVariantUI();
         }
 
         // After the schematic is successfully loaded, we load the drawing sheet.
@@ -845,6 +878,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
     updateTitle();
     m_toolManager->GetTool<SCH_NAVIGATE_TOOL>()->ResetHistory();
+    Prj().GetProjectFile().AcknowledgeTopLevelSheetChange();
 
     wxFileName fn = Prj().AbsolutePath( GetScreen()->GetFileName() );
 
@@ -1001,6 +1035,28 @@ void SCH_EDIT_FRAME::OnImportProject()
 }
 
 
+void SCH_EDIT_FRAME::showOutdatedFormatInfo( bool aOfferUpgrade )
+{
+    m_infoBar->RemoveAllButtons();
+    m_infoBar->AddCloseButton();
+
+    if( aOfferUpgrade && Pgm().GetCommonSettings()->m_Git.enableGit && !Prj().IsNullProject()
+        && Prj().AttachGitRepository() )
+    {
+        // SaveProject writes every screen while the loaded format is older than the current one
+        m_infoBar->AddLink( _( "Upgrade Format Now" ),
+                            [this]( wxHyperlinkEvent& )
+                            {
+                                CallAfter( [this]() { SaveProject(); } );
+                            } );
+    }
+
+    m_infoBar->ShowMessage( _( "This file was created by an older version of KiCad. "
+                               "It will be converted to the new format when saved." ),
+                            wxICON_WARNING, WX_INFOBAR::MESSAGE_TYPE::OUTDATED_SAVE );
+}
+
+
 bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSavePath, bool isSaveAs )
 {
     wxString msg;
@@ -1052,9 +1108,6 @@ bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSave
 
     // Save
     wxLogTrace( traceAutoSave, wxS( "Saving file " ) + schematicFileName.GetFullPath() );
-
-    if( m_infoBar->GetMessageType() == WX_INFOBAR::MESSAGE_TYPE::OUTDATED_SAVE )
-        m_infoBar->Dismiss();
 
     SCH_IO_MGR::SCH_FILE_T pluginType = SCH_IO_MGR::GuessPluginTypeFromSchPath( schematicFileName.GetFullPath() );
 
@@ -1412,7 +1465,7 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
         success &= savedThisSheet;
     }
 
-    if( success )
+    if( success && !saveCopy )
     {
         if( m_autoSaveTimer )
             m_autoSaveTimer->Stop();
@@ -1498,7 +1551,7 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
 
     updateTitle();
 
-    if( m_infoBar->GetMessageType() == WX_INFOBAR::MESSAGE_TYPE::OUTDATED_SAVE )
+    if( success && !saveCopy && m_infoBar->GetMessageType() == WX_INFOBAR::MESSAGE_TYPE::OUTDATED_SAVE )
         m_infoBar->Dismiss();
 
     if( backupReporter.HasMessage() )
@@ -1580,8 +1633,6 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
 
             LoadProjectSettings();
 
-            // SetSchematic() killed the previous schematic's history saver
-            // So we need a new one for the new schematic
             ProjectChanged();
 
             if( loadedSheet )
@@ -1705,7 +1756,7 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
         SyncView();
 
         UpdateHierarchyNavigator( false, true );
-        UpdateVariantSelectionCtrl( m_schematic->GetVariantNamesForUI() );
+        SyncVariantUI();
         SetCurrentVariant( m_schematic->GetCurrentVariant() );
 
         CallAfter(
@@ -1743,6 +1794,9 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
     default:
         break;
     }
+
+    if( success )
+        Prj().GetProjectFile().AcknowledgeTopLevelSheetChange();
 
     return success;
 }

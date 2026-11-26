@@ -53,6 +53,9 @@ PANEL_SETUP_NET_CHAINS::PANEL_SETUP_NET_CHAINS( wxWindow* aParent, SCH_EDIT_FRAM
         PANEL_SETUP_NET_CHAINS_BASE( aParent ),
         m_frame( aFrame )
 {
+    PAGED_DIALOG::ExcludeFromSearchIndex( m_membersLabel );
+    PAGED_DIALOG::ExcludeFromSearchIndex( m_chainsHeader );
+
     wxGridCellAttr* attr = new wxGridCellAttr;
     attr->SetRenderer( new GRID_CELL_COLOR_RENDERER( PAGED_DIALOG::GetDialog( this ) ) );
     attr->SetEditor( new GRID_CELL_COLOR_SELECTOR( PAGED_DIALOG::GetDialog( this ), m_chainsGrid ) );
@@ -295,6 +298,34 @@ bool PANEL_SETUP_NET_CHAINS::TransferDataToWindow()
     rebuildChainsGrid();
     rebuildClassesGrid();
     return true;
+}
+
+
+void PANEL_SETUP_NET_CHAINS::AppendSearchTerms( std::vector<wxString>& aTerms ) const
+{
+    aTerms.push_back( _( "Member Nets" ) );
+
+    for( int row = 0; row < m_chainsGrid->GetNumberRows(); ++row )
+    {
+        aTerms.push_back( m_chainsGrid->GetCellValue( row, COL_NAME ) );
+        aTerms.push_back( m_chainsGrid->GetCellValue( row, COL_CHAIN_CLASS ) );
+        aTerms.push_back( m_chainsGrid->GetCellValue( row, COL_NET_CLASS ) );
+
+        int chainIdx = row < static_cast<int>( m_gridToChainIdx.size() ) ? m_gridToChainIdx[row] : -1;
+
+        // Search can run between a grid edit and the rebuild of the row maps
+        if( chainIdx < 0 || chainIdx >= static_cast<int>( m_chainRows.size() ) )
+            continue;
+
+        const CHAIN_ROW& chain = m_chainRows[chainIdx];
+        aTerms.insert( aTerms.end(), chain.memberNets.begin(), chain.memberNets.end() );
+    }
+
+    for( int row = 0; row < m_classesGrid->GetNumberRows(); ++row )
+    {
+        if( static_cast<size_t>( row ) < m_classRows.size() && !m_classRows[row].deletePending )
+            aTerms.push_back( m_classesGrid->GetCellValue( row, CLASS_COL_NAME ) );
+    }
 }
 
 

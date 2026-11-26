@@ -281,6 +281,11 @@ public:
     void SetFeasibilityCallback( FEASIBILITY_CALLBACK aCallback );
     void SetTraceCallback( TRACE_CALLBACK aCallback );
     void SetClock( CLOCK_CALLBACK aClock );
+
+    /**
+     * Set the time after which Resolve() stops trialling optional candidates and reports
+     * BUDGET_EXHAUSTED.  A grid candidate on each axis is still trialled after the deadline.
+     */
     void SetDeadline( CLOCK::duration aDeadline );
 
     SNAP_RESULT Resolve( const SNAP_SOURCE_CONTEXT& aContext ) const;

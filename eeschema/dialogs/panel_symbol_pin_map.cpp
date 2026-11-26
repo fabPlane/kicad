@@ -32,7 +32,7 @@
 #include <confirm.h>
 #include <dialog_shim.h>
 #include <grid_tricks.h>
-#include <kiface_ids.h>
+#include <kiface_services.h>
 #include <kiplatform/ui.h>
 #include <kiway.h>
 #include <kiway_holder.h>
@@ -533,7 +533,7 @@ void PANEL_SYMBOL_PIN_MAP::applyColumnFootprint( int aCol, const wxString& aFoot
     LIB_ID fpId;
     fpId.Parse( fpid );
 
-    if( !fpId.empty() && !fpId.IsValid() )
+    if( !fpid.IsEmpty() && !fpId.IsValid() )
     {
         wxMessageBox( _( "Invalid footprint identifier." ), _( "Assign Footprint" ), wxOK | wxICON_ERROR, this );
         m_grid->SetCellValue( 0, aCol, currentFootprint() );
@@ -554,7 +554,8 @@ void PANEL_SYMBOL_PIN_MAP::applyColumnFootprint( int aCol, const wxString& aFoot
     m_associations.erase( std::remove_if( m_associations.begin(), m_associations.end(),
                                           [&]( const ASSOCIATED_FOOTPRINT& assoc )
                                           {
-                                              return assoc.m_FootprintLibId == fpId && assoc.m_MapName == mapName;
+                                              return assoc.m_MapName == mapName
+                                                    && ( !fpid.IsEmpty() || assoc.m_FootprintLibId == fpId );
                                           } ),
                           m_associations.end() );
 
@@ -664,9 +665,10 @@ const std::set<wxString>& PANEL_SYMBOL_PIN_MAP::padNumbersFor( const wxString& a
     {
         if( KIFACE* cvpcb = holder->Kiway().KiFACE( KIWAY::FACE_CVPCB ) )
         {
-            typedef void ( *PAD_NUMBERS_FN_PTR )( const wxString&, PROJECT*, std::set<wxString>& );
+            KIFACE_FOOTPRINT_PAD_NUMBERS_SERVICE::Type fetch =
+                    GetKifaceService<KIFACE_FOOTPRINT_PAD_NUMBERS_SERVICE>( cvpcb );
 
-            if( auto fetch = (PAD_NUMBERS_FN_PTR) cvpcb->IfaceOrAddress( KIFACE_FOOTPRINT_PAD_NUMBERS ) )
+            if( fetch )
                 fetch( aFootprintId, &holder->Prj(), pads );
         }
     }

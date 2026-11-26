@@ -26,6 +26,8 @@
 #include <api/api_utils.h>
 #include <api/api_pcb_utils.h>
 #include <api/board/board_types.pb.h>
+#include <board_design_settings.h>
+#include <board_stackup_manager/board_stackup.h>
 #include <layer_range.h>
 #include <macros.h>
 #include <magic_enum.hpp>
@@ -143,7 +145,7 @@ bool PADSTACK::operator==( const PADSTACK& aOther ) const
         if( *m_customName != *aOther.m_customName )
             return false;
     }
-    else if( (bool) m_customName != (bool) m_customName )
+    else if( (bool) m_customName != (bool) aOther.m_customName )
     {
         return false;
     }
@@ -231,11 +233,13 @@ bool PADSTACK::unpackCopperLayer( const kiapi::board::types::PadStackLayer& aPro
 
     for( const BoardGraphicShape& shapeProto : aProto.custom_shapes() )
     {
-        a.PackFrom( shapeProto );
-        std::unique_ptr<PCB_SHAPE> shape = std::make_unique<PCB_SHAPE>( m_parent );
+        if( a.PackFrom( shapeProto ) )
+        {
+            std::unique_ptr<PCB_SHAPE> shape = std::make_unique<PCB_SHAPE>( m_parent );
 
-        if( shape->Deserialize( a ) )
-            AddPrimitive( shape.release(), layer );
+            if( shape->Deserialize( a ) )
+                AddPrimitive( shape.release(), layer );
+        }
     }
 
     return true;
@@ -269,9 +273,9 @@ bool PADSTACK::Deserialize( const kiapi::board::types::PadStack& padstack )
         default: aDest.mode = std::nullopt; break;
         }
 
-        aDest.size = aProto.size();
-        aDest.depth = aProto.depth();
-        aDest.angle = aProto.angle();
+        aDest.size = kiapi::common::UnpackDistance( aProto.size() );
+        aDest.depth = kiapi::common::UnpackDistance( aProto.depth() );
+        aDest.angle = EDA_ANGLE( aProto.angle().value_degrees(), DEGREES_T ).AsTenthsOfADegree();
     };
 
 
@@ -560,8 +564,10 @@ void PADSTACK::SetBackdrillMode( BACKDRILL_MODE aMode )
                 {
                     DRILL_PROPS& drill = backdrillWriteSlot( aTop );
                     drill.start = aTop ? F_Cu : B_Cu;
-                    drill.end = drill.start;                 // Must-cut a single copper layer
                     drill.shape = PAD_DRILL_SHAPE::CIRCLE;
+
+                    if( drill.end == UNDEFINED_LAYER )
+                        drill.end = drill.start;             // Must-cut a single copper layer
 
                     if( drill.size.x <= 0 )
                         drill.size = m_drill.size * 1.1;     // Backdrill slightly larger than main drill
@@ -690,9 +696,9 @@ void PADSTACK::Serialize( kiapi::board::types::PadStack& padstack ) const
             }
         }
 
-        aProto->set_size( aProps.size );
-        aProto->set_depth( aProps.depth );
-        aProto->set_angle( aProps.angle );
+        kiapi::common::PackDistance( *aProto->mutable_size(), aProps.size );
+        kiapi::common::PackDistance( *aProto->mutable_depth(), aProps.depth );
+        aProto->mutable_angle()->set_value_degrees( EDA_ANGLE( aProps.angle / 10.0, DEGREES_T ).AsDegrees() );
     };
 
     if( m_frontPostMachining.mode.has_value() || m_frontPostMachining.size > 0 )
@@ -734,7 +740,9 @@ void PADSTACK::Serialize( kiapi::board::types::PadStack& padstack ) const
                 {
                     google::protobuf::Any a;
                     shape->Serialize( a );
-                    a.UnpackTo( layer->add_custom_shapes() );
+
+                    if( !a.UnpackTo( layer->add_custom_shapes() ) )
+                        wxFAIL_MSG( wxT( "Failed to unpack PADSTACK from internal serialization" ) );
                 }
             } );
 
@@ -856,7 +864,9 @@ void PADSTACK::Serialize( google::protobuf::Any& aContainer ) const
 {
     kiapi::board::types::PadStack padstack;
     Serialize( padstack );
-    aContainer.PackFrom( padstack );
+
+    if( !aContainer.PackFrom( padstack ) )
+        wxFAIL_MSG( wxT( "Failed to pack PADSTACK" ) );
 }
 
 
@@ -1208,6 +1218,11 @@ PADSTACK::COPPER_LAYER_PROPS& PADSTACK::CopperLayer( PCB_LAYER_ID aLayer )
             key = INNER_LAYERS;
     }
 
+    // A write for an undefined non-copper layer must land where the readers look. Copper layers
+    // keep their own entry, which per-layer padstacks rely on.
+    if( m_mode == MODE::CUSTOM && IsNonCopperLayer( aLayer ) )
+        return const_cast<COPPER_LAYER_PROPS&>( std::as_const( *this ).CopperLayer( aLayer ) );
+
     // A layer without an entry reads through to another one, so a new entry starts from what was read
     const bool readsThrough = m_copperProps.contains( ALL_LAYERS )
                               || ( m_mode == MODE::CUSTOM && !m_copperProps.empty() );
@@ -1357,6 +1372,80 @@ LSET PADSTACK::RelevantShapeLayers( const PADSTACK& aOther ) const
     }
 
     return layers;
+}
+
+
+// Only an oblong drill's narrow axis is cleared all the way round the hole
+static int effectiveDrillDiameter( const VECTOR2I& aSize )
+{
+    return aSize.y > 0 ? std::min( aSize.x, aSize.y ) : aSize.x;
+}
+
+
+static int surfaceKnockout( const BOARD_STACKUP& aStackup, const PADSTACK::POST_MACHINING_PROPS& aProps,
+                            PCB_LAYER_ID aSurface, PCB_LAYER_ID aLayer )
+{
+    if( !aProps.mode.has_value()
+            || *aProps.mode == PAD_DRILL_POST_MACHINING_MODE::NOT_POST_MACHINED
+            || *aProps.mode == PAD_DRILL_POST_MACHINING_MODE::UNKNOWN
+            || aProps.size <= 0 )
+    {
+        return 0;
+    }
+
+    bool   tapered = *aProps.mode == PAD_DRILL_POST_MACHINING_MODE::COUNTERSINK && aProps.angle > 0;
+    double tanHalfAngle = tapered ? tan( ( aProps.angle / 10.0 ) * M_PI / 360.0 ) : 0.0;
+    int    depth = aProps.depth;
+
+    // A countersink given no depth bottoms out where its taper closes on the drill
+    if( depth <= 0 && tapered )
+        depth = static_cast<int>( ( aProps.size / 2.0 ) / tanHalfAngle );
+
+    if( depth <= 0 )
+        return 0;
+
+    int layerDist = aStackup.GetLayerDistance( aSurface, aLayer );
+
+    if( layerDist >= depth )
+        return 0;
+
+    return std::max( 0, aProps.size - static_cast<int>( 2.0 * layerDist * tanHalfAngle ) );
+}
+
+
+int PADSTACK::PostMachiningKnockout( const BOARD_STACKUP& aStackup, PCB_LAYER_ID aLayer ) const
+{
+    return std::max( surfaceKnockout( aStackup, m_frontPostMachining, F_Cu, aLayer ),
+                     surfaceKnockout( aStackup, m_backPostMachining, B_Cu, aLayer ) );
+}
+
+
+int PADSTACK::MachiningKnockout( const BOARD& aBoard, PCB_LAYER_ID aLayer ) const
+{
+    if( m_secondaryDrill.size.x <= 0 && m_tertiaryDrill.size.x <= 0
+            && !m_frontPostMachining.mode.has_value() && !m_backPostMachining.mode.has_value() )
+    {
+        return 0;
+    }
+
+    int knockout = PostMachiningKnockout( aBoard.GetDesignSettings().GetStackupDescriptor(), aLayer );
+
+    for( const DRILL_PROPS* drill : { &m_secondaryDrill, &m_tertiaryDrill } )
+    {
+        if( drill->size.x <= 0 || drill->start == UNDEFINED_LAYER || drill->end == UNDEFINED_LAYER )
+            continue;
+
+        // An off-stack endpoint would widen the span onto layers the drill never reaches
+        if( !aBoard.IsLayerEnabled( drill->start ) || !aBoard.IsLayerEnabled( drill->end ) )
+            continue;
+
+        // Contains honours copper Z-order; comparing raw PCB_LAYER_ID values instead puts B_Cu
+        // above the inner layers and mis-spans any bottom-anchored backdrill
+        if( LAYER_RANGE::Contains( drill->start, drill->end, aLayer ) )
+            knockout = std::max( knockout, effectiveDrillDiameter( drill->size ) );
+    }
+
+    return knockout;
 }
 
 
@@ -1699,8 +1788,12 @@ bool PADSTACK::COPPER_LAYER_PROPS::operator==( const COPPER_LAYER_PROPS& aOther 
 
     if( custom_shapes.size() != aOther.custom_shapes.size() ) return false;
 
-    // Deep compare of shapes?
-    // For now, just check pointers or size
+    for( size_t ii = 0; ii < custom_shapes.size(); ++ii )
+    {
+        if( !( *custom_shapes[ii] == *aOther.custom_shapes[ii] ) )
+            return false;
+    }
+
     return true;
 }
 

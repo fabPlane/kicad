@@ -72,10 +72,10 @@ void DRC_PANEL_MATCHER::initClaims()
             std::set<DRC_CONSTRAINT_T>{},
             90 );
 
-    // Priority 80: MINIMUM_TEXT_HEIGHT_THICKNESS claims text_height + text_thickness
+    // Priority 80: MINIMUM_TEXT_HEIGHT_THICKNESS claims text_height + line_width
     m_claims.emplace_back(
             MINIMUM_TEXT_HEIGHT_AND_THICKNESS,
-            std::set<DRC_CONSTRAINT_T>{ TEXT_HEIGHT_CONSTRAINT, TEXT_THICKNESS_CONSTRAINT },
+            std::set<DRC_CONSTRAINT_T>{ TEXT_HEIGHT_CONSTRAINT, LINE_WIDTH_CONSTRAINT },
             std::set<DRC_CONSTRAINT_T>{},
             80 );
 
@@ -389,6 +389,32 @@ DRC_RULE_EDITOR_CONSTRAINT_NAME DRC_PANEL_MATCHER::GetPanelForConstraint( DRC_CO
         {
             return claim.panelType;
         }
+    }
+
+    return CUSTOM_RULE;
+}
+
+
+DRC_RULE_EDITOR_CONSTRAINT_NAME DRC_PANEL_MATCHER::GetHomePanel( DRC_CONSTRAINT_T aConstraintType )
+{
+    // These have a page of their own besides a combined panel that outranks it
+    switch( aConstraintType )
+    {
+    case HOLE_SIZE_CONSTRAINT: return HOLE_SIZE;
+    case SILK_CLEARANCE_CONSTRAINT: return SILK_TO_SILK_CLEARANCE;
+    case LENGTH_CONSTRAINT: return ABSOLUTE_LENGTH;
+    default: break;
+    }
+
+    DRC_RULE_EDITOR_CONSTRAINT_NAME single = GetPanelForConstraint( aConstraintType );
+
+    if( single != CUSTOM_RULE )
+        return single;
+
+    for( const DRC_PANEL_CLAIM& claim : m_claims )
+    {
+        if( claim.requiredConstraints.count( aConstraintType ) || claim.optionalConstraints.count( aConstraintType ) )
+            return claim.panelType;
     }
 
     return CUSTOM_RULE;

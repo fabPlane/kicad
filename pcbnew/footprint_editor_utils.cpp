@@ -298,7 +298,6 @@ void FOOTPRINT_EDIT_FRAME::OnEditItemRequest( BOARD_ITEM* aItem )
         break;
 
     case PCB_TABLE_T:
-    case PCB_DRILL_CHART_T:
     {
         DIALOG_TABLE_PROPERTIES dlg( this, static_cast<PCB_TABLE*>( aItem ) );
 
@@ -489,6 +488,14 @@ void FOOTPRINT_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
 
         break;
     }
+
+    case MAIL_LIB_SAVE_ALL:
+        mail.SetPayload( SaveModifiedLibraryTabs() ? "success" : "failed" );
+        break;
+
+    case MAIL_LIB_HAS_UNSAVED:
+        mail.SetPayload( HasModifiedFootprintTabs( true ) ? "yes" : "no" );
+        break;
 
     case MAIL_RELOAD_LIB:
         SyncLibraryTree( true );

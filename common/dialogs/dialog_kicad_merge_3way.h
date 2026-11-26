@@ -31,9 +31,13 @@
 
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
+#include <set>
 
 
+class REPORTER;
+class UNITS_PROVIDER;
 class WIDGET_DIFF_CANVAS;
 
 
@@ -93,7 +97,26 @@ public:
         /// Name an item the way the editor would, so a conflict can be told from its
         /// neighbours. Left empty, or returning nothing, falls back to the item's identifier.
         std::function<wxString( const KIID_PATH& )> describeItem;
+
+        /// Each side's change to an item, so the details can give the values a choice keeps. The
+        /// diffs they point into must outlive the dialog.
+        std::map<KIID_PATH, const KICAD_DIFF::ITEM_CHANGE*> oursChanges;
+        std::map<KIID_PATH, const KICAD_DIFF::ITEM_CHANGE*> theirsChanges;
+
+        /// The units the details give lengths in. Left empty, internal units.
+        std::shared_ptr<UNITS_PROVIDER> units;
     };
+
+    using LIBRARY_ITEM_DRAWER = std::function<void( WIDGET_DIFF_CANVAS&, SIDE, const wxString& aName )>;
+
+    /**
+     * Context for merging a library, whose items are known by the names in aNames. aDraw draws
+     * the named item as it is on a side, and gets an empty name when no conflict is chosen.
+     */
+    static CONFLICT_CONTEXT LibraryContext( const std::set<wxString>& aNames, LIBRARY_ITEM_DRAWER aDraw );
+
+    /// Report to aReporter and return false when this process cannot open a dialog.
+    static bool CanOpen( REPORTER& aReporter );
 
     DIALOG_KICAD_MERGE_3WAY( wxWindow* aParent, const KICAD_DIFF::MERGE_PLAN& aPlan,
                              CONFLICT_CONTEXT aContext = {} );

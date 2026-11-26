@@ -26,6 +26,7 @@
 #include <kiway_holder.h>
 #include <wx/dialog.h>
 #include <map>
+#include <optional>
 #include <set>
 #include <vector>
 #include <wx/variant.h>
@@ -114,6 +115,12 @@ public:
 
     bool Show( bool show ) override;
 
+    /**
+     * Raise the dialog, without presenting an already shown dialog where presenting can unmap
+     * it (see KIPLATFORM::UI::ActivateWithoutPresenting()).
+     */
+    void Raise() override;
+
     bool Enable( bool enable ) override;
 
     void OnPaint( wxPaintEvent &event );
@@ -163,8 +170,11 @@ public:
 
     /**
      * Save control values and geometry to the current project's local settings.
+     *
+     * @param aPosition the restorable position captured while the dialog was still shown.  Without
+     *                  it a hidden dialog keeps its previously saved geometry.
      */
-    void SaveControlState();
+    void SaveControlState( const std::optional<wxPoint>& aPosition = std::nullopt );
 
     /**
      * Opt out of control state saving.
@@ -215,6 +225,13 @@ public:
     void EndDialogShim( int aReturnCode );
 
 protected:
+    /**
+     * Bring aCtrl into view before undo or redo changes it.
+     *
+     * @return false when it cannot be shown, which leaves the step where it is.
+     */
+    virtual bool showHistoryControl( wxWindow* aCtrl ) { return true; }
+
     /**
      * In all dialogs, we must call the same functions to fix minimal dlg size, the default
      * position and perhaps some others to fix a few issues depending on Windows Managers
@@ -278,23 +295,15 @@ protected:
     virtual void TearDownQuasiModal() {}
 
     /**
-     * Reset undo/redo tracking after dynamically replacing child panels.
+     * Tell the undo mechanism to snapshot the current value of a control and record it
+     * as an undo step when the value changes.
      *
-     * Clears the undo/redo stacks and current value baselines, then registers
-     * undo/redo event handlers on the new children.
-     *
-     * @param aChildren The child window list of the newly created panel.
+     * If you call this from an event handler that generates multiple change events,
+     * they will be coalesced into a single undo step.
      */
-    void resetUndoRedoForNewContent( wxWindowList& aChildren );
+    void recordControlChange( wxWindow* aCtrl );
 
-    /**
-     * Remove UNIT_BINDER registrations for a window and all its descendants.
-     *
-     * Call before destroying a panel whose children have registered unit binders.
-     *
-     * @param aWindow The root window whose subtree should be unregistered.
-     */
-    void unregisterUnitBinders( wxWindow* aWindow );
+    std::string GetPersistenceKey() const;
 
 private:
     /**
@@ -339,15 +348,6 @@ private:
     void registerUndoRedoHandlers( wxWindowList& aChildren );
 
     /**
-     * Tell the undo mechanism to snapshot the current value of a control and record it
-     * as an undo step when the value changes.
-     *
-     * If you call this from an event handler that generates multiple change events,
-     * they will be coalesced into a single undo step.
-     */
-    void recordControlChange( wxWindow* aCtrl );
-
-    /**
      * Apply outstanding control changes to the undo stack, and clear the pending list.
      *
      * Runs at the end of the current event handler.
@@ -361,6 +361,8 @@ private:
     void onGridCellChanged( wxGridEvent& aEvent );
     void onPropertyGridChanged( wxPropertyGridEvent& aEvent );
     void onDataViewListChanged( wxDataViewEvent& aEvent );
+    void      onTrackedControlDestroyed( wxWindowDestroyEvent& aEvent );
+    void      forgetControlHistory( wxWindow* aCtrl );
     void doUndo();
     void doRedo();
     wxVariant getControlValue( wxWindow* aCtrl );
@@ -406,6 +408,7 @@ protected:
         wxWindow* ctrl;
         wxVariant before;
         wxVariant after;
+        unsigned  id;
     };
 
     std::vector<UNDO_STEP>            m_undoStack;
@@ -414,6 +417,7 @@ protected:
     std::set<wxWindow*>               m_controlsWithPendingChanges;
     std::set<wxWindow*>               m_noControlUndoRedo;
     bool                              m_handlingUndoRedo;
+    unsigned                          m_lastUndoStepId = 0;
     bool                              m_childReleased;
 };
 

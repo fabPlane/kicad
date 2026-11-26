@@ -20,12 +20,18 @@
 
 #include <kiplatform/ui.h>
 
+#include <algorithm>
+#include <deque>
+
 #include <wx/choice.h>
 #include <wx/dataview.h>
 #include <wx/dialog.h>
+#include <wx/display.h>
 #include <wx/nonownedwnd.h>
 #include <wx/popupwin.h>
 #include <wx/settings.h>
+#include <wx/toplevel.h>
+#include <wx/weakref.h>
 #include <wx/window.h>
 #include <wx/log.h>
 
@@ -205,19 +211,209 @@ wxWindow* KIPLATFORM::UI::CreateCanvasOverlay( wxWindow* aCanvas )
 }
 
 
+namespace
+{
+
+// Presenting a shown window can unmap it on Wayland
+// GTK knows a window shown by Raise() is visible before wx does
+bool presentCanUnmap( wxWindow* aTlw )
+{
+#ifdef GDK_WINDOWING_WAYLAND
+    GtkWidget* widget = static_cast<GtkWidget*>( aTlw->GetHandle() );
+
+    return GDK_IS_WAYLAND_DISPLAY( gdk_display_get_default() ) && widget && gtk_widget_get_visible( widget );
+#else
+    return false;
+#endif
+}
+
+
+// Holds functions until a top-level window is active, runs them in order, then deletes itself
+class ACTIVATION_WAITER
+{
+public:
+    // Every module links its own copy of this file, so the one waiter hangs off the GTK widget
+    static ACTIVATION_WAITER* Find( wxTopLevelWindow* aTlw )
+    {
+        GtkWidget* widget = static_cast<GtkWidget*>( aTlw->GetHandle() );
+
+        if( !widget )
+            return nullptr;
+
+        return static_cast<ACTIVATION_WAITER*>( g_object_get_data( G_OBJECT( widget ), WAITER_KEY ) );
+    }
+
+    static void Add( wxTopLevelWindow* aTlw, std::function<void()> aFunction, bool aIsFocus )
+    {
+        ACTIVATION_WAITER* waiter = Find( aTlw );
+
+        if( !waiter )
+            waiter = new ACTIVATION_WAITER( aTlw );
+
+        // Only the latest focus request counts, so a window that is never activated holds one
+        if( aIsFocus )
+            std::erase_if( waiter->m_pending, []( const PENDING& aPending ) { return aPending.isFocus; } );
+
+        waiter->m_pending.push_back( { std::move( aFunction ), aIsFocus } );
+    }
+
+private:
+    static constexpr const char* WAITER_KEY = "kicad-activation-waiter";
+
+    struct PENDING
+    {
+        std::function<void()> function;
+        bool                  isFocus;
+    };
+
+    explicit ACTIVATION_WAITER( wxTopLevelWindow* aTlw ) :
+            m_tlw( aTlw )
+    {
+        // The widget owns the waiter so it is freed even if wxEVT_DESTROY never reaches it
+        g_object_set_data_full( G_OBJECT( m_tlw->GetHandle() ), WAITER_KEY, this,
+                                []( gpointer aWaiter )
+                                {
+                                    delete static_cast<ACTIVATION_WAITER*>( aWaiter );
+                                } );
+        m_tlw->Bind( wxEVT_ACTIVATE, &ACTIVATION_WAITER::onActivate, this );
+        m_tlw->Bind( wxEVT_DESTROY, &ACTIVATION_WAITER::onDestroy, this );
+    }
+
+    void finish()
+    {
+        m_tlw->Unbind( wxEVT_ACTIVATE, &ACTIVATION_WAITER::onActivate, this );
+        m_tlw->Unbind( wxEVT_DESTROY, &ACTIVATION_WAITER::onDestroy, this );
+        g_object_steal_data( G_OBJECT( m_tlw->GetHandle() ), WAITER_KEY );
+        delete this;
+    }
+
+    void onActivate( wxActivateEvent& aEvent )
+    {
+        aEvent.Skip();
+
+        if( !aEvent.GetActive() || m_drainPosted )
+            return;
+
+        m_drainPosted = true;
+
+        // Pending events die with the window
+        wxTopLevelWindow* tlw = m_tlw;
+        tlw->CallAfter( [tlw]() { drain( tlw ); } );
+    }
+
+    void onDestroy( wxWindowDestroyEvent& aEvent )
+    {
+        aEvent.Skip();
+
+        // Children's destroy events propagate up to the top-level window
+        if( aEvent.GetEventObject() == m_tlw )
+            finish();
+    }
+
+    // Requests made while draining queue behind the pending ones, so they keep their order
+    static void drain( wxTopLevelWindow* aTlw )
+    {
+        ACTIVATION_WAITER* waiter = Find( aTlw );
+
+        if( !waiter )
+            return;
+
+        wxWeakRef<wxTopLevelWindow> tlw( aTlw );
+
+        while( !waiter->m_pending.empty() )
+        {
+            if( !KIPLATFORM::UI::IsWindowActive( aTlw ) )
+            {
+                waiter->m_drainPosted = false;
+                return;
+            }
+
+            PENDING item = std::move( waiter->m_pending.front() );
+            waiter->m_pending.pop_front();
+            item.function();
+
+            // The function may have destroyed the window and this waiter with it
+            if( !tlw || tlw->IsBeingDeleted() || Find( aTlw ) != waiter )
+                return;
+        }
+
+        waiter->finish();
+    }
+
+    wxTopLevelWindow*   m_tlw;
+    std::deque<PENDING> m_pending;
+    bool                m_drainPosted = false;
+};
+
+
+void runWhenActive( wxWindow* aWindow, std::function<void()> aFunction, bool aIsFocus )
+{
+    wxTopLevelWindow* tlw = wxDynamicCast( wxGetTopLevelParent( aWindow ), wxTopLevelWindow );
+
+    if( tlw
+        && ( ACTIVATION_WAITER::Find( tlw ) || ( presentCanUnmap( tlw ) && !KIPLATFORM::UI::IsWindowActive( tlw ) ) ) )
+    {
+        wxWeakRef<wxWindow> target( aWindow );
+
+        ACTIVATION_WAITER::Add( tlw,
+                                [target, function = std::move( aFunction )]()
+                                {
+                                    if( target && !target->IsBeingDeleted() )
+                                        function();
+                                },
+                                aIsFocus );
+    }
+    else
+    {
+        aFunction();
+    }
+}
+
+} // namespace
+
+
+void KIPLATFORM::UI::RunWhenActive( wxWindow* aWindow, std::function<void()> aFunction )
+{
+    runWhenActive( aWindow, std::move( aFunction ), false );
+}
+
+
+void KIPLATFORM::UI::SetFocusWhenActive( wxWindow* aWindow )
+{
+    runWhenActive( aWindow, [aWindow]() { aWindow->SetFocus(); }, true );
+}
+
+
+bool KIPLATFORM::UI::ActivateWithoutPresenting( wxWindow* aWindow )
+{
+    wxWindow* tlw = wxGetTopLevelParent( aWindow );
+
+    if( !tlw || !presentCanUnmap( tlw ) )
+        return false;
+
+    // Ask even when active since a request for another window may still be pending
+    // Pass the input timestamp as gtk_window_present() does so the compositor can grant it
+    if( GdkWindow* gdkWindow = gtk_widget_get_window( static_cast<GtkWidget*>( tlw->GetHandle() ) ) )
+        gdk_window_focus( gdkWindow, gtk_get_current_event_time() );
+
+    return true;
+}
+
+
 void KIPLATFORM::UI::ForceFocus( wxWindow* aWindow )
 {
+    if( ActivateWithoutPresenting( aWindow ) )
+    {
+        SetFocusWhenActive( aWindow );
+        return;
+    }
+
     aWindow->SetFocus();
 
     // On GTK, SetFocus() on a dialog may not be sufficient to receive keyboard events
     // (like ESC for closing). We need to ensure the window is presented and active.
     // Find the top-level window and present it to ensure keyboard focus.
-    wxWindow* tlw = aWindow;
-
-    while( tlw && !tlw->IsTopLevel() )
-        tlw = tlw->GetParent();
-
-    if( tlw )
+    if( wxWindow* tlw = wxGetTopLevelParent( aWindow ) )
     {
         GtkWidget* widget = static_cast<GtkWidget*>( tlw->GetHandle() );
 
@@ -242,12 +438,6 @@ bool KIPLATFORM::UI::IsWindowActive( wxWindow* aWindow )
 }
 
 
-void KIPLATFORM::UI::EnsureVisible( wxWindow* aWindow )
-{
-    // Not needed on this platform
-}
-
-
 void KIPLATFORM::UI::StabilizeWindowPosition( wxWindow* aWindow )
 {
     if( !aWindow )
@@ -257,6 +447,38 @@ void KIPLATFORM::UI::StabilizeWindowPosition( wxWindow* aWindow )
 
     if( widget && GTK_IS_WINDOW( widget ) )
         gtk_window_set_gravity( GTK_WINDOW( widget ), GDK_GRAVITY_STATIC );
+}
+
+
+wxPoint KIPLATFORM::UI::GetRestorablePosition( wxWindow* aWindow )
+{
+    GtkWidget* widget = static_cast<GtkWidget*>( aWindow->GetHandle() );
+
+    if( aWindow->IsShown() && widget && GTK_IS_WINDOW( widget )
+        && gtk_window_get_gravity( GTK_WINDOW( widget ) ) == GDK_GRAVITY_STATIC )
+    {
+        if( GdkWindow* gdkWindow = gtk_widget_get_window( widget ) )
+        {
+            wxPoint      origin;
+            GdkRectangle frame;
+            gdk_window_get_origin( gdkWindow, &origin.x, &origin.y );
+            gdk_window_get_frame_extents( gdkWindow, &frame );
+
+            // Heal a position that crept up before static gravity, so the title bar comes back on screen
+            int displayIdx = wxDisplay::GetFromWindow( aWindow );
+
+            if( displayIdx != wxNOT_FOUND )
+            {
+                wxRect workArea = wxDisplay( (unsigned int) displayIdx ).GetClientArea();
+                origin.x += std::max( 0, workArea.x - frame.x );
+                origin.y += std::max( 0, workArea.y - frame.y );
+            }
+
+            return origin;
+        }
+    }
+
+    return aWindow->GetPosition();
 }
 
 
@@ -500,6 +722,78 @@ bool KIPLATFORM::UI::SupportsKeyState()
 }
 
 
+static gboolean onChoicePopupEvent( GtkWidget* aPopup, GdkEvent* aEvent, gpointer )
+{
+    if( aEvent->type == GDK_KEY_PRESS
+        && ( aEvent->key.keyval == GDK_KEY_Return || aEvent->key.keyval == GDK_KEY_KP_Enter )
+        && ( aEvent->key.state & GDK_SHIFT_MASK ) )
+    {
+        GtkWidget* selected = gtk_menu_shell_get_selected_item( GTK_MENU_SHELL( aPopup ) );
+
+        if( selected )
+        {
+            gtk_menu_shell_activate_item( GTK_MENU_SHELL( aPopup ), selected, TRUE );
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+
+static void onChoicePopupHidden( GtkWidget* aPopup, gpointer )
+{
+    g_signal_handlers_disconnect_by_func( aPopup, reinterpret_cast<gpointer>( onChoicePopupEvent ), nullptr );
+    g_signal_handlers_disconnect_by_func( aPopup, reinterpret_cast<gpointer>( onChoicePopupHidden ), nullptr );
+}
+
+
+bool KIPLATFORM::UI::PrepareChoicePopup( wxWindow* aControl )
+{
+    GtkWidget* popup = gtk_grab_get_current();
+
+    if( !GTK_IS_MENU( popup ) || gtk_menu_get_attach_widget( GTK_MENU( popup ) ) != aControl->GetHandle() )
+        return false;
+
+    g_signal_handlers_disconnect_by_func( popup, reinterpret_cast<gpointer>( onChoicePopupEvent ), nullptr );
+    g_signal_handlers_disconnect_by_func( popup, reinterpret_cast<gpointer>( onChoicePopupHidden ), nullptr );
+    g_signal_connect( popup, "event", G_CALLBACK( onChoicePopupEvent ), nullptr );
+    g_signal_connect( popup, "hide", G_CALLBACK( onChoicePopupHidden ), nullptr );
+    return true;
+}
+
+
+wxKeyEvent KIPLATFORM::UI::GetNativePopupDismissalEvent()
+{
+    wxKeyEvent key;
+    GdkEvent*  event = gtk_get_current_event();
+
+    if( event )
+    {
+        guint keyval = 0;
+
+        if( gdk_event_get_keyval( event, &keyval ) )
+        {
+            switch( keyval )
+            {
+            case GDK_KEY_Return: key.m_keyCode = WXK_RETURN; break;
+            case GDK_KEY_KP_Enter: key.m_keyCode = WXK_NUMPAD_ENTER; break;
+            case GDK_KEY_Escape: key.m_keyCode = WXK_ESCAPE; break;
+            }
+
+            key.SetShiftDown( event->key.state & GDK_SHIFT_MASK );
+            key.SetControlDown( event->key.state & GDK_CONTROL_MASK );
+            key.SetAltDown( event->key.state & GDK_MOD1_MASK );
+            key.SetMetaDown( event->key.state & GDK_META_MASK );
+        }
+
+        gdk_event_free( event );
+    }
+
+    return key;
+}
+
+
 #if defined( GDK_WINDOWING_WAYLAND ) && defined( KICAD_WAYLAND )
 
 static bool wayland_warp_pointer( GtkWidget* aWidget, GdkDisplay* aDisplay, GdkWindow* aWindow,
@@ -643,6 +937,15 @@ void KIPLATFORM::UI::AllowNetworkFileSystems( wxDialog* aDialog )
 
     if( widget && GTK_IS_FILE_CHOOSER( widget ) )
         gtk_file_chooser_set_local_only( GTK_FILE_CHOOSER( widget ), FALSE );
+}
+
+
+int KIPLATFORM::UI::GetColumnWidth( const wxDataViewColumn* aColumn )
+{
+    int requested = gtk_tree_view_column_get_fixed_width( GTK_TREE_VIEW_COLUMN( aColumn->GetGtkHandle() ) );
+
+    // A column never given a width has no request to report
+    return requested > 0 ? requested : aColumn->GetWidth();
 }
 
 
@@ -802,6 +1105,9 @@ static void on_frame_clock_after_paint( GdkFrameClock* clock, GtkWidget* widget 
                     s_wl_pointer_constraints, wlsurf, wlptr, s_wl_confinement_region,
                     ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT );
 
+            zwp_confined_pointer_v1_add_listener( s_wl_confined_pointer, &confined_pointer_listener,
+                                                  NULL );
+
             wl_display_roundtrip( wldisp );
         }
     }
@@ -879,10 +1185,7 @@ bool KIPLATFORM::UI::InfiniteDragPrepareWindow( wxWindow* aWindow )
 
     if( GDK_IS_WAYLAND_DISPLAY( disp ) )
     {
-        if( s_wl_confined_pointer != NULL )
-        {
-            KIPLATFORM::UI::InfiniteDragReleaseWindow();
-        }
+        KIPLATFORM::UI::InfiniteDragReleaseWindow();
 
         GdkSeat*   seat = gdk_display_get_default_seat( disp );
         GdkDevice* ptrdev = gdk_seat_get_pointer( seat );
@@ -901,6 +1204,13 @@ bool KIPLATFORM::UI::InfiniteDragPrepareWindow( wxWindow* aWindow )
 
         s_wl_confinement_region = wl_compositor_create_region( s_wl_compositor );
         wl_region_add( s_wl_confinement_region, x, y, width, height );
+
+        // One constraint per surface, so after-paint confines once the lock is gone
+        if( s_wl_locked_pointer )
+        {
+            wxLogTrace( traceWayland, wxS( "Deferring confinement: warp lock pending" ) );
+            return true;
+        }
 
         s_wl_confined_pointer = zwp_pointer_constraints_v1_confine_pointer(
                 s_wl_pointer_constraints, wlsurf, wlptr, s_wl_confinement_region,
@@ -1174,5 +1484,36 @@ void KIPLATFORM::UI::KeepAboveExternalRendering( wxWindow* aChild )
 
     if( !gdk_window_ensure_native( window ) )
         wxLogTrace( traceRhi, wxS( "KeepAboveExternalRendering: gdk_window_ensure_native failed" ) );
+#endif
+}
+
+
+#if defined( GDK_WINDOWING_X11 ) && !wxCHECK_VERSION( 3, 3, 3 )
+static void rebindRealizedWindow( GtkWidget*, wxWindow* aWindow )
+{
+    aWindow->GTKHandleRealized();
+}
+#endif
+
+
+void KIPLATFORM::UI::RebindOnRealize( wxWindow* aWindow )
+{
+#if defined( GDK_WINDOWING_X11 ) && !wxCHECK_VERSION( 3, 3, 3 )
+    GtkWidget* widget = aWindow->GetConnectWidget();
+
+    // Only X11 binds a surface to the native window, and wx before 3.2.3 rebuilds Wayland surfaces on each call
+    if( !widget || !GDK_IS_X11_DISPLAY( gtk_widget_get_display( widget ) ) )
+        return;
+
+    guint realize = g_signal_lookup( "realize", GTK_TYPE_WIDGET );
+
+    // wx connects its own handler, keyed on the window, when the widget was unrealized at creation
+    if( g_signal_handler_find( widget, GSignalMatchType( G_SIGNAL_MATCH_ID | G_SIGNAL_MATCH_DATA ), realize, 0,
+                               nullptr, nullptr, aWindow ) )
+    {
+        return;
+    }
+
+    g_signal_connect( widget, "realize", G_CALLBACK( rebindRealizedWindow ), aWindow );
 #endif
 }

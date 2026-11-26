@@ -26,7 +26,6 @@
 #include <ki_exception.h>
 #include <reporter.h>
 #include <scintilla_tricks.h>
-#include <dialogs/rule_editor_dialog_base.h>
 #include <wx/button.h>
 #include <wx/sizer.h>
 #include <wx/stc/stc.h>
@@ -49,15 +48,6 @@ DRC_RE_CUSTOM_RULE_PANEL::DRC_RE_CUSTOM_RULE_PANEL(
     sizer->Add( m_checkSyntaxBtn, 0, wxALIGN_RIGHT | wxRIGHT | wxBOTTOM, 5 );
 
     SetSizer( sizer );
-
-    m_textCtrl->Bind( wxEVT_STC_CHANGE,
-                      [this]( wxStyledTextEvent& )
-                      {
-                          RULE_EDITOR_DIALOG_BASE* dlg = RULE_EDITOR_DIALOG_BASE::GetDialog( this );
-
-                          if( dlg )
-                              dlg->SetModified();
-                      } );
 
     m_scintillaTricks = std::make_unique<SCINTILLA_TRICKS>(
             m_textCtrl, wxT( "()" ), false,
@@ -90,9 +80,7 @@ bool DRC_RE_CUSTOM_RULE_PANEL::TransferDataToWindow()
         wxString text = m_constraintData->GetRuleText();
 
         if( text.IsEmpty() )
-        {
-            text = wxS( "   (constraint clearance (min 0.2mm))" );
-        }
+            text = wxS( "(constraint clearance (min 0.2mm))" );
 
         m_textCtrl->SetValue( text );
     }
@@ -130,28 +118,7 @@ wxString DRC_RE_CUSTOM_RULE_PANEL::GenerateRule( const RULE_GENERATION_CONTEXT& 
     if( body.Trim().IsEmpty() )
         return wxEmptyString;
 
-    wxString ruleName = aContext.ruleName;
-    ruleName.Replace( wxS( "\"" ), wxS( "\\\"" ) );
-
-    wxString rule;
-    rule << wxS( "(rule \"" ) << ruleName << wxS( "\"\n" );
-
-    if( !aContext.comment.IsEmpty() )
-    {
-        wxArrayString lines = wxSplit( aContext.comment, '\n', '\0' );
-
-        for( const wxString& line : lines )
-        {
-            if( line.IsEmpty() )
-                continue;
-
-            rule << wxS( "\t# " ) << line << wxS( "\n" );
-        }
-    }
-
-    rule << body << wxS( ")" );
-
-    return rule;
+    return DRC_RE_CUSTOM_RULE_CONSTRAINT_DATA::FormatRule( aContext, body );
 }
 
 
@@ -171,7 +138,6 @@ void DRC_RE_CUSTOM_RULE_PANEL::onScintillaCharAdded( wxStyledTextEvent& aEvent )
 
     m_textCtrl->SearchAnchor();
 
-    wxString rules = m_textCtrl->GetText();
     int      currentPos = m_textCtrl->GetCurrentPos();
     int      startPos = 0;
 
@@ -280,6 +246,7 @@ void DRC_RE_CUSTOM_RULE_PANEL::onScintillaCharAdded( wxStyledTextEvent& aEvent )
                           "hole_size|"
                           "hole_to_hole|"
                           "length|"
+                          "line_width|"
                           "max_error|"
                           "min_resolved_spokes|"
                           "physical_clearance|"
@@ -287,7 +254,6 @@ void DRC_RE_CUSTOM_RULE_PANEL::onScintillaCharAdded( wxStyledTextEvent& aEvent )
                           "silk_clearance|"
                           "skew|"
                           "text_height|"
-                          "text_thickness|"
                           "thermal_relief_gap|"
                           "thermal_spoke_width|"
                           "track_angle|"

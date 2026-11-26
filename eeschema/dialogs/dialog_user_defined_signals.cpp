@@ -24,8 +24,16 @@
 #include <grid_tricks.h>
 #include <dialogs/html_message_box.h>
 #include <../sim/simulator_frame.h>
+#include <sim/sim_signal_utils.h>
 #include <dialog_user_defined_signals.h>
+#include <widgets/wx_infobar.h>
 #include <string_utils.h>
+#include <gal/color4d.h>
+
+#include <wx/settings.h>
+
+#include <map>
+#include <set>
 
 
 DIALOG_USER_DEFINED_SIGNALS::DIALOG_USER_DEFINED_SIGNALS( SIMULATOR_FRAME* aParent,
@@ -44,14 +52,59 @@ DIALOG_USER_DEFINED_SIGNALS::DIALOG_USER_DEFINED_SIGNALS( SIMULATOR_FRAME* aPare
     for( const auto& [ id, signal ] : *m_signals )
         addGridRow( signal, id );
 
+    // The theme's line colour can match the cell background; derive a visible one.
+    KIGFX::COLOR4D bg = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW );
+    KIGFX::COLOR4D fg = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOWTEXT );
+
+    m_grid->SetGridLineColour( fg.Mix( bg, 0.35 ).ToColour() );
+    m_grid->EnableGridLines( true );
+
+    // The default highlight hides the grid lines of its row.
+    m_grid->SetCellHighlightPenWidth( 1 );
+
+    m_grid->SetRowLabelAlignment( wxALIGN_CENTER, wxALIGN_CENTER );
+
     m_addButton->SetBitmap( KiBitmapBundle( BITMAPS::small_plus ) );
     m_deleteButton->SetBitmap( KiBitmapBundle( BITMAPS::small_trash ) );
 
     SetupStandardButtons();
     Layout();
 
+    // Bound on the grid: the dialog's size event arrives before layout.
+    m_grid->Bind( wxEVT_SIZE,
+                  [this]( wxSizeEvent& aEvent )
+                  {
+                      adjustGridColumns();
+                      aEvent.Skip();
+                  } );
+
+    CallAfter(
+            [this]()
+            {
+                adjustGridColumns();
+            } );
+
     // Now all widgets have the size fixed, call FinishDialogSettings
     finishDialogSettings();
+}
+
+
+void DIALOG_USER_DEFINED_SIGNALS::adjustGridColumns()
+{
+    wxGridUpdateLocker deferRepaintsTillLeavingScope( m_grid );
+
+    int indexWidth = m_grid->GetTextExtent( wxString::Format( wxT( "%d" ), m_grid->GetNumberRows() ) ).x + 12;
+    indexWidth = std::max( indexWidth, 24 );
+
+    if( m_grid->GetRowLabelSize() != indexWidth )
+        m_grid->SetRowLabelSize( indexWidth );
+
+    // Column 1 holds the signal id and is zero-width; the expression column takes the rest.
+    // The client size excludes only a scrollbar that takes space, unlike a macOS overlay one
+    int width = m_grid->GetClientSize().x - indexWidth;
+
+    if( width > 0 && width != m_grid->GetColSize( 0 ) )
+        m_grid->SetColSize( 0, width );
 }
 
 
@@ -102,6 +155,8 @@ void DIALOG_USER_DEFINED_SIGNALS::onAddSignal( wxCommandEvent& event )
                 addGridRow( wxEmptyString, (int) newId );
                 return { m_grid->GetNumberRows() - 1, 0 };
             } );
+
+    adjustGridColumns();
 }
 
 
@@ -112,16 +167,143 @@ void DIALOG_USER_DEFINED_SIGNALS::onDeleteSignal( wxCommandEvent& event )
             {
                 m_grid->DeleteRows( row, 1 );
             } );
+
+    adjustGridColumns();
+}
+
+
+void DIALOG_USER_DEFINED_SIGNALS::onCheckSyntax( wxCommandEvent& event )
+{
+    if( !m_grid->CommitPendingChanges() )
+        return;
+
+    std::vector<wxString> signals = m_frame->Signals();
+
+    if( signals.empty() && m_frame->Netnames().empty() )
+    {
+        m_infoBar->ShowMessageFor( _( "There are no signals to check against yet.  Run the "
+                                      "simulation first." ),
+                                   8000, wxICON_WARNING );
+        return;
+    }
+
+    // ngspice ignores case in vector and node names
+    std::set<wxString> known;
+
+    for( const wxString& signal : signals )
+        known.insert( SimSignalBaseName( signal ).Lower() );
+
+    // Voltages are valid whether or not all voltages are saved.
+    for( const wxString& netname : m_frame->Netnames() )
+        known.insert( wxString::Format( wxS( "V(%s)" ), netname ).Lower() );
+
+    // Component voltages are expanded in any case.
+    std::set<wxString> deviceVoltages;
+
+    for( const wxString& name : m_frame->DeviceVoltages() )
+        deviceVoltages.insert( name.Lower() );
+
+    wxArrayString problems;
+
+    for( int row = 0; row < m_grid->GetNumberRows(); ++row )
+    {
+        wxString expr = m_grid->GetCellValue( row, 0 );
+        expr.Trim( true ).Trim( false );
+
+        if( expr.IsEmpty() )
+            continue;
+
+        if( !SIM_SIGNAL::ParensBalanced( expr ) )
+        {
+            problems.Add( wxString::Format( _( "%s: unbalanced parentheses." ), EscapeHTML( expr ) ) );
+            continue;
+        }
+
+        for( const wxString& ref : SIM_SIGNAL::ExtractSignalRefs( expr ) )
+        {
+            if( known.count( ref.Lower() ) || deviceVoltages.count( ref.Lower() ) )
+                continue;
+
+            problems.Add( wxString::Format( _( "%s: %s is not a known signal." ), EscapeHTML( expr ),
+                                            EscapeHTML( ref ) ) );
+        }
+    }
+
+    // Nets differing only in case are the same net in ngspice.
+    std::map<wxString, std::set<wxString>> netsByLower;
+
+    for( const wxString& netname : m_frame->Netnames() )
+        netsByLower[netname.Lower()].insert( netname );
+
+    for( const auto& [lower, spellings] : netsByLower )
+    {
+        if( spellings.size() < 2 )
+            continue;
+
+        wxString list;
+
+        for( const wxString& spelling : spellings )
+        {
+            if( !list.IsEmpty() )
+                list += wxS( ", " );
+
+            list += spelling;
+        }
+
+        problems.Add( wxString::Format( _( "Nets %s differ only in capitalization; ngspice cannot "
+                                           "tell them apart." ),
+                                        EscapeHTML( list ) ) );
+    }
+
+    if( problems.IsEmpty() )
+    {
+        m_infoBar->ShowMessageFor( _( "No problems found." ), 6000, wxICON_INFORMATION );
+        return;
+    }
+
+    m_infoBar->Dismiss();
+
+    HTML_MESSAGE_BOX dlg( this, _( "Signal Check" ) );
+
+    dlg.SetDialogSizeInDU( 400, 250 );
+    dlg.MessageSet( wxString::Format( _( "%d problem(s) found:" ), (int) problems.GetCount() ) );
+    dlg.ListSet( problems );
+    dlg.ShowModal();
 }
 
 
 void DIALOG_USER_DEFINED_SIGNALS::onScintillaCharAdded( wxStyledTextEvent &aEvent, SCINTILLA_TRICKS* aTricks )
 {
-    wxStyledTextCtrl* textCtrl = aTricks->Scintilla();
-    wxArrayString     tokens;
+    wxStyledTextCtrl*  textCtrl = aTricks->Scintilla();
+    wxArrayString      tokens;
+    std::set<wxString> seen;
 
-    for( const wxString& signal : m_frame->SimPlotVectors() )
-        tokens.push_back( signal );
+    auto addToken = [&]( const wxString& aToken )
+    {
+        // Case-insensitive, so vectors don't re-add signals already offered.
+        if( !aToken.IsEmpty() && seen.insert( aToken.Lower() ).second )
+            tokens.push_back( aToken );
+    };
+
+    // Skip user-defined signals: they are whole expressions, not names.
+    std::set<wxString> userDefined;
+
+    for( const auto& [id, signal] : m_frame->UserDefinedSignals() )
+        userDefined.insert( signal );
+
+    // ngspice lower-cases vectors; offer the schematic's spelling.
+    for( const wxString& signal : m_frame->Signals() )
+    {
+        if( !userDefined.count( signal ) )
+            addToken( SimSignalBaseName( signal ) );
+    }
+
+    // Vectors without a schematic spelling ("time", "frequency"), except the internal derived ones
+    for( const wxString& vector : m_frame->SimPlotVectors() )
+    {
+        if( !SIM_SIGNAL::IsDerivedSignalVector( vector ) )
+            addToken( vector );
+    }
 
     tokens.push_back( wxS( "sqrt(x)" ) );
     tokens.push_back( wxS( "sin(x)" ) );
@@ -188,11 +370,13 @@ void DIALOG_USER_DEFINED_SIGNALS::onScintillaCharAdded( wxStyledTextEvent &aEven
         }
     }
 
-    if( start >= 0 )    // i.e. at least one char entered
-    {
-        wxString partial = textCtrl->GetRange( start, text_pos );
+    wxString partial = start >= 0 ? textCtrl->GetRange( start, text_pos ) : wxString();
+
+    // An empty partial matches every token, so ")" or an operator would pop the whole list up
+    if( partial.IsEmpty() )
+        aTricks->CancelAutocomplete();
+    else
         aTricks->DoAutocomplete( partial, tokens );
-    }
 
     textCtrl->SetFocus();
 }
@@ -205,6 +389,27 @@ bool DIALOG_USER_DEFINED_SIGNALS::TransferDataFromWindow()
 
     if( !m_grid->CommitPendingChanges() )
         return false;
+
+    // Signals are looked up by name, so a copy of a native name would capture the native signal
+    std::set<wxString> native;
+
+    for( const wxString& signal : m_frame->NativeSignals() )
+        native.insert( SimSignalBaseName( signal ).Lower() );
+
+    for( int ii = 0; ii < m_grid->GetNumberRows(); ++ii )
+    {
+        wxString signal = m_grid->GetCellValue( ii, 0 );
+
+        if( native.count( signal.Strip( wxString::both ).Lower() ) )
+        {
+            m_grid->SetGridCursor( ii, 0 );
+            m_infoBar->ShowMessageFor( wxString::Format( _( "'%s' is already a signal and needs no "
+                                                            "user-defined copy." ),
+                                                         signal ),
+                                       8000, wxICON_ERROR );
+            return false;
+        }
+    }
 
     m_signals->clear();
 

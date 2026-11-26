@@ -184,7 +184,14 @@ public:
     LIBRARY_TABLE_ROW& InsertRow();
 
     const wxString& Path() const { return m_path; }
-    void SetPath( const wxString &aPath ) { m_path = aPath; }
+    void            SetPath( const wxString& aPath )
+    {
+        m_path = aPath;
+        m_loadedStamp.reset();
+    }
+
+    /// True when the file's content differs from what this table was loaded from or last saved to
+    bool DiskChanged() const;
 
     LIBRARY_TABLE_TYPE Type() const { return m_type; }
     void SetType( const LIBRARY_TABLE_TYPE aType ) { m_type = aType; }
@@ -225,7 +232,8 @@ public:
     std::optional<LIBRARY_TABLE_ROW*> Row( const wxString& aNickname );
     std::optional<const LIBRARY_TABLE_ROW*> Row( const wxString& aNickname ) const;
 
-    LIBRARY_RESULT<void> Save();
+    /// @param aOverwriteChanged writes even when the file changed on disk since it was loaded
+    LIBRARY_RESULT<void> Save( bool aOverwriteChanged = false );
 
     static std::map<std::string, UTF8> ParseOptions( const std::string& aOptionsList );
     static UTF8 FormatOptions( const std::map<std::string, UTF8>* aProperties );
@@ -233,9 +241,13 @@ public:
 private:
     bool initFromIR( const LIBRARY_TABLE_IR& aIR );
     bool addRowFromIR( const LIBRARY_TABLE_ROW_IR& aIR );
+    wxString diskStamp() const;
 
     /// The full path to the file this table was parsed from, if any
     wxString m_path;
+
+    /// A hash of the file content when it was loaded or last saved, so a write can tell it would clobber a newer file
+    std::optional<wxString> m_loadedStamp;
 
     LIBRARY_TABLE_SCOPE m_scope = LIBRARY_TABLE_SCOPE::UNINITIALIZED;
 

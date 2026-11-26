@@ -35,12 +35,14 @@ int ConvertPadCheckToDrcCode( PAD_UTILS::PAD_CHECK_CODE aCode )
     {
     case PAD_UTILS::PAD_CHECK_CODE::PAD_SIZE_NOT_POSITIVE:
     case PAD_UTILS::PAD_CHECK_CODE::PTH_HOLE_TOO_SMALL:
-    case PAD_UTILS::PAD_CHECK_CODE::SMD_HAS_HOLE:
+    case PAD_UTILS::PAD_CHECK_CODE::UNEXPECTED_HOLE:
     case PAD_UTILS::PAD_CHECK_CODE::ROUNDRECT_RADIUS_NEGATIVE:
     case PAD_UTILS::PAD_CHECK_CODE::CHAMFER_NEGATIVE:
     case PAD_UTILS::PAD_CHECK_CODE::CHAMFER_TOO_LARGE:
     case PAD_UTILS::PAD_CHECK_CODE::TRAPEZOID_DELTA_TOO_LARGE:
     case PAD_UTILS::PAD_CHECK_CODE::CUSTOM_SHAPE_NOT_SINGLE_POLYGON:
+    case PAD_UTILS::PAD_CHECK_CODE::NON_COMPONENT_NO_COPPER:
+    case PAD_UTILS::PAD_CHECK_CODE::NON_COMPONENT_TECH_ON_INNER:
         return DRCE_PADSTACK_INVALID;
 
     case PAD_UTILS::PAD_CHECK_CODE::TH_NO_HOLE:
@@ -54,9 +56,8 @@ int ConvertPadCheckToDrcCode( PAD_UTILS::PAD_CHECK_CODE aCode )
     case PAD_UTILS::PAD_CHECK_CODE::NEGATIVE_MASK_CLEARANCE_TOO_LARGE:
     case PAD_UTILS::PAD_CHECK_CODE::NEGATIVE_PASTE_MARGIN_TOO_LARGE:
     case PAD_UTILS::PAD_CHECK_CODE::ROUNDRECT_RADIUS_TOO_LARGE:
-    case PAD_UTILS::PAD_CHECK_CODE::SMD_BOTH_OUTER_SIDES:
-    case PAD_UTILS::PAD_CHECK_CODE::SMD_MASK_WRONG_SIDE:
-    case PAD_UTILS::PAD_CHECK_CODE::SMD_PASTE_WRONG_SIDE:
+    case PAD_UTILS::PAD_CHECK_CODE::MASK_WRONG_SIDE:
+    case PAD_UTILS::PAD_CHECK_CODE::PASTE_WRONG_SIDE:
     case PAD_UTILS::PAD_CHECK_CODE::PAD_NO_OUTER_COPPER:
     case PAD_UTILS::PAD_CHECK_CODE::CONN_HAS_PASTE:
     case PAD_UTILS::PAD_CHECK_CODE::FIDUCIAL_NOT_PLATED:
@@ -66,6 +67,8 @@ int ConvertPadCheckToDrcCode( PAD_UTILS::PAD_CHECK_CODE aCode )
     case PAD_UTILS::PAD_CHECK_CODE::BGA_NOT_SMD:
     case PAD_UTILS::PAD_CHECK_CODE::MECHANICAL_NOT_PTH:
     case PAD_UTILS::PAD_CHECK_CODE::PRESSFIT_NOT_PTH:
+    case PAD_UTILS::PAD_CHECK_CODE::MULTIPLE_COPPER_LAYERS:
+    case PAD_UTILS::PAD_CHECK_CODE::NON_COMPONENT_INNER_NEEDS_CUSTOM_STACKUP:
         return DRCE_PADSTACK;
     }
 
@@ -101,8 +104,9 @@ DRC_ITEM DRC_ITEM::itemsNotAllowed( DRCE_ALLOWED_ITEMS,
         _HKI( "Items not allowed" ),
         wxT( "items_not_allowed" ) );
 
-DRC_ITEM DRC_ITEM::textOnEdgeCuts( DRCE_TEXT_ON_EDGECUTS, _HKI( "Text or graphic on Edge.Cuts layer" ),
-                                   wxT( "text_on_edge_cuts" ) );
+DRC_ITEM DRC_ITEM::textOnEdgeCuts( DRCE_TEXT_ON_EDGECUTS,
+        _HKI( "Text or graphic on Edge.Cuts layer" ),
+        wxT( "text_on_edge_cuts" ) );
 
 DRC_ITEM DRC_ITEM::clearance( DRCE_CLEARANCE,
         _HKI( "Clearance violation" ),
@@ -193,20 +197,28 @@ DRC_ITEM DRC_ITEM::microviaDrillTooSmall( DRCE_MICROVIA_DRILL_OUT_OF_RANGE,
         wxT( "microvia_drill_out_of_range" ) );
 
 DRC_ITEM DRC_ITEM::malformedMicroviaStackSpan( DRCE_MALFORMED_MICROVIA_STACK_SPAN,
-                                               _HKI( "Microvia stack has malformed span" ),
-                                               wxT( "malformed_microvia_stack_span" ) );
+        _HKI( "Microvia stack has malformed span" ),
+        wxT( "malformed_microvia_stack_span" ) );
 
-DRC_ITEM DRC_ITEM::microviaStackNotFilled( DRCE_MICROVIA_STACK_NOT_FILLED, _HKI( "Microvia under microvia not filled" ),
-                                           wxT( "microvia_stack_not_filled" ) );
+DRC_ITEM DRC_ITEM::microviaStackNotFilled( DRCE_MICROVIA_STACK_NOT_FILLED,
+        _HKI( "Microvia under microvia not filled" ),
+        wxT( "microvia_stack_not_filled" ) );
 
-DRC_ITEM DRC_ITEM::microviaStackDepth( DRCE_MICROVIA_STACK_DEPTH, _HKI( "Microvia stack too deep" ),
-                                       wxT( "microvia_stack_depth" ) );
+DRC_ITEM DRC_ITEM::microviaStackDepth( DRCE_MICROVIA_STACK_DEPTH,
+        _HKI( "Microvia stack too deep" ),
+        wxT( "microvia_stack_depth" ) );
 
-DRC_ITEM DRC_ITEM::holeAspectRatio( DRCE_HOLE_ASPECT_RATIO, _HKI( "Hole too deep for its diameter" ),
-                                    wxT( "hole_aspect_ratio" ) );
+DRC_ITEM DRC_ITEM::holeAspectRatio( DRCE_HOLE_ASPECT_RATIO,
+        _HKI( "Hole too deep for its diameter" ),
+        wxT( "hole_aspect_ratio" ) );
 
-DRC_ITEM DRC_ITEM::microviaCrossesCore( DRCE_MICROVIA_CROSSES_CORE, _HKI( "Microvia crosses core material" ),
-                                        wxT( "microvia_crosses_core" ) );
+DRC_ITEM DRC_ITEM::microviaCrossesCore( DRCE_MICROVIA_CROSSES_CORE,
+        _HKI( "Microvia crosses core material" ),
+        wxT( "microvia_crosses_core" ) );
+
+DRC_ITEM DRC_ITEM::microviaSpansDielectrics( DRCE_MICROVIA_SPANS_DIELECTRICS,
+        _HKI( "Microvia spans more than one dielectric" ),
+        wxT( "microvia_spans_dielectrics" ) );
 
 DRC_ITEM DRC_ITEM::courtyardsOverlap( DRCE_OVERLAPPING_FOOTPRINTS,
         _HKI( "Courtyards overlap" ),
@@ -312,13 +324,13 @@ DRC_ITEM DRC_ITEM::silkClearance( DRCE_SILK_CLEARANCE,
         _HKI( "Silkscreen clearance" ),
         wxT( "silk_overlap" ) );
 
+DRC_ITEM DRC_ITEM::lineWidthOutOfRange( DRCE_LINE_WIDTH,
+        _HKI( "Line width out of range" ),
+        wxT( "line_width" ) );
+
 DRC_ITEM DRC_ITEM::textHeightOutOfRange( DRCE_TEXT_HEIGHT,
         _HKI( "Text height out of range" ),
         wxT( "text_height" ) );
-
-DRC_ITEM DRC_ITEM::textThicknessOutOfRange( DRCE_TEXT_THICKNESS,
-        _HKI( "Text thickness out of range" ),
-        wxT( "text_thickness" ) );
 
 DRC_ITEM DRC_ITEM::lengthOutOfRange( DRCE_LENGTH_OUT_OF_RANGE,
         _HKI( "Track length out of range" ),
@@ -420,6 +432,7 @@ std::vector<std::reference_wrapper<RC_ITEM>> DRC_ITEM::allItemTypes( {
         DRC_ITEM::microviaStackDepth,
         DRC_ITEM::holeAspectRatio,
         DRC_ITEM::microviaCrossesCore,
+        DRC_ITEM::microviaSpansDielectrics,
         DRC_ITEM::viaDiameter,
         DRC_ITEM::courtyardsOverlap,
         DRC_ITEM::missingCourtyard,
@@ -458,7 +471,7 @@ std::vector<std::reference_wrapper<RC_ITEM>> DRC_ITEM::allItemTypes( {
         DRC_ITEM::silkMaskClearance,
         DRC_ITEM::silkEdgeClearance,
         DRC_ITEM::textHeightOutOfRange,
-        DRC_ITEM::textThicknessOutOfRange,
+        DRC_ITEM::lineWidthOutOfRange,
         DRC_ITEM::mirroredTextOnFrontLayer,
         DRC_ITEM::unMirroredTextOnBackLayer,
 
@@ -524,6 +537,7 @@ std::shared_ptr<DRC_ITEM> DRC_ITEM::Create( int aErrorCode )
     case DRCE_MICROVIA_STACK_DEPTH:          return std::make_shared<DRC_ITEM>( microviaStackDepth );
     case DRCE_HOLE_ASPECT_RATIO:             return std::make_shared<DRC_ITEM>( holeAspectRatio );
     case DRCE_MICROVIA_CROSSES_CORE:         return std::make_shared<DRC_ITEM>( microviaCrossesCore );
+    case DRCE_MICROVIA_SPANS_DIELECTRICS: return std::make_shared<DRC_ITEM>( microviaSpansDielectrics );
     case DRCE_OVERLAPPING_FOOTPRINTS:        return std::make_shared<DRC_ITEM>( courtyardsOverlap );
     case DRCE_MISSING_COURTYARD:             return std::make_shared<DRC_ITEM>( missingCourtyard );
     case DRCE_MALFORMED_COURTYARD:           return std::make_shared<DRC_ITEM>( malformedCourtyard );
@@ -550,7 +564,7 @@ std::shared_ptr<DRC_ITEM> DRC_ITEM::Create( int aErrorCode )
     case DRCE_SILK_EDGE_CLEARANCE:           return std::make_shared<DRC_ITEM>( silkEdgeClearance );
     case DRCE_SOLDERMASK_BRIDGE:             return std::make_shared<DRC_ITEM>( solderMaskBridge );
     case DRCE_TEXT_HEIGHT:                   return std::make_shared<DRC_ITEM>( textHeightOutOfRange );
-    case DRCE_TEXT_THICKNESS:                return std::make_shared<DRC_ITEM>( textThicknessOutOfRange );
+    case DRCE_LINE_WIDTH:                    return std::make_shared<DRC_ITEM>( lineWidthOutOfRange );
     case DRCE_LENGTH_OUT_OF_RANGE:           return std::make_shared<DRC_ITEM>( lengthOutOfRange );
     case DRCE_NET_CHAIN_STUB_TOO_LONG:       return std::make_shared<DRC_ITEM>( netChainStubTooLong );
     case DRCE_NET_CHAIN_RETURN_PATH_BREAK:   return std::make_shared<DRC_ITEM>( netChainReturnPathBreak );
@@ -578,9 +592,12 @@ std::shared_ptr<DRC_ITEM> DRC_ITEM::Create( int aErrorCode )
 
 std::shared_ptr<DRC_ITEM> DRC_ITEM::Create( const wxString& aErrorKey )
 {
+    // Exclusions written before 11.0 use the old text thickness key
+    const wxString key = aErrorKey == wxS( "text_thickness" ) ? wxString( wxS( "line_width" ) ) : aErrorKey;
+
     for( const std::reference_wrapper<RC_ITEM>& item : allItemTypes )
     {
-        if( aErrorKey == item.get().GetSettingsKey() )
+        if( key == item.get().GetSettingsKey() )
             return std::make_shared<DRC_ITEM>( static_cast<const DRC_ITEM&>( item.get() ) );
     }
 

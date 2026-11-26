@@ -67,6 +67,7 @@ public:
     int JobExportDrill( JOB* aJob );
     int JobExportPos( JOB* aJob );
     int JobExportFpUpgrade( JOB* aJob );
+    int JobFpDowngrade( JOB* aJob );
     int JobExportFpSvg( JOB* aJob );
     int JobExportDrc( JOB* aJob );
     int JobExportIpc2581( JOB* aJob );
@@ -75,6 +76,7 @@ public:
     int JobExportIpcD356( JOB* aJob );
     int JobExportStats( JOB* aJob );
     int JobExportStackup( JOB* aJob );
+    int JobExportHyperlynx( JOB* aJob );
     int JobUpgrade( JOB* aJob );
     int JobDowngrade( JOB* aJob );
     int JobImport( JOB* aJob );
@@ -101,7 +103,7 @@ private:
     int runPcbMerge( const wxString& aAncestor, const wxString& aOurs, const wxString& aTheirs,
                      const wxString& aOutput, bool aInteractive );
     int runFpLibMerge( const wxString& aAncestor, const wxString& aOurs, const wxString& aTheirs,
-                       const wxString& aOutput, bool aSingleFile );
+                       const wxString& aOutput, bool aInteractive, bool aSingleFile );
 
 public:
 
@@ -116,7 +118,8 @@ private:
     void refillFabZones( const JOB_EXPORT_PCB_FAB& aJob, BOARD* aBoard );
     LSEQ convertLayerArg( wxString& aLayerString, BOARD* aBoard ) const;
 
-    bool preparePlotLayers( JOB_EXPORT_PCB_PLOT* aJob, BOARD* aBoard, TOOL_MANAGER* aToolManager );
+    bool preparePlotLayers( JOB_EXPORT_PCB_PLOT* aJob, BOARD* aBoard, TOOL_MANAGER* aToolManager,
+                            LSEQ& aLayersToPlot );
     wxString resolvePlotOutputPath( JOB_EXPORT_PCB_PLOT* aJob, BOARD* aBoard,
                                    PLOT_FORMAT aFormat, bool aSingleOutput );
 

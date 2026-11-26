@@ -50,6 +50,7 @@ public:
     int New( const TOOL_EVENT& aEvent );
     int Open( const TOOL_EVENT& aEvent );
     int Save( const TOOL_EVENT& aEvent );
+    int ExportForOlderVersion( const TOOL_EVENT& aEvent );
     int SaveAs( const TOOL_EVENT& aEvent );
     int SaveCopy( const TOOL_EVENT& aEvent );
     int Revert( const TOOL_EVENT& aEvent );
@@ -65,6 +66,7 @@ public:
     int FindByProperties( const TOOL_EVENT& aEvent );
 
     int BoardSetup( const TOOL_EVENT& aEvent );
+    int DesignRules( const TOOL_EVENT& aEvent );
     int ImportNetlist( const TOOL_EVENT& aEvent );
     int ImportSpecctraSession( const TOOL_EVENT& aEvent );
     int ExportSpecctraDSN( const TOOL_EVENT& aEvent );

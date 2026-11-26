@@ -60,7 +60,7 @@ GAL::GAL( GAL_DISPLAY_OPTIONS& aDisplayOptions ) :
 
     // this value for SetWorldUnitLength is only suitable for Pcbnew.
     // Other editors/viewer must call SetWorldUnitLength with their internal units
-    SetWorldUnitLength( 1e-9 /* 1 nm */ / 0.0254 /* 1 inch in meters */ );
+    SetWorldUnitLength( PCB_WORLD_UNIT );
 
     // wxDC::GetPPI() reports 96 DPI, but somehow this value
     // is the closest match to the legacy renderer
@@ -84,6 +84,7 @@ GAL::GAL( GAL_DISPLAY_OPTIONS& aDisplayOptions ) :
     SetCursorColor( COLOR4D( 1.0, 1.0, 1.0, 1.0 ) );
     m_crossHairMode = CROSS_HAIR_MODE::SMALL_CROSS;
     m_forceDisplayCursor = false;
+    m_cursorInCanvas = false;
     SetCursorEnabled( false );
 
     // Initialize the native widget to an arrow cursor

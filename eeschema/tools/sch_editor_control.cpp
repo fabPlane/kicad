@@ -18,6 +18,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <dialogs/dialog_export_older_version.h>
+#include <jobs/job_sch_downgrade.h>
 #include <advanced_config.h>
 #include <symbol_edit_frame.h>
 #include "tools/sch_editor_control.h"
@@ -81,6 +83,7 @@
 #include <sch_junction.h>
 #include <sch_bus_entry.h>
 #include <sch_shape.h>
+#include <sch_rule_area.h>
 #include <sch_painter.h>
 #include <sch_sheet_pin.h>
 #include <sch_table.h>
@@ -594,6 +597,54 @@ void SCH_EDITOR_CONTROL::doCrossProbeSchToPcb( const TOOL_EVENT& aEvent, bool aF
 }
 
 
+int SCH_EDITOR_CONTROL::ExportForOlderVersion( const TOOL_EVENT& aEvent )
+{
+    const wxString title = _( "Export for Older KiCad Version" );
+
+    // The export reads the files on disk, so they have to match what is on screen.
+    if( m_frame->IsContentModified() )
+    {
+        int answer = wxMessageBox( _( "You have unsaved changes. Save them before exporting?" ), title,
+                                   wxYES_NO | wxCANCEL | wxICON_WARNING, m_frame );
+
+        if( answer == wxCANCEL )
+            return 0;
+
+        if( answer == wxYES && !m_frame->SaveProject() )
+        {
+            wxMessageBox( _( "The schematic was not saved. Nothing was exported." ), title, wxOK | wxICON_ERROR,
+                          m_frame );
+            return 0;
+        }
+    }
+
+    const wxString schematic = m_frame->Schematic().RootScreen()->GetFileName();
+
+    RunExportForOlderVersion( m_frame,
+                              [&]( const DOWNGRADE_EXPORT_PASS& aPass, DOWNGRADE_EXPORT_RESULT& aResult ) -> bool
+                              {
+                                  JOB_SCH_DOWNGRADE job;
+                                  job.m_filename = schematic;
+                                  job.m_variant = aPass.m_variant;
+
+                                  if( !aPass.m_dryRun )
+                                  {
+                                      wxFileName out( aPass.m_folder, wxEmptyString );
+                                      out.AppendDir( wxFileName( schematic ).GetName() );
+                                      job.m_outputDir = out.GetPath();
+                                  }
+
+                                  if( !RunDowngradeJob( m_frame->Kiway(), KIWAY::FACE_SCH, job, aPass, aResult ) )
+                                      return false;
+
+                                  aResult.m_variantsFound = job.m_foundVariants;
+                                  return true;
+                              } );
+
+    return 0;
+}
+
+
 int SCH_EDITOR_CONTROL::ExportSymbolsToLibrary( const TOOL_EVENT& aEvent )
 {
     bool                   savePowerSymbols = false;
@@ -771,6 +822,9 @@ int SCH_EDITOR_CONTROL::SimProbe( const TOOL_EVENT& aEvent )
 
                         std::vector<EMBEDDED_FILES*> embeddedFilesStack;
                         embeddedFilesStack.push_back( m_frame->Schematic().GetEmbeddedFiles() );
+
+                        if( symbol->GetLibSymbolRef() )
+                            symbol->GetLibSymbolRef()->AppendParentEmbeddedFiles( embeddedFilesStack );
 
                         if( EMBEDDED_FILES* symbolEmbeddedFile = symbol->GetEmbeddedFiles() )
                             embeddedFilesStack.push_back( symbolEmbeddedFile );
@@ -2151,6 +2205,11 @@ SCH_SHEET_PATH SCH_EDITOR_CONTROL::updatePastedSheet( SCH_SHEET* aSheet, const S
 
             updatePastedSymbol( symbol, sheetPath, aClipPath, aForceKeepAnnotations );
         }
+        else if( item->Type() == SCH_RULE_AREA_T )
+        {
+            SCH_RULE_AREA* ruleArea = static_cast<SCH_RULE_AREA*>( item );
+            updatePastedRuleArea( ruleArea, std::vector( ruleArea->GetInstances() ), sheetPath, aClipPath );
+        }
         else if( item->Type() == SCH_SHEET_T )
         {
             SCH_SHEET* subsheet = static_cast<SCH_SHEET*>( item );
@@ -2194,6 +2253,26 @@ void SCH_EDITOR_CONTROL::prunePastedSymbolInstances()
         wxCHECK2( symbol, continue );
 
         PrunePastedSymbolInstances( symbol, m_frame->Schematic() );
+    }
+}
+
+
+void SCH_EDITOR_CONTROL::updatePastedRuleArea( SCH_RULE_AREA* aRuleArea,
+                                               const std::vector<SCH_RULE_AREA_INSTANCE>& aClipInstances,
+                                               const SCH_SHEET_PATH& aPastePath, const KIID_PATH& aClipPath )
+{
+    wxCHECK( m_frame && aRuleArea, /* void */ );
+
+    for( const SCH_RULE_AREA_INSTANCE& tmp : aClipInstances )
+    {
+        if( ( tmp.m_Path.empty() && aClipPath.empty() ) || ( !aClipPath.empty() && tmp.m_Path.EndsWith( aClipPath ) ) )
+        {
+            SCH_RULE_AREA_INSTANCE newInstance = tmp;
+            newInstance.m_Path = aPastePath.Path();
+            newInstance.m_ProjectName = m_frame->Prj().GetProjectName();
+            aRuleArea->AddInstance( newInstance );
+            return;
+        }
     }
 }
 
@@ -2408,6 +2487,24 @@ int SCH_EDITOR_CONTROL::Paste( const TOOL_EVENT& aEvent )
 
     // Get set of sheet names in the current schematic to prevent duplicate sheet names on paste.
     std::set<wxString> existingSheetNames = pasteRoot.LastScreen()->GetSheetNames();
+    std::set<wxString> existingSuffixes;
+    std::set<wxString> composedSuffixes;
+
+    for( const SCH_SHEET_PATH& path : hierarchy )
+    {
+        const SCH_SHEET* sheet = path.Last();
+
+        composedSuffixes.insert( m_frame->Schematic().GetRefSuffix( path ) );
+
+        if( const SCH_FIELD* suffixField = sheet->GetField( FIELD_T::SHEET_REF_SUFFIX ) )
+        {
+            SCH_SHEET_PATH parentPath = path;
+            parentPath.pop_back();
+
+            existingSuffixes.insert( suffixField->GetText() );
+            existingSuffixes.insert( sheet->GetRefSuffix( parentPath ) );
+        }
+    }
 
     // Build symbol list for reannotation of duplicates
     SCH_REFERENCE_LIST existingRefs;
@@ -2440,7 +2537,7 @@ int SCH_EDITOR_CONTROL::Paste( const TOOL_EVENT& aEvent )
           {
               SCH_SHEET* firstSheet = static_cast<SCH_SHEET*>( firstItem );
               SCH_SHEET* secondSheet = static_cast<SCH_SHEET*>( secondItem );
-              return StrNumCmp( firstSheet->GetName(), secondSheet->GetName(), false ) < 0;
+              return StrNumCmp( firstSheet->GetName(), secondSheet->GetName(), CMP_T::CASE_SENSITIVE ) < 0;
           } );
 
 
@@ -2623,6 +2720,68 @@ int SCH_EDITOR_CONTROL::Paste( const TOOL_EVENT& aEvent )
 
             sheetsPasted = true;
 
+            // The non-const GetField would add a suffix field to every pasted sheet
+            if( std::as_const( *sheet ).GetField( FIELD_T::SHEET_REF_SUFFIX ) )
+            {
+                SCH_FIELD*     suffixField = sheet->GetField( FIELD_T::SHEET_REF_SUFFIX );
+                wxString       pastedSuffix = suffixField->GetText();
+                SCH_SHEET_LIST subtree( sheet );
+
+                // Suffixes concatenate, so the sheet or any child below it can compose to one in use
+                auto composedBelowPaste =
+                        [&]()
+                        {
+                            std::vector<wxString> composed;
+
+                            for( const SCH_SHEET_PATH& parentPath : sheetPathsForScreen )
+                            {
+                                for( const SCH_SHEET_PATH& subPath : subtree )
+                                {
+                                    SCH_SHEET_PATH fullPath = parentPath;
+
+                                    for( size_t ii = 0; ii < subPath.size(); ++ii )
+                                        fullPath.push_back( subPath.at( ii ) );
+
+                                    composed.push_back( fullPath.ComposeRefSuffix() );
+                                }
+                            }
+
+                            return composed;
+                        };
+
+                auto resolvesTaken =
+                        [&]( const wxString& aCandidate )
+                        {
+                            suffixField->SetText( aCandidate );
+
+                            for( const SCH_SHEET_PATH& parentPath : sheetPathsForScreen )
+                            {
+                                if( existingSuffixes.contains( sheet->GetRefSuffix( parentPath ) ) )
+                                    return true;
+                            }
+
+                            for( const wxString& composed : composedBelowPaste() )
+                            {
+                                if( composedSuffixes.contains( composed ) )
+                                    return true;
+                            }
+
+                            return false;
+                        };
+
+                if( m_frame->Schematic().Settings().m_IncrementPastedSuffix )
+                    pastedSuffix = SCH_SHEET::NextRefSuffix( pastedSuffix, existingSuffixes, resolvesTaken );
+
+                suffixField->SetText( pastedSuffix );
+                existingSuffixes.insert( pastedSuffix );
+
+                for( const SCH_SHEET_PATH& parentPath : sheetPathsForScreen )
+                    existingSuffixes.insert( sheet->GetRefSuffix( parentPath ) );
+
+                for( const wxString& composed : composedBelowPaste() )
+                    composedSuffixes.insert( composed );
+            }
+
             // Push it to the clipboard path while it still has its old KIID
             clipPath.push_back( sheet->m_Uuid );
 
@@ -2657,6 +2816,26 @@ int SCH_EDITOR_CONTROL::Paste( const TOOL_EVENT& aEvent )
             {
                 destItem->SetConnectivityDirty( true );
                 destItem->SetLastResolvedState( srcItem );
+            }
+
+            if( item->Type() == SCH_RULE_AREA_T )
+            {
+                SCH_RULE_AREA*                      ruleArea = static_cast<SCH_RULE_AREA*>( item );
+                std::vector<SCH_RULE_AREA_INSTANCE> clipInstances = ruleArea->GetInstances();
+
+                // Keep only instances of the sheets pasted onto, letting the copied sheet's override any
+                ruleArea->ClearInstances();
+
+                for( SCH_SHEET_PATH& sheetPath : sheetPathsForScreen )
+                {
+                    if( auto it = std::ranges::find( clipInstances, sheetPath.Path(), &SCH_RULE_AREA_INSTANCE::m_Path );
+                        it != clipInstances.end() )
+                    {
+                        ruleArea->AddInstance( *it );
+                    }
+
+                    updatePastedRuleArea( ruleArea, clipInstances, sheetPath, clipPath );
+                }
             }
 
             // Pasted named groups need a unique name, the multichannel tool matches groups by name.
@@ -2846,6 +3025,31 @@ int SCH_EDITOR_CONTROL::Paste( const TOOL_EVENT& aEvent )
 
     allScreens.PruneOrphanedSymbolInstances( m_frame->Prj().GetProjectName(), sheets );
     allScreens.PruneOrphanedSheetInstances( m_frame->Prj().GetProjectName(), sheets );
+
+    // Unique paste needs the full annotator to share reused-sheet bases while keeping composed refs whole.
+    // Keep-existing paste must retain its references even when they duplicate existing symbols.
+    // Annotation resets the tools, so run it before the move setup.
+    if( schematicSettings.m_AnnotateReusedSheetSuffixes && pasteMode == PASTE_MODE::UNIQUE_ANNOTATIONS
+        && !loadedItems.empty() )
+    {
+        SCH_GROUP* enteredGroup = selTool->GetEnteredGroup();
+
+        m_toolMgr->RunAction( ACTIONS::selectionClear );
+        m_toolMgr->RunAction<EDA_ITEMS*>( ACTIONS::selectItems, &loadedItems );
+        m_frame->AnnotateSymbols( &commit, ANNOTATE_SELECTION,
+                                  static_cast<ANNOTATE_ORDER_T>( schematicSettings.m_AnnotateSortOrder ),
+                                  static_cast<ANNOTATE_ALGO_T>( schematicSettings.m_AnnotateMethod ), true,
+                                  schematicSettings.m_AnnotateStartNum, false, false, false,
+                                  NULL_REPORTER::GetInstance() );
+
+        // The reset also leaves the entered group, which the pasted items must join
+        if( enteredGroup && !selTool->GetEnteredGroup() )
+        {
+            selTool->ClearSelection();
+            selTool->AddItemToSel( enteredGroup );
+            selTool->EnterGroup();
+        }
+    }
 
     // Now clear the previous selection, select the pasted items, and fire up the "move" tool.
     m_toolMgr->RunAction( ACTIONS::selectionClear );
@@ -3128,7 +3332,7 @@ int SCH_EDITOR_CONTROL::IncrementAnnotations( const TOOL_EVENT& aEvent )
                     fullRef << num;
 
                     commit.Modify( ref.GetSymbol(), sheet.LastScreen(), RECURSE_MODE::NO_RECURSE );
-                    ref.GetSymbol()->SetRef( &sheet, From_UTF8( fullRef.c_str() ) );
+                    ref.GetSymbol()->SetUserRef( sheet, From_UTF8( fullRef.c_str() ) );
                 }
             }
         }
@@ -3805,6 +4009,7 @@ void SCH_EDITOR_CONTROL::setTransitions()
     Go( &SCH_EDITOR_CONTROL::ToggleAnnotateAuto,      SCH_ACTIONS::toggleAnnotateAuto.MakeEvent() );
 
     Go( &SCH_EDITOR_CONTROL::ExportSymbolsToLibrary,  SCH_ACTIONS::exportSymbolsToLibrary.MakeEvent() );
+    Go( &SCH_EDITOR_CONTROL::ExportForOlderVersion, ACTIONS::exportForOlderVersion.MakeEvent() );
 
     Go( &SCH_EDITOR_CONTROL::PlaceLinkedDesignBlock,  SCH_ACTIONS::placeLinkedDesignBlock.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::SaveToLinkedDesignBlock, SCH_ACTIONS::saveToLinkedDesignBlock.MakeEvent() );

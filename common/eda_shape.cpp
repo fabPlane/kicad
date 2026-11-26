@@ -359,7 +359,9 @@ void EDA_SHAPE::Serialize( google::protobuf::Any &aContainer, const EDA_IU_SCALE
 {
     kiapi::common::types::GraphicShape shape;
     Serialize( shape, aScale );
-    aContainer.PackFrom( shape );
+
+    if( !aContainer.PackFrom( shape ) )
+        wxFAIL_MSG( wxT( "Failed to pack EDA_SHAPE" ) );
 }
 
 
@@ -1202,6 +1204,79 @@ void EDA_SHAPE::flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
         m_ellipse.Mirror( aCentre, aFlipDirection );
         recalcEllipseArcEndpoints();
         break;
+
+    default:
+        UNIMPLEMENTED_FOR( SHAPE_T_asString() );
+        break;
+    }
+
+    m_hatchingDirty = true;
+}
+
+
+void EDA_SHAPE::mirror( const SEG& aAxis )
+{
+    switch( m_shape )
+    {
+    case SHAPE_T::SEGMENT:
+    case SHAPE_T::CIRCLE:
+        m_start = aAxis.ReflectPoint( m_start );
+        m_end = aAxis.ReflectPoint( m_end );
+        break;
+
+    case SHAPE_T::RECTANGLE:
+        if( aAxis.A.x == aAxis.B.x || aAxis.A.y == aAxis.B.y )
+        {
+            // An axis-aligned rectangle stays a rectangle.
+            m_start = aAxis.ReflectPoint( m_start );
+            m_end = aAxis.ReflectPoint( m_end );
+        }
+        else
+        {
+            // Convert non-cardinally-mirrored rect to a polygon.
+            ROUNDRECT rr( SHAPE_RECT( GetStart(), GetRectangleWidth(), GetRectangleHeight() ), m_cornerRadius );
+            SetShape( SHAPE_T::POLY );
+            rr.TransformToPolygon( GetPolyShape(), getMaxError() );
+            GetPolyShape().Mirror( aAxis );
+        }
+
+        break;
+
+    case SHAPE_T::ARC:
+        SetArcGeometry( aAxis.ReflectPoint( m_start ), aAxis.ReflectPoint( GetArcMid() ),
+                        aAxis.ReflectPoint( m_end ) );
+        break;
+
+    case SHAPE_T::POLY:
+        GetPolyShape().Mirror( aAxis );
+        break;
+
+    case SHAPE_T::BEZIER:
+        m_start = aAxis.ReflectPoint( m_start );
+        m_end = aAxis.ReflectPoint( m_end );
+        m_bezierC1 = aAxis.ReflectPoint( m_bezierC1 );
+        m_bezierC2 = aAxis.ReflectPoint( m_bezierC2 );
+
+        RebuildBezierToSegmentsPointsList( getMaxError() );
+        break;
+
+    case SHAPE_T::ELLIPSE:
+    case SHAPE_T::ELLIPSE_ARC:
+    {
+        const EDA_ANGLE axisAngle = EDA_ANGLE( aAxis.B - aAxis.A );
+        const EDA_ANGLE oldStart = m_ellipse.StartAngle;
+
+        m_ellipse.Center = aAxis.ReflectPoint( m_ellipse.Center );
+        m_ellipse.Rotation = m_ellipse.Rotation.Reflect( axisAngle );
+        m_ellipse.Rotation.Normalize();
+
+        // The mirrored parameterisation runs the other way round.
+        m_ellipse.StartAngle = -m_ellipse.EndAngle;
+        m_ellipse.EndAngle = -oldStart;
+
+        recalcEllipseArcEndpoints();
+        break;
+    }
 
     default:
         UNIMPLEMENTED_FOR( SHAPE_T_asString() );
@@ -2961,14 +3036,10 @@ void EDA_SHAPE::TransformWithLineEndingsToPolygon( SHAPE_POLY_SET& aBuffer, int 
             if( GetShortenedBodyPolyPoints( chain, 0, pts, width ) )
             {
                 for( size_t jj = 1; jj < pts.size(); ++jj )
-                {
                     TransformOvalToPolygon( aBuffer, pts[jj - 1], pts[jj], width, aError, aErrorLoc );
-                }
 
                 if( chain.IsClosed() )
-                {
                     TransformOvalToPolygon( aBuffer, pts.back(), pts.front(), width, aError, aErrorLoc );
-                }
             }
 
             break;
@@ -3867,7 +3938,8 @@ bool EDA_SHAPE::operator==( const EDA_SHAPE& aOther ) const
     if( m_fill != aOther.m_fill )
         return false;
 
-    if( m_stroke.GetWidth() != aOther.m_stroke.GetWidth() )
+    // Effective width, so pcbnew's clamped -1 sentinel equals 0
+    if( GetWidth() != aOther.GetWidth() )
         return false;
 
     if( m_stroke.GetLineStyle() != aOther.m_stroke.GetLineStyle() )
@@ -4073,7 +4145,6 @@ void EDA_SHAPE::GetEndingTangents( EDA_ANGLE& aStartTangent, EDA_ANGLE& aEndTang
     }
 
     case SHAPE_T::ELLIPSE_ARC:
-    case SHAPE_T::ARC:
     {
         // Don't factor in the shortening.  If I have a cardinal-section arc, then I expect my arrowhead
         // to be cardinally rotated.  Having the arrow be on the tangent of the arc at the back of the
@@ -4091,6 +4162,28 @@ void EDA_SHAPE::GetEndingTangents( EDA_ANGLE& aStartTangent, EDA_ANGLE& aEndTang
         {
             aStartTangent = startAngle - ANGLE_90;
             aEndTangent = endAngle + ANGLE_90;
+        }
+
+        break;
+    }
+
+    case SHAPE_T::ARC:
+    {
+        // Don't factor in the shortening.  If I have a cardinal-section arc, then I expect my arrowhead
+        // to be cardinally rotated.  Having the arrow be on the tangent of the arc at the back of the
+        // arrowhead looks prettier, but can be misleading as to intent.
+
+        SHAPE_ARC arc( GetStart(), GetArcMid(), GetEnd(), 0 );
+
+        if( arc.GetCentralAngle() < ANGLE_0 )
+        {
+            aStartTangent = arc.GetStartAngle() + ANGLE_90;
+            aEndTangent = arc.GetEndAngle() - ANGLE_90;
+        }
+        else
+        {
+            aStartTangent = arc.GetStartAngle() - ANGLE_90;
+            aEndTangent = arc.GetEndAngle() + ANGLE_90;
         }
 
         break;
@@ -4771,11 +4864,13 @@ static struct EDA_SHAPE_DESC
 
         propMgr.AddProperty( new PROPERTY<EDA_SHAPE, int>( _HKI( "Line Width" ),
                     &EDA_SHAPE::SetWidth, &EDA_SHAPE::GetWidth, PROPERTY_DISPLAY::PT_SIZE ),
-                    shapeProps ).SetIsCopyable();
+                    shapeProps )
+                .SetIsCopyable();
 
         propMgr.AddProperty( new PROPERTY_ENUM<EDA_SHAPE, LINE_STYLE>( _HKI( "Line Style" ),
                     &EDA_SHAPE::SetLineStyle, &EDA_SHAPE::GetLineStyle ),
-                    shapeProps ).SetIsCopyable();
+                    shapeProps )
+                .SetIsCopyable();
 
         propMgr.AddProperty( new PROPERTY<EDA_SHAPE, COLOR4D>( _HKI( "Line Color" ),
                     &EDA_SHAPE::SetLineColor, &EDA_SHAPE::GetLineColor ),
@@ -4839,7 +4934,8 @@ static struct EDA_SHAPE_DESC
         propMgr.AddProperty( new PROPERTY_ENUM<EDA_SHAPE, UI_FILL_MODE>( _HKI( "Fill" ),
                     &EDA_SHAPE::SetFillModeProp, &EDA_SHAPE::GetFillModeProp ),
                     shapeProps )
-                .SetAvailableFunc( fillAvailable ).SetIsCopyable();
+                .SetAvailableFunc( fillAvailable )
+                .SetIsCopyable();
 
         propMgr.AddProperty( new PROPERTY<EDA_SHAPE, COLOR4D>( _HKI( "Fill Color" ),
                     &EDA_SHAPE::SetFillColor, &EDA_SHAPE::GetFillColor ),

@@ -83,7 +83,7 @@ void BOARD_DUMPER::DumpBoardToFile( BOARD& aBoard, const std::string& aName ) co
     path += ".kicad_pcb";
 
     BOOST_TEST_MESSAGE( "Dumping board file: " << path.string() );
-    ::KI_TEST::DumpBoardToFile( aBoard, path.string() );
+    ::KI_TEST::DumpBoardToFile( aBoard, path );
 }
 
 
@@ -232,10 +232,10 @@ void LoadAndTestBoardFile( const wxString aRelativePath, bool aRoundtrip,
     {
         SCOPED_TEMP_DIR tempDir( "kicad_qa_brd_roundtrip" );
 
-        const auto savePath = tempDir.Path() / ( aRelativePath.ToStdString() + ".kicad_pcb" );
-        KI_TEST::DumpBoardToFile( *board1, savePath.string() );
+        const auto savePath = tempDir.Path() / ToFsPath( aRelativePath + wxS( ".kicad_pcb" ) );
+        KI_TEST::DumpBoardToFile( *board1, savePath );
 
-        std::unique_ptr<BOARD> board2 = KI_TEST::ReadBoardFromFileOrStream( savePath.string() );
+        std::unique_ptr<BOARD> board2 = KI_TEST::ReadBoardFromFile( savePath );
 
         // Should load again
         BOOST_REQUIRE( board2 );
@@ -278,19 +278,18 @@ void LoadAndTestFootprintFile( const wxString& aLibRelativePath, const wxString&
          * written properly, we don't leave a library behind that will cause exceptions
          * when the cache is set up on future runs.
          */
+        wxString                    fileName = fp1->GetFPID().GetUniStringLibItemName() + ".kicad_mod";
         SCOPED_TEMP_DIR             tempDir( "kicad_qa_fp_roundtrip" );
         const std::filesystem::path libPath = tempDir.CreateChildDir( "fp_roundtrip.pretty" );
-        const wxString              fpFilename = fp1->GetFPID().GetLibItemName() + wxString( ".kicad_mod" );
+        const std::filesystem::path savePath = libPath / fileName.ToStdString();
 
-        BOOST_TEST_MESSAGE( "Resaving footprint: " << fpFilename << " in " << libPath );
+        BOOST_TEST_MESSAGE( "Resaving footprint: " << savePath.stem() << " in " << libPath );
 
-        KI_TEST::DumpFootprintToFile( *fp1, libPath );
+        KI_TEST::DumpFootprintToFile( *fp1, savePath );
 
-        const std::filesystem::path fp2Path = libPath / fpFilename.ToStdString();
+        BOOST_TEST_MESSAGE( "Re-reading footprint: " << savePath.stem() << " in " << libPath );
 
-        BOOST_TEST_MESSAGE( "Re-reading footprint: " << fpFilename << " in " << libPath );
-
-        std::unique_ptr<FOOTPRINT> fp2 = KI_TEST::ReadFootprintFromFile( fp2Path, aFpName );
+        std::unique_ptr<FOOTPRINT> fp2 = KI_TEST::ReadFootprintFromFile( savePath, aFpName );
 
         // Should load again
         BOOST_REQUIRE( fp2 );
@@ -515,11 +514,14 @@ void CheckFpPad( const PAD* expected, const PAD* pad )
                            pad->GetLocalSolderPasteMarginRatio().value_or( 0 ) );
         BOOST_CHECK_EQUAL( expected->GetLocalClearance().value_or( 0 ),
                            pad->GetLocalClearance().value_or( 0 ) );
-        CHECK_ENUM_CLASS_EQUAL( expected->GetLocalZoneConnection(), pad->GetLocalZoneConnection() );
-        BOOST_CHECK_EQUAL( expected->GetLocalThermalSpokeWidthOverride().value_or( 0 ),
-                           pad->GetLocalThermalSpokeWidthOverride().value_or( 0 ) );
-        BOOST_CHECK_EQUAL( expected->GetThermalSpokeAngle(), pad->GetThermalSpokeAngle() );
-        BOOST_CHECK_EQUAL( expected->GetThermalGap(), pad->GetThermalGap() );
+        CHECK_ENUM_CLASS_EQUAL( expected->GetLocalZoneConnection( PADSTACK::TEMP_ALL_LAYERS ),
+                                pad->GetLocalZoneConnection( PADSTACK::TEMP_ALL_LAYERS ) );
+        BOOST_CHECK_EQUAL( expected->GetLocalThermalSpokeWidthOverride( PADSTACK::TEMP_ALL_LAYERS ).value_or( 0 ),
+                           pad->GetLocalThermalSpokeWidthOverride( PADSTACK::TEMP_ALL_LAYERS ).value_or( 0 ) );
+        BOOST_CHECK_EQUAL( expected->GetThermalSpokeAngle( PADSTACK::TEMP_ALL_LAYERS ),
+                           pad->GetThermalSpokeAngle( PADSTACK::TEMP_ALL_LAYERS ) );
+        BOOST_CHECK_EQUAL( expected->GetThermalGap( PADSTACK::TEMP_ALL_LAYERS ),
+                           pad->GetThermalGap( PADSTACK::TEMP_ALL_LAYERS ) );
         BOOST_CHECK_EQUAL( expected->GetRoundRectRadiusRatio( PADSTACK::TEMP_ALL_LAYERS ),
                            pad->GetRoundRectRadiusRatio( PADSTACK::TEMP_ALL_LAYERS ) );
         BOOST_CHECK_EQUAL( expected->GetChamferRectRatio( PADSTACK::TEMP_ALL_LAYERS ),
@@ -620,8 +622,7 @@ void CheckFpShape( const PCB_SHAPE* expected, const PCB_SHAPE* shape )
         BOOST_CHECK_EQUAL( expected->GetLayerSet(), shape->GetLayerSet() );
 
         BOOST_CHECK_EQUAL( expected->GetStroke().GetWidth(), shape->GetStroke().GetWidth() );
-        CHECK_ENUM_CLASS_EQUAL( expected->GetStroke().GetLineStyle(),
-                                shape->GetStroke().GetLineStyle() );
+        CHECK_ENUM_CLASS_EQUAL( expected->GetStroke().GetLineStyle(), shape->GetStroke().GetLineStyle() );
         CHECK_ENUM_CLASS_EQUAL( expected->GetFillMode(), shape->GetFillMode() );
     }
 }
@@ -638,8 +639,7 @@ void CheckFpZone( const ZONE* expected, const ZONE* zone )
         BOOST_CHECK_EQUAL( expected->GetNetCode(), zone->GetNetCode() );
         BOOST_CHECK_EQUAL( expected->GetAssignedPriority(), zone->GetAssignedPriority() );
         CHECK_ENUM_CLASS_EQUAL( expected->GetPadConnection(), zone->GetPadConnection() );
-        BOOST_CHECK_EQUAL( expected->GetLocalClearance().value_or( 0 ),
-                           zone->GetLocalClearance().value_or( 0 ) );
+        BOOST_CHECK_EQUAL( expected->GetLocalClearance().value_or( 0 ), zone->GetLocalClearance().value_or( 0 ) );
         BOOST_CHECK_EQUAL( expected->GetMinThickness(), zone->GetMinThickness() );
 
         BOOST_CHECK_EQUAL( expected->GetLayerSet(), zone->GetLayerSet() );
@@ -654,8 +654,7 @@ void CheckFpZone( const ZONE* expected, const ZONE* zone )
         BOOST_CHECK_EQUAL( expected->GetHatchBorderAlgorithm(), zone->GetHatchBorderAlgorithm() );
         BOOST_CHECK_EQUAL( expected->GetHatchHoleMinArea(), zone->GetHatchHoleMinArea() );
         BOOST_CHECK_EQUAL( expected->GetThermalReliefGap(), zone->GetThermalReliefGap() );
-        BOOST_CHECK_EQUAL( expected->GetThermalReliefSpokeWidth(),
-                           zone->GetThermalReliefSpokeWidth() );
+        BOOST_CHECK_EQUAL( expected->GetThermalReliefSpokeWidth(), zone->GetThermalReliefSpokeWidth() );
         CHECK_ENUM_CLASS_EQUAL( expected->GetCornerSmoothingType(), zone->GetCornerSmoothingType() );
         BOOST_CHECK_EQUAL( expected->GetCornerRadius(), zone->GetCornerRadius() );
         CHECK_ENUM_CLASS_EQUAL( expected->GetIslandRemovalMode(), zone->GetIslandRemovalMode() );

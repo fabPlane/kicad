@@ -30,6 +30,7 @@
 #include <widgets/report_severity.h>
 
 #include <board_stackup_manager/board_stackup.h>
+#include <board_tables/generated_table_schema.h>
 #include <constraints/pcb_constraint.h>
 #include <drc/drc_item.h>
 #include <padstack.h>
@@ -68,10 +69,11 @@ types::PadType ToProtoEnum( PAD_ATTRIB aValue )
 {
     switch( aValue )
     {
-    case PAD_ATTRIB::PTH:   return types::PadType::PT_PTH;
-    case PAD_ATTRIB::SMD:   return types::PadType::PT_SMD;
-    case PAD_ATTRIB::CONN:  return types::PadType::PT_EDGE_CONNECTOR;
-    case PAD_ATTRIB::NPTH:  return types::PadType::PT_NPTH;
+    case PAD_ATTRIB::PTH:           return types::PadType::PT_PTH;
+    case PAD_ATTRIB::SMD:           return types::PadType::PT_SMD;
+    case PAD_ATTRIB::CONN:          return types::PadType::PT_EDGE_CONNECTOR;
+    case PAD_ATTRIB::NPTH:          return types::PadType::PT_NPTH;
+    case PAD_ATTRIB::NON_COMPONENT: return types::PadType::PT_NON_COMPONENT;
 
     default:
         wxCHECK_MSG( false, types::PadType::PT_UNKNOWN,
@@ -90,6 +92,7 @@ PAD_ATTRIB FromProtoEnum( types::PadType aValue )
     case types::PadType::PT_SMD:            return PAD_ATTRIB::SMD;
     case types::PadType::PT_EDGE_CONNECTOR: return PAD_ATTRIB::CONN;
     case types::PadType::PT_NPTH:           return PAD_ATTRIB::NPTH;
+    case types::PadType::PT_NON_COMPONENT:  return PAD_ATTRIB::NON_COMPONENT;
 
     default:
         wxCHECK_MSG( false,  PAD_ATTRIB::PTH,
@@ -333,7 +336,7 @@ CustomRuleConstraintType ToProtoEnum( DRC_CONSTRAINT_T aValue )
     case COURTYARD_CLEARANCE_CONSTRAINT:    return CustomRuleConstraintType::CRCT_COURTYARD_CLEARANCE;
     case SILK_CLEARANCE_CONSTRAINT:         return CustomRuleConstraintType::CRCT_SILK_CLEARANCE;
     case TEXT_HEIGHT_CONSTRAINT:            return CustomRuleConstraintType::CRCT_TEXT_HEIGHT;
-    case TEXT_THICKNESS_CONSTRAINT:         return CustomRuleConstraintType::CRCT_TEXT_THICKNESS;
+    case LINE_WIDTH_CONSTRAINT:             return CustomRuleConstraintType::CRCT_LINE_WIDTH;
     case TRACK_WIDTH_CONSTRAINT:            return CustomRuleConstraintType::CRCT_TRACK_WIDTH;
     case TRACK_SEGMENT_LENGTH_CONSTRAINT:   return CustomRuleConstraintType::CRCT_TRACK_SEGMENT_LENGTH;
     case ANNULAR_WIDTH_CONSTRAINT:          return CustomRuleConstraintType::CRCT_ANNULAR_WIDTH;
@@ -388,7 +391,7 @@ DRC_CONSTRAINT_T FromProtoEnum( CustomRuleConstraintType aValue )
     case CustomRuleConstraintType::CRCT_COURTYARD_CLEARANCE:    return COURTYARD_CLEARANCE_CONSTRAINT;
     case CustomRuleConstraintType::CRCT_SILK_CLEARANCE:         return SILK_CLEARANCE_CONSTRAINT;
     case CustomRuleConstraintType::CRCT_TEXT_HEIGHT:            return TEXT_HEIGHT_CONSTRAINT;
-    case CustomRuleConstraintType::CRCT_TEXT_THICKNESS:         return TEXT_THICKNESS_CONSTRAINT;
+    case CustomRuleConstraintType::CRCT_LINE_WIDTH:             return LINE_WIDTH_CONSTRAINT;
     case CustomRuleConstraintType::CRCT_TRACK_WIDTH:            return TRACK_WIDTH_CONSTRAINT;
     case CustomRuleConstraintType::CRCT_TRACK_SEGMENT_LENGTH:   return TRACK_SEGMENT_LENGTH_CONSTRAINT;
     case CustomRuleConstraintType::CRCT_ANNULAR_WIDTH:          return ANNULAR_WIDTH_CONSTRAINT;
@@ -1830,6 +1833,40 @@ JOB_EXPORT_PCB_DRILL::MAP_FORMAT FromProtoEnum( DrillMapFormat aValue )
 
 
 template<>
+kiapi::common::types::Units ToProtoEnum( GENERATED_TABLE_UNITS aValue )
+{
+    switch( aValue )
+    {
+    case GENERATED_TABLE_UNITS::MM:   return kiapi::common::types::Units::U_MM;
+    case GENERATED_TABLE_UNITS::INCH: return kiapi::common::types::Units::U_INCH;
+    case GENERATED_TABLE_UNITS::MILS: return kiapi::common::types::Units::U_MILS;
+    default:
+        wxCHECK_MSG( false, kiapi::common::types::Units::U_UNKNOWN,
+                     "Unhandled case in ToProtoEnum<GENERATED_TABLE_UNITS>" );
+    }
+}
+
+
+template<>
+GENERATED_TABLE_UNITS FromProtoEnum( kiapi::common::types::Units aValue )
+{
+    // A table has no rendering for metres or tenths, so they read back as millimetres rather
+    // than as a broken table
+    switch( aValue )
+    {
+    case kiapi::common::types::Units::U_INCH: return GENERATED_TABLE_UNITS::INCH;
+    case kiapi::common::types::Units::U_MILS: return GENERATED_TABLE_UNITS::MILS;
+    case kiapi::common::types::Units::U_MM:
+    case kiapi::common::types::Units::U_UNKNOWN:
+    case kiapi::common::types::Units::U_METERS:
+    case kiapi::common::types::Units::U_TENTHS:
+    default:
+        return GENERATED_TABLE_UNITS::MM;
+    }
+}
+
+
+template<>
 kiapi::common::types::Units ToProtoEnum( JOB_EXPORT_PCB_DRILL::DRILL_UNITS aValue )
 {
     switch( aValue )
@@ -2368,6 +2405,7 @@ DrcErrorType ToProtoEnum( PCB_DRC_CODE aValue )
     case DRCE_MICROVIA_STACK_DEPTH:          return DrcErrorType::DRCET_MICROVIA_STACK_DEPTH;
     case DRCE_HOLE_ASPECT_RATIO:             return DrcErrorType::DRCET_HOLE_ASPECT_RATIO;
     case DRCE_MICROVIA_CROSSES_CORE:         return DrcErrorType::DRCET_MICROVIA_CROSSES_CORE;
+    case DRCE_MICROVIA_SPANS_DIELECTRICS: return DrcErrorType::DRCET_MICROVIA_SPANS_DIELECTRICS;
     case DRCE_COPPER_OUTSIDE_BOARD:          return DrcErrorType::DRCET_COPPER_OUTSIDE_BOARD;
     case DRCE_OVERLAPPING_FOOTPRINTS:        return DrcErrorType::DRCET_OVERLAPPING_FOOTPRINTS;
     case DRCE_MISSING_COURTYARD:             return DrcErrorType::DRCET_MISSING_COURTYARD;
@@ -2395,7 +2433,7 @@ DrcErrorType ToProtoEnum( PCB_DRC_CODE aValue )
     case DRCE_SILK_EDGE_CLEARANCE:           return DrcErrorType::DRCET_SILK_EDGE_CLEARANCE;
     case DRCE_SOLDERMASK_BRIDGE:             return DrcErrorType::DRCET_SOLDERMASK_BRIDGE;
     case DRCE_TEXT_HEIGHT:                   return DrcErrorType::DRCET_TEXT_HEIGHT;
-    case DRCE_TEXT_THICKNESS:                return DrcErrorType::DRCET_TEXT_THICKNESS;
+    case DRCE_LINE_WIDTH:                    return DrcErrorType::DRCET_LINE_WIDTH;
     case DRCE_LENGTH_OUT_OF_RANGE:           return DrcErrorType::DRCET_LENGTH_OUT_OF_RANGE;
     case DRCE_SKEW_OUT_OF_RANGE:             return DrcErrorType::DRCET_SKEW_OUT_OF_RANGE;
     case DRCE_NET_CHAIN_STUB_TOO_LONG:       return DrcErrorType::DRCET_NET_CHAIN_STUB_TOO_LONG;
@@ -2457,6 +2495,7 @@ PCB_DRC_CODE FromProtoEnum( DrcErrorType aValue )
     case DrcErrorType::DRCET_MICROVIA_STACK_DEPTH:                return DRCE_MICROVIA_STACK_DEPTH;
     case DrcErrorType::DRCET_HOLE_ASPECT_RATIO:                   return DRCE_HOLE_ASPECT_RATIO;
     case DrcErrorType::DRCET_MICROVIA_CROSSES_CORE:               return DRCE_MICROVIA_CROSSES_CORE;
+    case DrcErrorType::DRCET_MICROVIA_SPANS_DIELECTRICS:          return DRCE_MICROVIA_SPANS_DIELECTRICS;
     case DrcErrorType::DRCET_COPPER_OUTSIDE_BOARD:                return DRCE_COPPER_OUTSIDE_BOARD;
     case DrcErrorType::DRCET_OVERLAPPING_FOOTPRINTS:              return DRCE_OVERLAPPING_FOOTPRINTS;
     case DrcErrorType::DRCET_MISSING_COURTYARD:                   return DRCE_MISSING_COURTYARD;
@@ -2484,7 +2523,7 @@ PCB_DRC_CODE FromProtoEnum( DrcErrorType aValue )
     case DrcErrorType::DRCET_SILK_EDGE_CLEARANCE:                 return DRCE_SILK_EDGE_CLEARANCE;
     case DrcErrorType::DRCET_SOLDERMASK_BRIDGE:                   return DRCE_SOLDERMASK_BRIDGE;
     case DrcErrorType::DRCET_TEXT_HEIGHT:                         return DRCE_TEXT_HEIGHT;
-    case DrcErrorType::DRCET_TEXT_THICKNESS:                      return DRCE_TEXT_THICKNESS;
+    case DrcErrorType::DRCET_LINE_WIDTH:                          return DRCE_LINE_WIDTH;
     case DrcErrorType::DRCET_LENGTH_OUT_OF_RANGE:                 return DRCE_LENGTH_OUT_OF_RANGE;
     case DrcErrorType::DRCET_NET_CHAIN_STUB_TOO_LONG:             return DRCE_NET_CHAIN_STUB_TOO_LONG;
     case DrcErrorType::DRCET_NET_CHAIN_RETURN_PATH_BREAK:         return DRCE_NET_CHAIN_RETURN_PATH_BREAK;
@@ -2645,9 +2684,6 @@ LENGTH_TUNING_MODE FromProtoEnum( types::TuningPatternMode aValue )
     default:
     case types::TuningPatternMode::TPM_UNKNOWN:        return LENGTH_TUNING_MODE::SINGLE;
     }
-
-    wxCHECK_MSG( false, LENGTH_TUNING_MODE::SINGLE,
-                 "Unhandled case in FromProtoEnum<types::TuningPatternMode>" );
 }
 
 
@@ -2680,9 +2716,6 @@ PNS::MEANDER_SIDE FromProtoEnum( types::TuningPatternMeanderSide aValue )
     default:
     case types::TuningPatternMeanderSide::TPMS_UNKNOWN: return PNS::MEANDER_SIDE_DEFAULT;
     }
-
-    wxCHECK_MSG( false, PNS::MEANDER_SIDE_DEFAULT,
-                 "Unhandled case in FromProtoEnum<types::TuningPatternMeanderSide>" );
 }
 
 template<>
@@ -2711,9 +2744,6 @@ PNS::MEANDER_STYLE FromProtoEnum( types::TuningPatternCornerStyle aValue )
     default:
     case types::TuningPatternCornerStyle::TPCS_UNKNOWN:   return PNS::MEANDER_STYLE_CHAMFER;
     }
-
-    wxCHECK_MSG( false, PNS::MEANDER_STYLE_CHAMFER,
-                 "Unhandled case in FromProtoEnum<types::TuningPatternCornerStyle>" );
 }
 
 template<>
@@ -2744,9 +2774,6 @@ PNS::MEANDER_PLACER_BASE::TUNING_STATUS FromProtoEnum( types::TuningPatternStatu
     default:
     case types::TuningPatternStatus::TPS_UNKNOWN:   return PNS::MEANDER_PLACER_BASE::TUNED;
     }
-
-    wxCHECK_MSG( false, PNS::MEANDER_PLACER_BASE::TUNED,
-                 "Unhandled case in FromProtoEnum<types::TuningPatternStatus>" );
 }
 
 
@@ -2778,9 +2805,6 @@ PCB_VIA_STITCH_LAYOUT FromProtoEnum( types::ViaStitchLayout aValue )
     default:
     case types::ViaStitchLayout::VSL_UNKNOWN:   return PCB_VIA_STITCH_LAYOUT::PLAIN;
     }
-
-    wxCHECK_MSG( false, PCB_VIA_STITCH_LAYOUT::PLAIN,
-                 "Unhandled case in FromProtoEnum<types::ViaStitchLayout>" );
 }
 
 
@@ -2810,9 +2834,6 @@ PCB_VIA_STITCH_MODE FromProtoEnum( types::ViaStitchMode aValue )
     default:
     case types::ViaStitchMode::VSM_UNKNOWN: return PCB_VIA_STITCH_MODE::STITCH;
     }
-
-    wxCHECK_MSG( false, PCB_VIA_STITCH_MODE::STITCH,
-                 "Unhandled case in FromProtoEnum<types::ViaStitchMode>" );
 }
 
 
@@ -2842,9 +2863,6 @@ VIA_STACK_STYLE FromProtoEnum( types::ViaStackStyle aValue )
     default:
     case types::ViaStackStyle::VSK_UNKNOWN:   return VIA_STACK_STYLE::STACKED;
     }
-
-    wxCHECK_MSG( false, VIA_STACK_STYLE::STACKED,
-                 "Unhandled case in FromProtoEnum<types::ViaStackStyle>" );
 }
 
 

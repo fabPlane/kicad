@@ -27,10 +27,6 @@
 #include <thread>
 #include <vector>
 
-#ifdef __unix__
-#include <unistd.h>
-#endif
-
 #include <qa_utils/file_utils.h>
 #include <qa_utils/wx_utils/unit_test_utils.h>
 #include <pcbnew_utils/board_test_utils.h>
@@ -42,6 +38,7 @@
 #include <libraries/library_table.h>
 #include <netinfo.h>
 #include <pad.h>
+#include <pcb_io/pcb_io_mgr.h>
 #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
 
 
@@ -132,18 +129,9 @@ BOOST_AUTO_TEST_CASE( IsFootprintLibWritableHandlesFailedLoad )
  * plugin's IO_ERROR and return SAVE_SKIPPED, so the editor reported success and lost the
  * user's edits.  SaveFootprint() must now let the IO_ERROR propagate.
  */
-BOOST_AUTO_TEST_CASE( SaveFootprintReadOnlyFilePropagatesError )
+BOOST_AUTO_TEST_CASE( SaveFootprintReadOnlyFilePropagatesError,
+                      *boost::unit_test::precondition( KI_TEST::WriteBitsBind ) )
 {
-#ifdef __unix__
-    // The superuser ignores mode bits, so a read-only file stays writable and this path
-    // cannot be exercised.
-    if( ::geteuid() == 0 )
-    {
-        BOOST_TEST_MESSAGE( "Skipping read-only footprint save test when running as root." );
-        return;
-    }
-#endif
-
     // FootprintSave validates the whole containing directory as a library, so it needs a
     // private directory no unrelated .kicad_mod can pollute.
     KI_TEST::SCOPED_TEMP_DIR    tmpLib( "kicad_qa_adapter_save_readonly" );
@@ -571,5 +559,39 @@ BOOST_AUTO_TEST_CASE( RemovedLibraryStopsServingPreloadedFootprints )
     BOOST_CHECK_MESSAGE( !fp, "a library removed from the table must not keep serving preloaded "
                               "footprints" );
 }
+
+/*
+ * Copying a footprint renewed the uuid of every user field, so each save of a footprint with a field
+ * such as Lifecycle rewrote that line and two edits of it always collided in git.
+ */
+BOOST_AUTO_TEST_CASE( SaveKeepsUserFieldUuids )
+{
+    KI_TEST::SCOPED_TEMP_DIR tmpLib( "kicad_qa_user_field_uuid" );
+
+    wxFileName source( getResistorLibPath(), wxS( "R_0402_1005Metric.kicad_mod" ) );
+    source.RemoveLastDir();
+    source.AppendDir( wxS( "Lifecycle_SMD.pretty" ) );
+
+    const std::filesystem::path libPath = tmpLib.CreateChildDir( "Lifecycle_SMD.pretty" );
+    std::filesystem::copy_file( source.GetFullPath().ToStdString(), libPath / "R_0402_1005Metric.kicad_mod" );
+
+    IO_RELEASER<PCB_IO> plugin( PCB_IO_MGR::FindPlugin( PCB_IO_MGR::KICAD_SEXP ) );
+    const wxString      lib = KI_TEST::ToWxPath( libPath );
+
+    std::unique_ptr<FOOTPRINT> footprint( plugin->FootprintLoad( lib, wxS( "R_0402_1005Metric" ), true ) );
+    BOOST_REQUIRE( footprint );
+
+    const PCB_FIELD* lifecycle = footprint->GetField( wxS( "Lifecycle" ) );
+    BOOST_REQUIRE( lifecycle );
+
+    const KIID uuid = lifecycle->m_Uuid;
+    plugin->FootprintSave( lib, footprint.get() );
+
+    IO_RELEASER<PCB_IO>        reader( PCB_IO_MGR::FindPlugin( PCB_IO_MGR::KICAD_SEXP ) );
+    std::unique_ptr<FOOTPRINT> saved( reader->FootprintLoad( lib, wxS( "R_0402_1005Metric" ), true ) );
+    BOOST_REQUIRE( saved && saved->GetField( wxS( "Lifecycle" ) ) );
+    BOOST_CHECK_EQUAL( saved->GetField( wxS( "Lifecycle" ) )->m_Uuid.AsString(), uuid.AsString() );
+}
+
 
 BOOST_AUTO_TEST_SUITE_END()

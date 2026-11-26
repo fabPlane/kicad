@@ -25,6 +25,7 @@
 #include <core/mirror.h>
 #include <eda_item.h>
 #include <geometry/approximation.h>
+#include <geometry/seg.h>
 #include <layer_ids.h>
 #include <properties/property.h>
 #include <lseq.h>
@@ -49,6 +50,7 @@ class FOOTPRINT;
 namespace KIGFX
 {
     class RENDER_SETTINGS;
+    class VIEW;
 };
 
 namespace KIFONT
@@ -75,6 +77,18 @@ enum ZONE_LAYER_OVERRIDE
     ZLO_FORCE_FLASHED,
     ZLO_FORCE_NO_ZONE_CONNECTION
 };
+
+/**
+ * @return the axis an axis-aligned mirror about aCentre in aFlipDirection uses, as the infinite
+ *         line through the two points of the returned segment.
+ */
+inline SEG MIRROR_AXIS( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
+{
+    if( aFlipDirection == FLIP_DIRECTION::LEFT_RIGHT )
+        return SEG( aCentre, aCentre + VECTOR2I( 0, 1 ) );
+
+    return SEG( aCentre, aCentre + VECTOR2I( 1, 0 ) );
+}
 
 /**
  * A base class for any item which can be embedded within the #BOARD container class, and
@@ -395,6 +409,17 @@ public:
     virtual BOARD_ITEM* Duplicate( bool addToParentGroup, BOARD_COMMIT* aCommit = nullptr ) const;
 
     /**
+     * Give a copy of this item this item's group, or no group.
+     *
+     * A copy carries this item's group pointer without being a member of that group.
+     *
+     * @param aDupe is the copy.
+     * @param addToParentGroup adds the copy to this item's group.  If true, aCommit must be provided.
+     * @param aCommit is the commit object for undo/redo.
+     */
+    void SetDuplicateGroup( BOARD_ITEM* aDupe, bool addToParentGroup, BOARD_COMMIT* aCommit ) const;
+
+    /**
      * Swap data between \a aItem and \a aImage.
      *
      * \a aItem and \a aImage should have the same type.
@@ -491,6 +516,14 @@ public:
      * @param aFlipDirection mirror across X axis instead of Y (the default).
      */
     virtual void Mirror( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection );
+
+    /**
+     * Mirror this object about an arbitrary axis, without changing its layer or side.
+     *
+     * @param aAxis defines the axis. The item is reflected over the (infinite) line
+     *              through the two axis points.
+     */
+    virtual void Mirror( const SEG& aAxis );
 
     /**
      * Perform any normalization required after a user rotate and/or flip.
@@ -595,6 +628,9 @@ protected:
 
     /// Area of \a aPolySet with every contour closed first, holes subtracted.
     static double polygonArea( SHAPE_POLY_SET& aPolySet );
+
+    /// Enabled board layers that \a aView shows, for LOD checks on views that hide layers on their own.
+    LSET viewVisibleLayers( const KIGFX::VIEW* aView ) const;
 
 protected:
     PCB_LAYER_ID    m_layer;

@@ -22,6 +22,8 @@
 
 #include <git/kicad_git_common.h>
 #include <git/kigit_known_hosts.h>
+#include <git/kigit_remote_url.h>
+#include <git/kigit_transport.h>
 #include <import_export.h>
 
 #include <optional>
@@ -30,22 +32,13 @@
 #include <wx/string.h>
 
 
-/// What the credential callback handed out during one operation, kept to explain a rejection.
-struct KIGIT_AUTH_ATTEMPT
-{
-    KIGIT_COMMON::GIT_CONN_TYPE connType = KIGIT_COMMON::GIT_CONN_TYPE::GIT_CONN_LOCAL;
-    std::vector<wxString>       keysTried;          ///< Key files offered, in order.
-    bool                        agentTried = false; ///< The SSH agent was offered before any key file.
-    bool                        passphraseGiven = false; ///< A passphrase went with the last key file offered.
-};
-
-
 /// Why a transfer failed, in terms of what the user can do about it.
 enum class KIGIT_FAILURE
 {
     AUTH_SSH_KEY_REJECTED,
     AUTH_NO_SSH_KEY,
     AUTH_HTTPS_REJECTED,
+    AUTH_HTTPS_NEEDED, ///< The server asked for a login before any password was offered.
     KEY_LOAD_FAILED,
     HOST_KEY_UNKNOWN,
     HOST_KEY_CHANGED,
@@ -105,6 +98,8 @@ struct KIGIT_OWNERSHIP_REFUSAL
     wxString trustCommand; ///< Kept apart from the summary so it can be shown in full and copied. Empty when
                            ///< no safe command exists for the folder, such as a name the shell could act on or
                            ///< one git reads as a wildcard.
+    bool     coversHome = false; ///< The repository's folder is the home folder or above it. It is not the
+                                 ///< project's own, and trusting it would take in every project below it.
 };
 
 
@@ -124,23 +119,14 @@ APIEXPORT KIGIT_FAILURE_REPORT DescribeGitFailure( const KIGIT_ERROR_INFO& aErro
 /// The summary for an operation that failed without saying why, naming the server it was talking to.
 APIEXPORT wxString UnexplainedFailure( KIGIT_OPERATION aOperation, const wxString& aUrl );
 
+/// True when @p aHost is a literal address in a private or link-local range, or a .local mDNS name.
+APIEXPORT bool IsLocalNetworkHost( const wxString& aHost );
+
 /// True for the failures another login, key or passphrase can fix, which the credential prompt answers.
 APIEXPORT bool IsCredentialFailure( KIGIT_FAILURE aKind );
 
 /// The longest server text a failure keeps. A refusal's explanation comes last, after any transfer progress.
 constexpr size_t MAX_SERVER_TEXT = 4096;
-
-/// Bytes a server sent, as UTF-8 or, when they are not valid UTF-8, one character for each byte.
-APIEXPORT wxString DecodeServerText( const char* aData, size_t aLength );
-
-/// Remove the user and password from every URL quoted in a message, since the remote's can carry a password.
-APIEXPORT wxString StripEmbeddedUserinfo( const wxString& aText );
-
-/**
- * Text a server sent, made safe to show: no terminal escapes, control or bidi characters, and no URL userinfo.
- * Line breaks are kept.
- */
-APIEXPORT wxString PrintableServerText( const wxString& aText );
 
 /**
  * The message for a repository git refuses to open because another user owns it.

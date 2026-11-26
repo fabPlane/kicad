@@ -290,7 +290,7 @@ void CVPCB_MAINFRAME::setupUIConditions()
     ACTION_MANAGER*   mgr = m_toolManager->GetActionManager();
     EDITOR_CONDITIONS cond( this );
 
-    wxASSERT( mgr );
+    wxCHECK2( mgr, return );
 
 #define ENABLE( x ) ACTION_CONDITIONS().Enable( x )
 #define CHECK( x )  ACTION_CONDITIONS().Check( x )
@@ -391,7 +391,7 @@ bool CVPCB_MAINFRAME::canCloseWindow( wxCloseEvent& aEvent )
     if( m_modified )
     {
         // Shutdown blocks must be determined and vetoed as early as possible
-        if( KIPLATFORM::APP::SupportsShutdownBlockReason() && aEvent.GetId() == wxEVT_QUERY_END_SESSION )
+        if( isBlockableSessionEnd() )
             return false;
 
         if( !HandleUnsavedChanges( this, _( "Symbol to Footprint links have been modified. Save changes?" ),
@@ -950,8 +950,9 @@ void CVPCB_MAINFRAME::SendComponentSelectionToSch( bool aClearSelectionOnly )
     else
     {
         std::string payload;
-        kiapi::common::PackKiwayApiMessage( sync, payload );
-        Kiway().ExpressMail( FRAME_SCH, MAIL_SELECTION, payload, this );
+
+        if( kiapi::common::PackKiwayApiMessage( sync, payload ) )
+            Kiway().ExpressMail( FRAME_SCH, MAIL_SELECTION, payload, this );
     }
 }
 
@@ -1015,7 +1016,7 @@ void CVPCB_MAINFRAME::BuildLibrariesList()
     {
         bool operator()( const wxString& lhs, const wxString& rhs ) const
         {
-            return StrNumCmp( lhs, rhs, true ) < 0;
+            return StrNumCmp( lhs, rhs, CMP_T::IGNORE_CASE ) < 0;
         }
     };
 

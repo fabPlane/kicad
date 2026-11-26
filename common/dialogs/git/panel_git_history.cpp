@@ -694,9 +694,9 @@ void PANEL_GIT_HISTORY::showFileDiff( const wxString& aPath )
         return;
     }
 
-    wxString beforeLabel =
-            m_detailParent.IsEmpty() ? _( "BASE (nothing)" ) : wxString::Format( _( "BASE (%s)" ), m_detailParent );
-    wxString afterLabel = wxString::Format( _( "WORKING (%s)" ), m_detailHash );
+    wxString beforeLabel = m_detailParent.IsEmpty() ? _( "PARENT (none)" )
+                                                    : wxString::Format( _( "PARENT (%s)" ), m_detailParent );
+    wxString afterLabel = wxString::Format( _( "COMMIT (%s)" ), m_detailHash );
 
     m_fileDiff->ShowFile(
             m_frame->Prj().GetGitCommon(),
@@ -1055,7 +1055,7 @@ void PANEL_GIT_HISTORY::restoreVersion( const wxString& aCommitHash, const KIGIT
     KIGIT_ERROR_MESSAGE error;
 
     {
-        std::unique_lock<std::mutex> lock = KIGIT::TryLockAction( *common, this );
+        KIGIT::ACTION_LOCK lock = KIGIT::TryLockAction( *common, this );
 
         if( !lock.owns_lock() )
             return;

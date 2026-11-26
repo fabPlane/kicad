@@ -341,7 +341,7 @@ void SCH_EDIT_FRAME::SendSelectItemsToPcb( const std::vector<EDA_ITEM*>& aItems,
         {
             SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
             kiapi::common::commands::SelectionSpec* spec = sync.add_items();
-            spec->mutable_footprint()->set_reference( symbol->GetField( FIELD_T::REFERENCE )->GetText().ToUTF8() );
+            spec->mutable_footprint()->set_reference( symbol->GetCurrentSheetRef().ToUTF8() );
             break;
         }
 
@@ -395,8 +395,9 @@ void SCH_EDIT_FRAME::SendSelectItemsToPcb( const std::vector<EDA_ITEM*>& aItems,
     else
     {
         std::string payload;
-        kiapi::common::PackKiwayApiMessage( sync, payload );
-        Kiway().ExpressMail( FRAME_PCB_EDITOR, MAIL_SELECTION, payload, this );
+
+        if( kiapi::common::PackKiwayApiMessage( sync, payload ) )
+            Kiway().ExpressMail( FRAME_PCB_EDITOR, MAIL_SELECTION, payload, this );
     }
 }
 
@@ -410,8 +411,9 @@ static void sendHighlightNets( SCH_EDIT_FRAME* aFrame, const kiapi::common::comm
     else
     {
         std::string payload;
-        kiapi::common::PackKiwayApiMessage( aMessage, payload );
-        aFrame->Kiway().ExpressMail( FRAME_PCB_EDITOR, MAIL_CROSS_PROBE, payload, aFrame );
+
+        if( kiapi::common::PackKiwayApiMessage( aMessage, payload ) )
+            aFrame->Kiway().ExpressMail( FRAME_PCB_EDITOR, MAIL_CROSS_PROBE, payload, aFrame );
     }
 }
 
@@ -517,6 +519,12 @@ void SCH_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
 
         RefreshConnectivity( true );
         payload = formatter.GetString();
+        break;
+    }
+
+    case MAIL_SCH_GET_REF_SUFFIXES:
+    {
+        payload = Schematic().FormatRefSuffixes();
         break;
     }
 
@@ -668,26 +676,21 @@ void SCH_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
                 }
             }
 
-            if( !mine )
+            // A new top-level sheet is not one of this schematic's files yet
+            if( !TopLevelSheetsChangedOnDisk() && !mine )
                 break;
         }
 
         // Neither choice is safe without asking: reloading discards the unsaved edits, keeping
         // them means the next save overwrites what arrived.
-        if( IsContentModified() )
+        if( !ConfirmReloadFromDisk( _( "The schematic changed on disk while you were editing it.\n\n"
+                                       "Reloading loses your unsaved edits. Keeping them means your "
+                                       "next save overwrites the changes that just arrived. To get those "
+                                       "back later, use Discard Changes on the file in the Version Control "
+                                       "panel, which drops your edits to it." ),
+                                    _( "Schematic Changed on Disk" ) ) )
         {
-            wxMessageDialog dlg( this,
-                                 _( "The schematic changed on disk while you were editing it.\n\n"
-                                    "Reloading loses your unsaved edits. Keeping them means your "
-                                    "next save overwrites the changes that just arrived. To get those "
-                                    "back later, use Discard Changes on the file in the Version Control "
-                                    "panel, which drops your edits to it." ),
-                                 _( "Schematic Changed on Disk" ),
-                                 wxYES_NO | wxNO_DEFAULT | wxICON_WARNING | wxCENTER );
-            dlg.SetYesNoLabels( _( "&Reload" ), _( "&Keep My Edits" ) );
-
-            if( dlg.ShowModal() != wxID_YES )
-                break;
+            break;
         }
 
         ReloadFromDisk();
@@ -699,14 +702,7 @@ void SCH_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
         break;
 
     case MAIL_SCH_PROJECT_SETTINGS_CHANGED:
-        // Net colors and widths resolve through per-net caches, and text variables at draw time,
-        // so both need a flush and a repaint.
-        Prj().GetProjectFile().NetSettings()->ClearAllCaches();
-        Prj().IncrementNetclassesTicker();
-        Prj().IncrementTextVarsTicker();
-
-        GetCanvas()->GetView()->UpdateAllItems( KIGFX::ALL );
-        GetCanvas()->Refresh();
+        ReloadProjectFileSettings();
         break;
 
     case MAIL_RELOAD_LIB:

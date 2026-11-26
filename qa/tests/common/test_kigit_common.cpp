@@ -23,13 +23,17 @@
 #include <dialogs/git/git_status_entries.h>
 #include <dialogs/git/git_transfer.h>
 #include <dialogs/git/git_ui_utils.h>
+#include <git/git_config_handler.h>
 #include <git/kicad_git_common.h>
 #include <git/kicad_git_memory.h>
+#include <git/kigit_ssh_keys.h>
 #include <git/project_git_utils.h>
 #include <git/git_branch_handler.h>
 #include <git/git_push_handler.h>
 #include <qa_utils/file_utils.h>
 #include <qa_utils/git_test_fixture.h>
+#include <pgm_base.h>
+#include <settings/common_settings.h>
 
 #include <git2.h>
 #include <git2/sys/repository.h>
@@ -203,6 +207,50 @@ struct UI_CALLBACK_CAPTURE
 };
 
 } // namespace
+
+
+static const char* HOST_GIT_CONFIG = "[user]\n\tname = Host User\n\temail = host@example.com\n";
+
+
+// Points libgit2's global config at a temp folder and sets the author preference, then restores both
+struct AUTHOR_SOURCES_GUARD
+{
+    AUTHOR_SOURCES_GUARD( const wxString& aGlobalDir, const char* aGlobalConfig )
+    {
+        COMMON_SETTINGS* settings = Pgm().GetCommonSettings();
+        BOOST_REQUIRE( settings );
+        m_settings = settings;
+        m_savedPrefs = settings->m_Git;
+
+        BOOST_REQUIRE( wxFileName::Mkdir( aGlobalDir, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL ) );
+
+        if( aGlobalConfig )
+        {
+            std::ofstream out( ( aGlobalDir + wxS( "/.gitconfig" ) ).ToStdString() );
+            out << aGlobalConfig;
+        }
+
+        git_buf previousPath = GIT_BUF_INIT;
+        BOOST_REQUIRE_EQUAL( git_libgit2_opts( GIT_OPT_GET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL, &previousPath ),
+                             GIT_OK );
+        m_previousPath = previousPath.ptr ? previousPath.ptr : "";
+        git_buf_dispose( &previousPath );
+
+        BOOST_REQUIRE_EQUAL( git_libgit2_opts( GIT_OPT_SET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL,
+                                               aGlobalDir.utf8_str().data() ),
+                             GIT_OK );
+    }
+
+    ~AUTHOR_SOURCES_GUARD()
+    {
+        git_libgit2_opts( GIT_OPT_SET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL, m_previousPath.c_str() );
+        m_settings->m_Git = m_savedPrefs;
+    }
+
+    COMMON_SETTINGS*     m_settings = nullptr;
+    COMMON_SETTINGS::GIT m_savedPrefs;
+    std::string          m_previousPath;
+};
 
 
 BOOST_FIXTURE_TEST_SUITE( KiGitCommon, KI_TEST::GIT_TEST_FIXTURE )
@@ -1054,7 +1102,7 @@ BOOST_AUTO_TEST_CASE( StartUnbornBranchNamesTheBranchTheFirstCommitWillCreate )
     BOOST_REQUIRE( common.IsHeadUnborn() );
     BOOST_CHECK( common.GetBranches().empty() );
     BOOST_CHECK( !common.HasLocalCommits() );
-    BOOST_CHECK( !common.HasUpstreamCommits() );
+    BOOST_CHECK( !common.UpstreamStatus() );
     BOOST_CHECK( !common.GetUnmergedCommitCount( "main" ) );
     BOOST_CHECK( !common.GetBranchDetail( "main" ).divergence );
 
@@ -1506,59 +1554,144 @@ BOOST_AUTO_TEST_CASE( SetUserConfigPersists )
 }
 
 
-BOOST_AUTO_TEST_CASE( GitIdentityUsesRepositoryValuesBeforeCustomDefaults )
+BOOST_AUTO_TEST_CASE( GitIdentityPrecedence )
 {
-    KIGIT::GitRepositoryPtr repo =
-            KI_TEST::InitGitRepository( TempPath(), "main", "Repository Author", "repository@example.com" );
-    KIGIT_COMMON common( repo.get() );
-    auto         lock = common.LockAction();
+    GitUserConfig local;
+    local.authorName = wxS( "Repository Author" );
+    local.authorEmail = wxS( "repository@example.com" );
 
-    git_config* config = nullptr;
-    BOOST_REQUIRE_EQUAL( git_repository_config( &config, repo.get() ), GIT_OK );
-    KIGIT::GitConfigPtr configPtr( config );
-
-    // Keep the user's global Git identity out of this test.
-    git_config* local = nullptr;
-    BOOST_REQUIRE_EQUAL( git_config_open_level( &local, config, GIT_CONFIG_LEVEL_LOCAL ), GIT_OK );
-    KIGIT::GitConfigPtr localPtr( local );
-    BOOST_REQUIRE_EQUAL( git_repository_set_config( repo.get(), local ), GIT_OK );
+    GitUserConfig global;
+    global.authorName = wxS( "Host User" );
+    global.authorEmail = wxS( "host@example.com" );
 
     COMMON_SETTINGS::GIT preferences{};
     preferences.useDefaultAuthor = false;
     preferences.authorName = wxS( "Custom Author" );
     preferences.authorEmail = wxS( "custom@example.com" );
 
-    KIGIT::GIT_IDENTITY identity = KIGIT::ReadGitIdentity( common );
-    BOOST_CHECK( identity.configured );
-    GitUserConfig resolved = KIGIT::ResolveGitIdentity( identity, preferences, wxS( "OS User" ) );
+    // The repository's own author is what Set Author writes, so it beats the preference
+    GitUserConfig resolved =
+            KIGIT::ResolveAuthor( preferences, local, global, wxS( "Account" ), wxS( "a@example.com" ) );
     BOOST_CHECK_EQUAL( resolved.authorName, wxS( "Repository Author" ) );
     BOOST_CHECK_EQUAL( resolved.authorEmail, wxS( "repository@example.com" ) );
 
-    BOOST_REQUIRE_EQUAL( git_config_delete_entry( local, "user.email" ), GIT_OK );
-    identity = KIGIT::ReadGitIdentity( common );
-    BOOST_CHECK( !identity.configured );
-    resolved = KIGIT::ResolveGitIdentity( identity, preferences, wxS( "OS User" ) );
-    BOOST_CHECK_EQUAL( resolved.authorName, wxS( "Repository Author" ) );
-    BOOST_CHECK_EQUAL( resolved.authorEmail, wxS( "custom@example.com" ) );
-
-    BOOST_REQUIRE_EQUAL( git_config_delete_entry( local, "user.name" ), GIT_OK );
-    identity = KIGIT::ReadGitIdentity( common );
-    BOOST_CHECK( !identity.configured );
-    resolved = KIGIT::ResolveGitIdentity( identity, preferences, wxS( "OS User" ) );
+    resolved = KIGIT::ResolveAuthor( preferences, GitUserConfig(), global, wxS( "Account" ), wxS( "a@example.com" ) );
     BOOST_CHECK_EQUAL( resolved.authorName, wxS( "Custom Author" ) );
     BOOST_CHECK_EQUAL( resolved.authorEmail, wxS( "custom@example.com" ) );
 
-    // Default mode must not revive custom values left in Preferences.
-    preferences.useDefaultAuthor = true;
-    resolved = KIGIT::ResolveGitIdentity( identity, preferences, wxS( "OS User" ) );
-    BOOST_CHECK_EQUAL( resolved.authorName, wxS( "OS User" ) );
-    BOOST_CHECK( resolved.authorEmail.IsEmpty() );
+    // Each value falls through on its own
+    preferences.authorEmail.clear();
+    resolved = KIGIT::ResolveAuthor( preferences, GitUserConfig(), global );
+    BOOST_CHECK_EQUAL( resolved.authorName, wxS( "Custom Author" ) );
+    BOOST_CHECK_EQUAL( resolved.authorEmail, wxS( "host@example.com" ) );
 
+    // The default mode ignores values left in the preference
+    preferences.useDefaultAuthor = true;
+    preferences.authorEmail = wxS( "custom@example.com" );
+    resolved = KIGIT::ResolveAuthor( preferences, GitUserConfig(), global );
+    BOOST_CHECK_EQUAL( resolved.authorName, wxS( "Host User" ) );
+    BOOST_CHECK_EQUAL( resolved.authorEmail, wxS( "host@example.com" ) );
+
+    resolved = KIGIT::ResolveAuthor( preferences, GitUserConfig(), GitUserConfig(), wxS( "Account" ),
+                                     wxS( "a@example.com" ) );
+    BOOST_CHECK_EQUAL( resolved.authorName, wxS( "Account" ) );
+    BOOST_CHECK_EQUAL( resolved.authorEmail, wxS( "a@example.com" ) );
+
+    // The OS user is a prefill, never a recorded author
+    resolved = KIGIT::ResolveAuthor( preferences, GitUserConfig(), GitUserConfig() );
+    BOOST_CHECK( !resolved.hasName );
+    BOOST_CHECK( resolved.authorName.IsEmpty() );
+}
+
+
+// A preference chosen in KiCad beats the host's global git identity, and Set Author beats both
+BOOST_AUTO_TEST_CASE( PreferenceBeatsGlobalGitConfig )
+{
+    AUTHOR_SOURCES_GUARD guard( TempPath() + wxS( "/global" ), HOST_GIT_CONFIG );
+
+    KIGIT::GitRepositoryPtr repo = KI_TEST::InitGitRepository( TempPath() + wxS( "/repo" ) );
+
+    git_config* config = nullptr;
+    BOOST_REQUIRE_EQUAL( git_repository_config( &config, repo.get() ), GIT_OK );
+    KIGIT::GitConfigPtr configPtr( config );
+    git_config*         local = nullptr;
+    BOOST_REQUIRE_EQUAL( git_config_open_level( &local, config, GIT_CONFIG_LEVEL_LOCAL ), GIT_OK );
+    KIGIT::GitConfigPtr localPtr( local );
+
+    COMMON_SETTINGS::GIT preferences{};
     preferences.useDefaultAuthor = false;
-    preferences.authorName.clear();
-    resolved = KIGIT::ResolveGitIdentity( identity, preferences, wxS( "OS User" ) );
-    BOOST_CHECK_EQUAL( resolved.authorName, wxS( "OS User" ) );
-    BOOST_CHECK_EQUAL( resolved.authorEmail, wxS( "custom@example.com" ) );
+    preferences.authorName = wxS( "Carol Designer" );
+    preferences.authorEmail = wxS( "carol@example.com" );
+
+    GitUserConfig repoAuthor;
+    GitUserConfig globalAuthor;
+    KIGIT::ReadAuthorConfig( repo.get(), repoAuthor, globalAuthor );
+    BOOST_CHECK_EQUAL( repoAuthor.authorName, wxS( "QA Test" ) );
+    BOOST_CHECK_EQUAL( globalAuthor.authorName, wxS( "Host User" ) );
+    BOOST_CHECK_EQUAL( KIGIT::ResolveAuthor( preferences, repoAuthor, globalAuthor ).authorName, wxS( "QA Test" ) );
+
+    BOOST_REQUIRE_EQUAL( git_config_delete_entry( local, "user.name" ), GIT_OK );
+    BOOST_REQUIRE_EQUAL( git_config_delete_entry( local, "user.email" ), GIT_OK );
+    KIGIT::ReadAuthorConfig( repo.get(), repoAuthor, globalAuthor );
+    BOOST_CHECK( !repoAuthor.hasName );
+
+    GitUserConfig resolved = KIGIT::ResolveAuthor( preferences, repoAuthor, globalAuthor );
+    BOOST_CHECK_EQUAL( resolved.authorName, wxS( "Carol Designer" ) );
+    BOOST_CHECK_EQUAL( resolved.authorEmail, wxS( "carol@example.com" ) );
+}
+
+
+// The backend records the author through the same resolver, so annotated tags carry the preference
+BOOST_AUTO_TEST_CASE( BackendRecordsAuthorThroughResolver )
+{
+    AUTHOR_SOURCES_GUARD guard( TempPath() + wxS( "/global" ), HOST_GIT_CONFIG );
+
+    git_repository*         repo = makeRepoWithCommit( TempPath() + wxS( "/repo" ), "file.txt", "v1\n" );
+    KIGIT::GitRepositoryPtr repoPtr( repo );
+    KIGIT_COMMON            common( repo );
+
+    git_config* config = nullptr;
+    BOOST_REQUIRE_EQUAL( git_repository_config( &config, repo ), GIT_OK );
+    KIGIT::GitConfigPtr configPtr( config );
+    git_config*         local = nullptr;
+    BOOST_REQUIRE_EQUAL( git_config_open_level( &local, config, GIT_CONFIG_LEVEL_LOCAL ), GIT_OK );
+    KIGIT::GitConfigPtr localPtr( local );
+    BOOST_REQUIRE_EQUAL( git_config_delete_entry( local, "user.name" ), GIT_OK );
+    BOOST_REQUIRE_EQUAL( git_config_delete_entry( local, "user.email" ), GIT_OK );
+
+    guard.m_settings->m_Git.useDefaultAuthor = false;
+    guard.m_settings->m_Git.authorName = wxS( "Carol Designer" );
+    guard.m_settings->m_Git.authorEmail = wxS( "carol@example.com" );
+
+    BOOST_REQUIRE( common.CreateTag( "v1.0", "Release" ) );
+    BOOST_CHECK_EQUAL( common.GetTagDetail( wxS( "v1.0" ) ).author, wxS( "Carol Designer" ) );
+
+    // Set Author writes the repository's own config, which beats the preference
+    BOOST_REQUIRE( common.SetUserConfig( wxS( "Tag Maker" ), wxS( "tags@example.com" ) ) );
+    BOOST_REQUIRE( common.CreateTag( "v2.0", "Release" ) );
+    BOOST_CHECK_EQUAL( common.GetTagDetail( wxS( "v2.0" ) ).author, wxS( "Tag Maker" ) );
+}
+
+
+// A missing name is not filled with the OS user, so nothing is recorded under it
+BOOST_AUTO_TEST_CASE( BackendRefusesToRecordWithoutAName )
+{
+    AUTHOR_SOURCES_GUARD guard( TempPath() + wxS( "/global" ), nullptr );
+    guard.m_settings->m_Git.useDefaultAuthor = true;
+
+    git_repository*         repo = makeRepoWithCommit( TempPath() + wxS( "/repo" ), "file.txt", "v1\n" );
+    KIGIT::GitRepositoryPtr repoPtr( repo );
+    KIGIT_COMMON            common( repo );
+
+    git_config* config = nullptr;
+    BOOST_REQUIRE_EQUAL( git_repository_config( &config, repo ), GIT_OK );
+    KIGIT::GitConfigPtr configPtr( config );
+    git_config*         local = nullptr;
+    BOOST_REQUIRE_EQUAL( git_config_open_level( &local, config, GIT_CONFIG_LEVEL_LOCAL ), GIT_OK );
+    KIGIT::GitConfigPtr localPtr( local );
+    BOOST_REQUIRE_EQUAL( git_config_delete_entry( local, "user.name" ), GIT_OK );
+
+    BOOST_CHECK( !common.CreateTag( "v1.0", "Release" ) );
 }
 
 
@@ -1680,12 +1813,14 @@ BOOST_AUTO_TEST_CASE( DetachedHeadHasNoLocalCommits )
     // On a branch with no upstream the commit really is unpublished.
     BOOST_REQUIRE( !common.IsHeadDetached() );
     BOOST_CHECK( common.HasLocalCommits() );
-    BOOST_CHECK( !common.HasUpstreamCommits() );
+    std::optional<KIGIT_UPSTREAM_STATUS> status = common.UpstreamStatus();
+    BOOST_REQUIRE( status );
+    BOOST_CHECK( !status->hasUpstream );
 
     BOOST_REQUIRE( common.CheckoutTag( "v1.0" ) );
     BOOST_REQUIRE( common.IsHeadDetached() );
     BOOST_CHECK( !common.HasLocalCommits() );
-    BOOST_CHECK( !common.HasUpstreamCommits() );
+    BOOST_CHECK( !common.UpstreamStatus() );
 
     std::optional<size_t> count = common.GetUnmergedCommitCount( "main" );
     BOOST_REQUIRE( count );
@@ -2041,7 +2176,9 @@ BOOST_AUTO_TEST_CASE( BranchComparisonsUseTheSelectedBranchAndItsOwnUpstream )
     BOOST_CHECK_EQUAL( main.divergence->ahead, 0u );
     BOOST_CHECK_EQUAL( main.divergence->behind, 3u );
     BOOST_CHECK( !common.HasLocalCommits() );
-    BOOST_CHECK( common.HasUpstreamCommits() );
+    std::optional<KIGIT_UPSTREAM_STATUS> status = common.UpstreamStatus();
+    BOOST_REQUIRE( status );
+    BOOST_CHECK_EQUAL( status->divergence.behind, 3u );
 
     commitOn( "main", "local main one" );
     main = common.GetBranchDetail( "main" );
@@ -2049,7 +2186,10 @@ BOOST_AUTO_TEST_CASE( BranchComparisonsUseTheSelectedBranchAndItsOwnUpstream )
     BOOST_CHECK_EQUAL( main.divergence->ahead, 1u );
     BOOST_CHECK_EQUAL( main.divergence->behind, 3u );
     BOOST_CHECK( common.HasLocalCommits() );
-    BOOST_CHECK( common.HasUpstreamCommits() );
+    status = common.UpstreamStatus();
+    BOOST_REQUIRE( status );
+    BOOST_CHECK_EQUAL( status->divergence.ahead, 1u );
+    BOOST_CHECK_EQUAL( status->divergence.behind, 3u );
 }
 
 
@@ -2057,7 +2197,7 @@ BOOST_AUTO_TEST_CASE( BranchComparisonsStayUnknownWhenReferencesCannotBeRead )
 {
     KIGIT_COMMON unavailable( nullptr );
     BOOST_CHECK( !unavailable.HasLocalCommits() );
-    BOOST_CHECK( !unavailable.HasUpstreamCommits() );
+    BOOST_CHECK( !unavailable.UpstreamStatus() );
     BOOST_CHECK( !unavailable.GetUnmergedCommitCount( "main" ) );
     BOOST_CHECK( !unavailable.GetBranchDetail( "main" ).divergence );
 
@@ -2077,7 +2217,7 @@ BOOST_AUTO_TEST_CASE( BranchComparisonsStayUnknownWhenReferencesCannotBeRead )
     BOOST_CHECK_EQUAL( detail.upstream.ToStdString(), "broken" );
     BOOST_CHECK( !detail.divergence );
     BOOST_CHECK( !common.HasLocalCommits() );
-    BOOST_CHECK( !common.HasUpstreamCommits() );
+    BOOST_CHECK( !common.UpstreamStatus() );
     BOOST_CHECK( !common.GetUnmergedCommitCount( "broken" ) );
 }
 
@@ -2835,7 +2975,7 @@ BOOST_AUTO_TEST_CASE( WorktreeRefusalPrioritizesUnsavedDocumentAndLibraryEditors
     BOOST_CHECK( stashMessage.Contains( "Footprint Editor" ) );
     BOOST_CHECK( stashMessage.Contains( "unsaved changes" ) );
     BOOST_CHECK( stashMessage.Contains( "Save or discard" ) );
-    BOOST_CHECK( stashMessage.Contains( "before stashing" ) );
+    BOOST_CHECK( stashMessage.Contains( "before continuing" ) );
 
     // A failed disk check must still explain the unsaved work the user can resolve first.
     status.checked = false;

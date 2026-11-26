@@ -23,12 +23,12 @@
 #include <wx/filedlg.h>
 #include <wx/filefn.h>
 #include <wx/hyperlink.h>
+#include <wx/valnum.h>
 #include <advanced_config.h>
 #include <kiplatform/ui.h>
 
 #include <functional>
 #include <iomanip>
-#include <utility>
 #include <sstream>
 
 using namespace std::placeholders;
@@ -50,6 +50,7 @@ using namespace std::placeholders;
 #include <dialogs/dialog_pns_diff_pair_dimensions.h>
 #include <dialogs/dialog_track_via_size.h>
 #include <dialogs/dialog_router_save_test_case.h>
+#include <dialogs/dialog_text_entry.h>
 #include <math/vector2wx.h>
 #include <paths.h>
 #include <wildcards_and_files_ext.h>
@@ -282,6 +283,35 @@ static const TOOL_ACTION ACT_CustomTrackWidth( TOOL_ACTION_ARGS()
         .Tooltip( _( "Shows a dialog for changing the track width and via size." ) )
         .Icon( BITMAPS::width_track ) );
 
+// E belongs to the global Properties action outside spread mode. Init() gates it.
+static const TOOL_ACTION ACT_SpreadTracksSetDistance( TOOL_ACTION_ARGS()
+        .Name( "pcbnew.InteractiveRouter.SpreadTracksSetDistance" )
+        .Scope( AS_CONTEXT )
+        .DefaultHotkey( 'E' )
+        .LegacyHotkeyName( "Set Spreading Distance" )
+        .FriendlyName( _( "Set Spreading Distance..." ) )
+        .Tooltip( _( "Sets the distance between the tracks for the Spread Tracks tool." ) )
+     );
+
+static const TOOL_ACTION ACT_IncreaseSpreadingDistance( TOOL_ACTION_ARGS()
+        .Name( "pcbnew.InteractiveRouter.IncreaseSpreadingDistance" )
+        .Scope( AS_CONTEXT )
+        .DefaultHotkey( ']' )
+        .LegacyHotkeyName( "Increase Spreading Distance" )
+        .FriendlyName( _( "Increase Spreading Distance..." ) )
+        .Tooltip( _( "Increases the distance between the tracks for the Spread Tracks tool by one grid unit." ) )
+     );
+
+static const TOOL_ACTION ACT_DecreaseSpreadingDistance( TOOL_ACTION_ARGS()
+        .Name( "pcbnew.InteractiveRouter.DecreaseSpreadingDistance" )
+        .Scope( AS_CONTEXT )
+        .DefaultHotkey( '[' )
+        .LegacyHotkeyName( "Decrease Spreading Distance" )
+        .FriendlyName( _( "Decrease Spreading Distance..." ) )
+        .Tooltip( _( "Decreases the distance between the tracks for the Spread Tracks tool by one grid unit." ) )
+     );
+
+
 static const TOOL_ACTION ACT_SwitchPosture( TOOL_ACTION_ARGS()
         .Name( "pcbnew.InteractiveRouter.SwitchPosture" )
         .Scope( AS_CONTEXT )
@@ -339,8 +369,7 @@ ROUTER_TOOL::ROUTER_TOOL() :
         m_originalActiveLayer( UNDEFINED_LAYER ),
         m_viaStackResumeLayer( UNDEFINED_LAYER ),
         m_inRouterTool( false ),
-        m_inRouteSelected( false ),
-        m_startWithVia( false )
+        m_inRouteSelected( false )
 {
 }
 
@@ -601,7 +630,7 @@ bool ROUTER_TOOL::Init()
 
     PCB_EDIT_FRAME* frame = getEditFrame<PCB_EDIT_FRAME>();
 
-    wxASSERT( frame );
+    wxCHECK( frame, false );
 
     auto& menu = m_menu->GetMenu();
     menu.SetUntranslatedTitle( _HKI( "Interactive Router" ) );
@@ -628,6 +657,12 @@ bool ROUTER_TOOL::Init()
             [this]( const SELECTION& )
             {
                 return !m_router->RoutingInProgress();
+            };
+
+    auto spreadingTracksCond =
+            [this]( const SELECTION& )
+            {
+                return m_router->Mode() == PNS::PNS_MODE_SPREAD_TRACKS;
             };
 
     auto inRouteSelected =
@@ -729,6 +764,14 @@ bool ROUTER_TOOL::Init()
     mgr->SetConditions( ACT_SwitchCornerModeArc45,    CHECK( cornerModeArc45Cond ) );
     mgr->SetConditions( ACT_SwitchCornerModeArc90,    CHECK( cornerModeArc90Cond ) );
 
+    // Claim the spreading keys in spread mode only, or E never reaches PCB_ACTIONS::properties
+    // and the track and via size dialog stops opening while routing.
+    const ACTION_CONDITIONS spreading = ACTION_CONDITIONS().HotkeyEnable( spreadingTracksCond );
+
+    mgr->SetConditions( ACT_SpreadTracksSetDistance, spreading );
+    mgr->SetConditions( ACT_IncreaseSpreadingDistance, spreading );
+    mgr->SetConditions( ACT_DecreaseSpreadingDistance, spreading );
+
     auto diffPairCond =
         [this]( const SELECTION& )
         {
@@ -739,6 +782,10 @@ bool ROUTER_TOOL::Init()
 
     menu.AddMenu( m_trackViaMenu.get(),               SELECTION_CONDITIONS::ShowAlways );
     menu.AddMenu( m_diffPairMenu.get(),               diffPairCond );
+    
+    menu.AddItem( ACT_IncreaseSpreadingDistance,      spreadingTracksCond );
+    menu.AddItem( ACT_DecreaseSpreadingDistance,      spreadingTracksCond );
+    menu.AddItem( ACT_SpreadTracksSetDistance,        spreadingTracksCond );
 
     menu.AddItem( PCB_ACTIONS::routerSettingsDialog,  SELECTION_CONDITIONS::ShowAlways );
 
@@ -889,7 +936,7 @@ void ROUTER_TOOL::saveRouterDebugLog()
         if( item->OfKind( PNS::ITEM::HOLE_T ) )
             continue;
 
-        wxASSERT_MSG( item->Parent() != nullptr, "removed an item with no parent uuid?" );
+        wxCHECK2_MSG( item->Parent() != nullptr, continue, "removed an item with no parent uuid?" );
 
         if( item->Parent() )
             logData.m_RemovedItems.insert( item->Parent()->m_Uuid );
@@ -1737,7 +1784,17 @@ bool ROUTER_TOOL::prepareInteractive( VECTOR2D aStartPosition )
     }
 
     m_originalActiveLayer = editFrame->GetActiveLayer();
-    editFrame->SetActiveLayer( pcbLayer );
+
+    // The layer change and the highlight below both recolour the whole view, and nothing is
+    // painted between them. Hold the first back so the highlight does the only pass.
+    bool recolorPending = false;
+
+    {
+        PCB_DRAW_PANEL_GAL::DEFERRED_RECOLOR deferRecolor( editFrame->GetCanvas() );
+
+        editFrame->SetActiveLayer( pcbLayer );
+        recolorPending = editFrame->GetCanvas()->WasRecolorDeferred();
+    }
 
     if( !getView()->IsLayerVisible( pcbLayer ) )
     {
@@ -1761,13 +1818,21 @@ bool ROUTER_TOOL::prepareInteractive( VECTOR2D aStartPosition )
         if( m_router->Mode() == PNS::PNS_MODE_ROUTE_DIFF_PAIR )
         {
             if( PNS::NET_HANDLE coupledNet = m_router->GetRuleResolver()->DpCoupledNet( m_startItem->Net() ) )
+            {
                 highlightNets( true, { m_startItem->Net(), coupledNet } );
+                recolorPending = false;
+            }
         }
         else
         {
             highlightNets( true, { m_startItem->Net() } );
+            recolorPending = false;
         }
     }
+
+    // Not every path above highlights, so the held-back pass may still be owed.
+    if( recolorPending )
+        editFrame->GetCanvas()->ChangeHighContrastLayer( pcbLayer );
 
     controls()->SetAutoPan( true );
 
@@ -1840,8 +1905,6 @@ void ROUTER_TOOL::performRouting( VECTOR2D aStartPosition )
 {
     m_router->ClearViewDecorations();
 
-    bool startWithVia = std::exchange( m_startWithVia, false );
-
     if( !prepareInteractive( aStartPosition ) )
         return;
 
@@ -1869,16 +1932,6 @@ void ROUTER_TOOL::performRouting( VECTOR2D aStartPosition )
 
     // Set initial cursor
     setCursor();
-
-    // A via or through pad already reaching the layer 'V' switched to must not gain a second via
-    int  viaTargetLayer = m_iface->GetPNSLayerFromBoardLayer( m_originalActiveLayer );
-    bool startReachesViaTarget = m_startItem && m_startItem->Layers().Overlaps( viaTargetLayer );
-
-    // If the user pressed 'V' before starting to route, enable via placement now
-    if( startWithVia && !startReachesViaTarget )
-    {
-        handleLayerSwitch( ACT_PlaceThroughVia.MakeEvent(), true );
-    }
 
     // Throttle wxEVT_UPDATE_UI during routing. The idle sweep fires between every Wait()
     // iteration and its cost dominates at interactive frame rates.
@@ -2428,6 +2481,227 @@ int ROUTER_TOOL::OptimizeSelected( const TOOL_EVENT& aEvent )
 }
 
 
+int ROUTER_TOOL::onSpreadTracksSetDistance( const TOOL_EVENT& aEvent )
+{
+    int                     value = m_router->Settings().GetSpreadTracksDistance();
+    wxIntegerValidator<int> validator( &value );
+    validator.SetRange( 0, 10000000 );
+    WX_TEXT_ENTRY_DIALOG dlg( frame(), _( "Distance:" ), _( "Set Spreading Distance" ) );
+    dlg.SetTextValidator( validator );
+    int modalResult = dlg.ShowModal();
+
+    if( modalResult == wxID_OK )
+    {
+        int newSpreadDist = wxAtoi( dlg.GetValue() );
+        m_router->Settings().SetSpreadTracksDistance( newSpreadDist );
+        m_router->Move( aEvent.Position(), nullptr );
+    }
+
+    return 0;
+}
+
+
+int ROUTER_TOOL::onSpreadTracksIncDecDistance( const TOOL_EVENT& aEvent, bool aInc )
+{
+    VECTOR2I grid = m_gridHelper->GetGrid();
+
+    int dist = m_router->Settings().GetSpreadTracksDistance();
+
+    int remainder = dist % grid.x;
+
+    if( aInc )
+        dist += ( grid.x - remainder ) + grid.x;
+    else
+        dist -= remainder + grid.x;
+
+    if( dist < 0 )
+        dist = 0;
+
+    m_router->Settings().SetSpreadTracksDistance( dist );
+    m_router->Move( aEvent.Position(), nullptr );
+
+    return 0;
+}
+
+
+int ROUTER_TOOL::SpreadTracks( const TOOL_EVENT& aEvent )
+{
+    PNS::ROUTER_MODE mode = PNS::PNS_MODE_SPREAD_TRACKS;
+    PCB_EDIT_FRAME*  frame = getEditFrame<PCB_EDIT_FRAME>();
+    VIEW_CONTROLS*   controls = getViewControls();
+
+    const PCB_SELECTION curSelection = m_toolMgr->GetTool<PCB_SELECTION_TOOL>()->GetSelection();
+
+    TOOL_EVENT         originalEvent = aEvent; // This can change out from under us when the event loop runs
+    SCOPED_TOOL_PUSHER raii( frame, originalEvent );
+
+    m_toolMgr->RunAction( ACTIONS::selectionClear );
+    Activate();
+
+    controls->ShowCursor( true );
+    controls->ForceCursorPosition( false );
+
+    m_router->SetMode( mode );
+    m_cancelled = false;
+
+    if( aEvent.HasPosition() )
+        m_toolMgr->PrimeTool( aEvent.Position() );
+
+    bool pickingStartPoint = true;
+
+    // Snapping uses ViewGetLOD(), which uses the layerVisibilityCache.  Catch any visibility
+    // changes while routing.
+    m_toolMgr->GetView()->SyncLayerVisibilityCache();
+
+    PNS::ITEM_SET trackItems;
+
+    auto loadTrackItems =
+            [&]()
+            {
+                for( EDA_ITEM* item : curSelection.GetItemsSortedBySelectionOrder() )
+                {
+                    if( item->Type() == PCB_TRACE_T || item->Type() == PCB_ARC_T )
+                    {
+                        auto       bitem = static_cast<BOARD_CONNECTED_ITEM*>( item );
+                        PNS::ITEM* ritem = m_router->GetWorld()->FindItemByParent( bitem );
+
+                        if( ritem )
+                            trackItems.Add( ritem );
+                    }
+                }
+            };
+
+    loadTrackItems();
+
+    if( trackItems.Empty() )
+    {
+        frame->ShowInfoBarError( _( "Please select a group of tracks you want to spread." ) );
+        return 0;
+    }
+
+    frame->ShowInfoBarMsg( _( "Pick a track you want to spread other tracks around." ) );
+
+    // Only tracks are pickable while spreading.
+    setSelectableItemMask( PNS::ITEM::ARC_T | PNS::ITEM::SEGMENT_T );
+
+    // Main loop: keep receiving events
+    while( TOOL_EVENT* evt = Wait() )
+    {
+        if( evt->IsCancelInteractive() )
+        {
+            m_cancelled = true;
+            break;
+        }
+        else if( evt->IsActivate() )
+        {
+            if( evt->IsMoveTool() || evt->IsEditorTool() )
+            {
+                // Make sure we come back after the move tool runs
+                frame->PushTool( originalEvent );
+            }
+
+            break;
+        }
+        else if( evt->Action() == TA_UNDO_REDO_PRE )
+        {
+            m_router->ClearWorld();
+            loadTrackItems();
+        }
+        else if( evt->Action() == TA_UNDO_REDO_POST || evt->Action() == TA_MODEL_CHANGE )
+        {
+            m_router->SyncWorld();
+            loadTrackItems();
+        }
+        else if( evt->IsMotion() )
+        {
+            if( pickingStartPoint )
+            {
+                updateStartItem( *evt );
+            }
+            else
+            {
+                updateEndItem( *evt );
+                m_router->Move( m_endSnapPoint, nullptr );
+            }
+        }
+        else if( evt->IsClick( BUT_LEFT ) )
+        {
+            if( !pickingStartPoint )
+            {
+                m_router->FixRoute( evt->Position(), nullptr, true, true );
+                break;
+            }
+            else if( m_startItem )
+            {
+                pickingStartPoint = false;
+
+                frame->GetInfoBar()->Dismiss();
+
+                if( !m_router->StartRouting( m_startSnapPoint, m_startItem, m_startItem->Layer(), trackItems ) )
+                {
+                    m_cancelled = true;
+                    break;
+                }
+            }
+        }
+        else if( evt->IsClick( BUT_RIGHT ) )
+        {
+            m_menu->ShowContextMenu( selection() );
+        }
+        else if( evt->IsAction( &ACT_SpreadTracksSetDistance ) )
+        {
+            onSpreadTracksSetDistance( *evt );
+        }
+        else if( evt->IsAction( &ACT_IncreaseSpreadingDistance ) )
+        {
+            onSpreadTracksIncDecDistance( *evt, true );
+        }
+        else if( evt->IsAction( &ACT_DecreaseSpreadingDistance ) )
+        {
+            onSpreadTracksIncDecDistance( *evt, false );
+        }
+        else
+        {
+            evt->SetPassEvent();
+        }
+
+        handleCommonEvents( *evt );
+
+        if( m_cancelled )
+            break;
+    }
+
+    /*
+    m_router->ClearViewDecorations();
+
+    view()->ClearPreview();
+    view()->ShowPreview( false );
+    */
+
+    frame->GetInfoBar()->Dismiss();
+
+    if( m_cancelled )
+    {
+        restoreSelection( curSelection );
+    }
+    else
+    {
+        m_router->CommitRouting();
+    }
+
+    if( m_router->RoutingInProgress() )
+        m_router->StopRouting();
+
+    m_startItem = nullptr;
+
+    setSelectableItemMask( PNS::ITEM::ANY_T );
+    controls->ForceCursorPosition( false );
+    highlightNets( false );
+
+    return 0;
+}
+
+
 int ROUTER_TOOL::MainLoop( const TOOL_EVENT& aEvent )
 {
     if( m_inRouterTool )
@@ -2468,7 +2742,6 @@ int ROUTER_TOOL::MainLoop( const TOOL_EVENT& aEvent )
 
     m_router->SetMode( mode );
     m_cancelled = false;
-    m_startWithVia = false;
 
     if( aEvent.HasPosition() )
         m_toolMgr->PrimeTool( aEvent.Position() );
@@ -2537,7 +2810,6 @@ int ROUTER_TOOL::MainLoop( const TOOL_EVENT& aEvent )
         }
         else if( evt->IsAction( &ACT_PlaceThroughVia ) )
         {
-            m_startWithVia = true;
             m_toolMgr->RunAction( PCB_ACTIONS::layerToggle );
         }
         else if( evt->IsAction( &PCB_ACTIONS::layerChanged ) )
@@ -2844,7 +3116,7 @@ static DRAG_KIND dragKindOf( const PCB_SELECTION& aSelection )
 }
 
 
-bool ROUTER_TOOL::CanInlineDrag( int aDragMode )
+bool ROUTER_TOOL::CanInlineDrag()
 {
     m_toolMgr->RunAction<CLIENT_SELECTION_FILTER>( ACTIONS::selectionCursor, NeighboringSegmentFilter );
     const PCB_SELECTION& selection = m_toolMgr->GetTool<PCB_SELECTION_TOOL>()->GetSelection();
@@ -2856,13 +3128,14 @@ bool ROUTER_TOOL::CanInlineDrag( int aDragMode )
 
     switch( dragKindOf( selection ) )
     {
-    case DRAG_KIND::TRACKS_KIND: return true;
+    case DRAG_KIND::TRACKS_KIND:
+        return true;
 
-    // Neither footprints nor a block drag free angle
     case DRAG_KIND::FOOTPRINTS_KIND:
-    case DRAG_KIND::BLOCK: return !( aDragMode & PNS::DM_FREE_ANGLE );
+    case DRAG_KIND::BLOCK: return true;
 
-    default: return false;
+    default:
+        return false;
     }
 }
 
@@ -2973,16 +3246,18 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
     // a Move operation). Sync it now so that FindItemByParent and joint lookups work correctly.
     m_router->SyncWorld();
 
-    // A footprint with no copper the router can see cannot be dragged, and showing it in the
-    // preview would promise a move the commit will not make
-    for( auto it = footprints.begin(); it != footprints.end(); )
+    // The router moves a footprint through its pads, so one with none it can see is carried here
+    std::vector<FOOTPRINT*> carriedFootprints;
+
+    for( FOOTPRINT* footprint : footprints )
     {
         bool hasSolid = false;
 
-        for( PAD* pad : ( *it )->Pads() )
+        for( PAD* pad : footprint->Pads() )
             hasSolid |= !m_router->GetWorld()->FindItemsByParent( pad ).empty();
 
-        it = hasSolid ? std::next( it ) : footprints.erase( it );
+        if( !hasSolid )
+            carriedFootprints.push_back( footprint );
     }
 
     // Snapping uses ViewGetLOD(), which uses the layerVisibilityCache.  Make sure it's up-to-date.
@@ -2990,8 +3265,9 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
 
     if( !footprints.empty() )
     {
-        // A block drag has its own algorithm, and the leader logic below assumes a lone footprint
-        if( footprints.size() == 1 && !blockDrag )
+        // A block drag has its own algorithm, and the leader logic below assumes a lone
+        // footprint the router can move
+        if( footprints.size() == 1 && !blockDrag && carriedFootprints.empty() )
             singleFootprintDrag = true;
 
         if( showCourtyardConflicts )
@@ -3128,10 +3404,14 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
         // Check if user wants to warp the mouse to origin of moved object
 
         if( editFrame->GetMoveWarpsCursor() )
+        {
             tweakedMousePos = footprint->GetPosition(); // Use footprint anchor to warp mouse
+        }
         else
+        {
             tweakedMousePos = GetClampedCoords( controls()->GetCursorPosition(),
                                                 COORDS_PADDING ); // Just use current mouse pos
+        }
 
         // We tweak the mouse position using the value from above, and then use that as the
         // start position to prevent the footprint from jumping when we start dragging.
@@ -3174,6 +3454,7 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
         restoreSelection( selection );
         controls()->ForceCursorPosition( false );
         highlightNets( false );
+
         return 0;
     }
 
@@ -3218,6 +3499,7 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
 
     bool hasMouseMoved = false;
     bool hasMultidragCancelled = false;
+    bool committed = false;
 
     while( TOOL_EVENT* evt = Wait() )
     {
@@ -3342,7 +3624,7 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
             bool forceCommit = evt->Modifier( MD_CTRL );
 
             updateEndItem( *evt );
-            m_router->FixRoute( m_endSnapPoint, m_endItem, forceFinish, forceCommit );
+            committed = m_router->FixRoute( m_endSnapPoint, m_endItem, forceFinish, forceCommit );
             leaderSegments = m_router->GetLastCommittedLeaderSegments();
 
             break;
@@ -3417,6 +3699,20 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
     if( m_router->RoutingInProgress() )
         m_router->StopRouting();
 
+    if( committed && !carriedFootprints.empty() && m_endSnapPoint != p )
+    {
+        BOARD_COMMIT commit( frame() );
+        VECTOR2I     offset = m_endSnapPoint - p;
+
+        for( FOOTPRINT* footprint : carriedFootprints )
+        {
+            commit.Modify( footprint );
+            footprint->Move( offset );
+        }
+
+        // Appending keeps the whole drag in one undo step
+        commit.Push( _( "Drag" ), APPEND_UNDO );
+    }
 
     if( itemsToDrag.Size() && hasMultidragCancelled )
     {
@@ -3569,8 +3865,8 @@ void ROUTER_TOOL::UpdateMessagePanel()
 
             NETINFO_ITEM* netA = static_cast<NETINFO_ITEM*>( nets[0] );
             NETINFO_ITEM* netB = static_cast<NETINFO_ITEM*>( nets[1] );
-            wxASSERT( netA );
-            wxASSERT( netB );
+            wxCHECK2( netA, return );
+            wxCHECK2( netB, return );
 
             description = wxString::Format( _( "Routing Diff Pair: %s" ),
                                             netA->GetNetname() + wxT( ", " ) + netB->GetNetname() );
@@ -3711,7 +4007,8 @@ void ROUTER_TOOL::setTransitions()
     Go( &ROUTER_TOOL::CycleRouterMode,        PCB_ACTIONS::cycleRouterMode.MakeEvent() );
     Go( &ROUTER_TOOL::InlineDrag,             PCB_ACTIONS::routerInlineDrag.MakeEvent() );
     Go( &ROUTER_TOOL::InlineBreakTrack,       PCB_ACTIONS::breakTrack.MakeEvent() );
-
+    Go( &ROUTER_TOOL::SpreadTracks,           PCB_ACTIONS::routerSpreadTracks.MakeEvent() );
+    
     Go( &ROUTER_TOOL::onViaCommand,           ACT_PlaceThroughVia.MakeEvent() );
     Go( &ROUTER_TOOL::onViaCommand,           ACT_PlaceBlindVia.MakeEvent() );
     Go( &ROUTER_TOOL::onViaCommand,           ACT_PlaceMicroVia.MakeEvent() );

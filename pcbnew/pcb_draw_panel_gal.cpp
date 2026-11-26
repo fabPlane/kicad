@@ -507,6 +507,23 @@ void PCB_DRAW_PANEL_GAL::applyHighContrastLayer( PCB_LAYER_ID aLayer, bool aOnly
     auto*      pcbSettings = static_cast<KIGFX::PCB_RENDER_SETTINGS*>( rSettings );
     const bool hidden = contrast && pcbSettings->m_ContrastModeDisplay == HIGH_CONTRAST_MODE::HIDDEN;
 
+    // Only a pure colour pass can be deferred. With contrast on, the branch below also
+    // changes visibility.
+    if( m_suppressRecolor && !contrast && !m_highContrastShown )
+    {
+        m_highContrastShown = contrast;
+        m_highContrastHidden = hidden;
+        m_recolorDeferred = true;
+        return;
+    }
+
+    // Without high contrast only an active mask layer changes item colours
+    if( aOnlyLayerChanged && !contrast && !m_highContrastShown && m_coloredLayer != UNDEFINED_LAYER
+        && !IsSolderMaskLayer( m_coloredLayer ) && !IsSolderMaskLayer( aLayer ) )
+    {
+        return;
+    }
+
     // Layers the canvas fades keep their item colours, unless high contrast hides inactive layers
     // now or did at the last switch
     if( aOnlyLayerChanged && pcbSettings->HasCanvasFadedLayers() && !hidden && !m_highContrastHidden )
@@ -526,6 +543,7 @@ void PCB_DRAW_PANEL_GAL::applyHighContrastLayer( PCB_LAYER_ID aLayer, bool aOnly
         m_view->UpdateAllLayersColor();
     }
 
+    m_coloredLayer = aLayer;
     m_highContrastShown = contrast;
     m_highContrastHidden = hidden;
 }
@@ -701,6 +719,8 @@ void PCB_DRAW_PANEL_GAL::SyncLayersVisibility( KIGFX::VIEW& aView, const BOARD* 
     aView.SetLayerVisible( LAYER_RATSNEST, true );
     aView.SetLayerVisible( LAYER_MARKER_SHADOWS, true );
     aView.SetLayerVisible( LAYER_DRC_HIGHLIGHTED, true );
+    aView.SetLayerVisible( LAYER_ROUTER_PREVIEW_SHADOW, true );
+    aView.SetLayerVisible( LAYER_ROUTER_PREVIEW_COLLISION, true );
 }
 
 
@@ -795,6 +815,58 @@ void ApplyPcbGalLayerOrder( KIGFX::VIEW* aView )
 }
 
 
+void ApplyPcbGalLayerDeps( KIGFX::VIEW* aView )
+{
+    for( int layer : GAL_LAYER_ORDER )
+    {
+        wxASSERT( layer < KIGFX::VIEW::VIEW_MAX_LAYERS );
+
+        if( IsCopperLayer( layer ) )
+        {
+            aView->SetRequired( ZONE_LAYER_FOR( layer ), layer );
+            aView->SetRequired( PAD_COPPER_LAYER_FOR( layer ), layer );
+            aView->SetRequired( VIA_COPPER_LAYER_FOR( layer ), layer );
+            aView->SetRequired( CLEARANCE_LAYER_FOR( layer ), layer );
+            aView->SetRequired( POINT_LAYER_FOR( layer ), layer );
+            aView->SetRequired( BITMAP_LAYER_FOR( layer ), layer );
+            aView->SetRequired( GetNetnameLayer( layer ), layer );
+            aView->SetRequired( DRILL_SYMBOL_LAYER_FOR( layer ), layer );
+        }
+        else if( IsNonCopperLayer( layer ) )
+        {
+            aView->SetRequired( POINT_LAYER_FOR( layer ), layer );
+            aView->SetRequired( ZONE_LAYER_FOR( layer ), layer );
+            aView->SetRequired( BITMAP_LAYER_FOR( layer ), layer );
+            aView->SetRequired( DRILL_SYMBOL_LAYER_FOR( layer ), layer );
+        }
+        else if( IsNetnameLayer( layer ) )
+        {
+            aView->SetLayerDisplayOnly( layer );
+        }
+    }
+
+    aView->SetRequired( LAYER_PAD_NETNAMES, LAYER_PADS );
+
+    // The anchor is sized from the zoom at draw time, so a cached copy scales with the view
+    aView->SetLayerTarget( LAYER_ANCHOR, KIGFX::TARGET_NONCACHED );
+    aView->SetLayerDisplayOnly( LAYER_ANCHOR );
+
+    // Holes can be independent of their host objects (cf: printing drill marks)
+    aView->SetRequired( LAYER_VIA_HOLES, LAYER_VIAS );
+    aView->SetRequired( LAYER_VIA_HOLEWALLS, LAYER_VIAS );
+    aView->SetRequired( LAYER_PAD_PLATEDHOLES, LAYER_PADS );
+    aView->SetRequired( LAYER_PAD_HOLEWALLS, LAYER_PADS );
+    aView->SetRequired( LAYER_NON_PLATEDHOLES, LAYER_PADS );
+
+    // Via visibility
+    aView->SetRequired( LAYER_VIA_MICROVIA, LAYER_VIAS );
+    aView->SetRequired( LAYER_VIA_BLIND, LAYER_VIAS );
+    aView->SetRequired( LAYER_VIA_BURIED, LAYER_VIAS );
+    aView->SetRequired( LAYER_VIA_THROUGH, LAYER_VIAS );
+    aView->SetRequired( LAYER_VIA_NETNAMES, LAYER_VIAS );
+}
+
+
 void PCB_DRAW_PANEL_GAL::setDefaultLayerOrder()
 {
     ApplyPcbGalLayerOrder( m_view );
@@ -805,7 +877,7 @@ bool PCB_DRAW_PANEL_GAL::SwitchBackend( GAL_TYPE aGalType )
 {
     bool rv = EDA_DRAW_PANEL_GAL::SwitchBackend( aGalType );
     setDefaultLayerDeps();
-    m_gal->SetWorldUnitLength( 1e-9 /* 1 nm */ / 0.0254 /* 1 inch in meters */ );
+    m_gal->SetWorldUnitLength( PCB_WORLD_UNIT );
 
     // Whether the ratsnest is split depends on the canvas
     if( m_ratsnest && ( m_localRatsnest != nullptr ) != m_gal->HasRetainedScene() )
@@ -861,41 +933,13 @@ void PCB_DRAW_PANEL_GAL::setDefaultLayerDeps()
     for( int i = LAYER_DRILL_SYMBOL_START; i < LAYER_DRILL_SYMBOL_END; ++i )
         m_view->SetLayerTarget( i, KIGFX::TARGET_NONCACHED );
 
-    for( int i = 0; (unsigned) i < sizeof( GAL_LAYER_ORDER ) / sizeof( int ); ++i )
+    for( int layer : GAL_LAYER_ORDER )
     {
-        int layer = GAL_LAYER_ORDER[i];
-        wxASSERT( layer < KIGFX::VIEW::VIEW_MAX_LAYERS );
-
-        // Set layer display dependencies & targets
-        if( IsCopperLayer( layer ) )
-        {
-            m_view->SetRequired( ZONE_LAYER_FOR( layer ), layer );
-            m_view->SetRequired( PAD_COPPER_LAYER_FOR( layer ), layer );
-            m_view->SetRequired( VIA_COPPER_LAYER_FOR( layer ), layer );
-            m_view->SetRequired( CLEARANCE_LAYER_FOR( layer ), layer );
-            m_view->SetRequired( POINT_LAYER_FOR( layer ), layer );
-
-            m_view->SetRequired( BITMAP_LAYER_FOR( layer ), layer );
+        if( IsCopperLayer( layer ) || IsNonCopperLayer( layer ) )
             m_view->SetLayerTarget( BITMAP_LAYER_FOR( layer ), bitmapTarget );
-            m_view->SetRequired( GetNetnameLayer( layer ), layer );
-            m_view->SetRequired( DRILL_SYMBOL_LAYER_FOR( layer ), layer );
-        }
-        else if( IsNonCopperLayer( layer ) )
-        {
-            m_view->SetRequired( POINT_LAYER_FOR( layer ), layer );
-            m_view->SetRequired( ZONE_LAYER_FOR( layer ), layer );
-            m_view->SetLayerTarget( BITMAP_LAYER_FOR( layer ), bitmapTarget );
-            m_view->SetRequired( BITMAP_LAYER_FOR( layer ), layer );
-            m_view->SetRequired( DRILL_SYMBOL_LAYER_FOR( layer ), layer );
-        }
-        else if( IsNetnameLayer( layer ) )
-        {
-            m_view->SetLayerDisplayOnly( layer );
-        }
     }
 
-    m_view->SetLayerTarget( LAYER_ANCHOR, KIGFX::TARGET_NONCACHED );
-    m_view->SetLayerDisplayOnly( LAYER_ANCHOR );
+    ApplyPcbGalLayerDeps( m_view );
 
     // Use TARGET_OVERLAY for LAYER_CONFLICTS_SHADOW, it is for items
     // that may change while the view stays the same.
@@ -907,23 +951,6 @@ void PCB_DRAW_PANEL_GAL::setDefaultLayerDeps()
     m_view->SetLayerDisplayOnly( LAYER_CONFLICTS_SHADOW );
     m_view->SetLayerDisplayOnly( LAYER_CONSTRAINT_SHADOW );
     m_view->SetLayerDisplayOnly( LAYER_BOARD_OUTLINE_AREA );
-
-    // Some more required layers settings
-    m_view->SetRequired( LAYER_PAD_NETNAMES, LAYER_PADS );
-
-    // Holes can be independent of their host objects (cf: printing drill marks)
-    m_view->SetRequired( LAYER_VIA_HOLES, LAYER_VIAS );
-    m_view->SetRequired( LAYER_VIA_HOLEWALLS, LAYER_VIAS );
-    m_view->SetRequired( LAYER_PAD_PLATEDHOLES, LAYER_PADS );
-    m_view->SetRequired( LAYER_PAD_HOLEWALLS, LAYER_PADS );
-    m_view->SetRequired( LAYER_NON_PLATEDHOLES, LAYER_PADS );
-
-    // Via visibility
-    m_view->SetRequired( LAYER_VIA_MICROVIA, LAYER_VIAS );
-    m_view->SetRequired( LAYER_VIA_BLIND, LAYER_VIAS );
-    m_view->SetRequired( LAYER_VIA_BURIED, LAYER_VIAS );
-    m_view->SetRequired( LAYER_VIA_THROUGH, LAYER_VIAS );
-    m_view->SetRequired( LAYER_VIA_NETNAMES, LAYER_VIAS );
 
     m_view->SetLayerTarget( LAYER_SELECT_OVERLAY, KIGFX::TARGET_OVERLAY );
     m_view->SetLayerDisplayOnly( LAYER_SELECT_OVERLAY ) ;

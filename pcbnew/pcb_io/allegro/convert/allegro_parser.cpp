@@ -47,24 +47,15 @@ static const wxChar* const traceAllegroParserBlocks = wxT( "KICAD_ALLEGRO_PARSER
 static const wxChar* const traceAllegroPerf = wxT( "KICAD_ALLEGRO_PERF" );
 
 
-static FILE_HEADER::LINKED_LIST ReadLL( FILE_STREAM& aStream, FMT_VER aVer )
+static FILE_HEADER::LINKED_LIST ReadLL( FILE_STREAM& aStream )
 {
-    uint32_t w1 = aStream.ReadU32();
-    uint32_t w2 = aStream.ReadU32();
+    // Every format version stores the tail (chain terminator) first, then the head
+    uint32_t tail = aStream.ReadU32();
+    uint32_t head = aStream.ReadU32();
 
-    if( aVer >= FMT_VER::V_180 )
-    {
-        // V18 stores head (chain start key) first, tail (sentinel key) second
-        return FILE_HEADER::LINKED_LIST{
-            .m_Tail = w2,
-            .m_Head = w1,
-        };
-    }
-
-    // V16/V17 stores tail (sentinel pointer) first, head (chain start) second
     return FILE_HEADER::LINKED_LIST{
-        .m_Tail = w1,
-        .m_Head = w2,
+        .m_Tail = tail,
+        .m_Head = head,
     };
 }
 
@@ -95,7 +86,7 @@ static void ReadArrayU32( FILE_STREAM& aStream, ARRAY& aArray )
 
 
 template <typename T>
-static T ReadField( FILE_STREAM& aStream, FMT_VER aFmtVer )
+static T ReadField( FILE_STREAM& aStream )
 {
     T field;
     if constexpr( std::is_same_v<T, uint32_t> )
@@ -105,6 +96,11 @@ static T ReadField( FILE_STREAM& aStream, FMT_VER aFmtVer )
     else if constexpr( std::is_same_v<T, uint8_t> )
     {
         field = aStream.ReadU8();
+    }
+    else if constexpr( std::is_same_v<T, char> )
+    {
+        // char is a distinct type from uint8_t, and is used for raw byte strings
+        field = static_cast<char>( aStream.ReadU8() );
     }
     else if constexpr( std::is_same_v<T, uint16_t> )
     {
@@ -120,12 +116,16 @@ static T ReadField( FILE_STREAM& aStream, FMT_VER aFmtVer )
     }
     else if constexpr( std::is_same_v<T, FILE_HEADER::LINKED_LIST> )
     {
-        field = ReadLL( aStream, aFmtVer );
+        field = ReadLL( aStream );
     }
     else if constexpr( requires { std::tuple_size<T>::value; } )
     {
+        using element_type = std::tuple_element_t<0, T>;
+
         for( size_t i = 0; i < std::tuple_size_v<T>; ++i )
-            field[i] = aStream.ReadU32();
+        {
+            field[i] = ReadField<element_type>( aStream );
+        }
     }
     else
     {
@@ -145,7 +145,7 @@ static void ReadCond( FILE_STREAM& aStream, FMT_VER aFmtVer, COND_T& aField )
 {
     if( COND_T::exists( aFmtVer ) )
     {
-        aField = ReadField<typename COND_T::value_type>( aStream, aFmtVer );
+        aField = ReadField<typename COND_T::value_type>( aStream );
     }
 }
 
@@ -226,48 +226,38 @@ std::unique_ptr<ALLEGRO::FILE_HEADER> HEADER_PARSER::ParseHeader()
     ReadCond( m_stream, m_fmtVer, header->m_StringCount_V18 );
     ReadCond( m_stream, m_fmtVer, header->m_Unknown2g_V18 );
 
-    ReadCond( m_stream, m_fmtVer, header->m_LL_V18_1 );
-    ReadCond( m_stream, m_fmtVer, header->m_LL_V18_2 );
-    ReadCond( m_stream, m_fmtVer, header->m_LL_V18_3 );
-    ReadCond( m_stream, m_fmtVer, header->m_LL_V18_4 );
-    ReadCond( m_stream, m_fmtVer, header->m_LL_V18_5 );
+    ReadCond( m_stream, m_fmtVer, header->m_Unknown2h_V18 );
 
-    // V18 positions 5-22 match v16 positions 0-17
-    header->m_LL_0x04 = ReadLL( m_stream, m_fmtVer );
-    header->m_LL_0x06 = ReadLL( m_stream, m_fmtVer );
-    header->m_LL_0x0C = ReadLL( m_stream, m_fmtVer );
-    header->m_LL_Shapes = ReadLL( m_stream, m_fmtVer );
-    header->m_LL_0x14 = ReadLL( m_stream, m_fmtVer );
-    header->m_LL_0x1B_Nets = ReadLL( m_stream, m_fmtVer );
-    header->m_LL_0x1C = ReadLL( m_stream, m_fmtVer );
-    header->m_LL_0x24_0x28 = ReadLL( m_stream, m_fmtVer );
-    header->m_LL_Unknown1 = ReadLL( m_stream, m_fmtVer );
-    header->m_LL_0x2B = ReadLL( m_stream, m_fmtVer );
-    header->m_LL_0x03_0x30 = ReadLL( m_stream, m_fmtVer );
-    header->m_LL_0x0A = ReadLL( m_stream, m_fmtVer );
-    header->m_LL_0x1D_0x1E_0x1F = ReadLL( m_stream, m_fmtVer );
-    header->m_LL_Unknown2 = ReadLL( m_stream, m_fmtVer );
-    header->m_LL_0x38 = ReadLL( m_stream, m_fmtVer );
-    header->m_LL_0x2C = ReadLL( m_stream, m_fmtVer );
-    header->m_LL_0x0C_2 = ReadLL( m_stream, m_fmtVer );
-    header->m_LL_Unknown3 = ReadLL( m_stream, m_fmtVer );
+    header->m_LL_0x04 = ReadLL( m_stream );
+    header->m_LL_0x06 = ReadLL( m_stream );
+    header->m_LL_0x0C = ReadLL( m_stream );
+    header->m_LL_Shapes = ReadLL( m_stream );
+    header->m_LL_0x14 = ReadLL( m_stream );
+    header->m_LL_0x1B_Nets = ReadLL( m_stream );
+    header->m_LL_0x1C = ReadLL( m_stream );
+    header->m_LL_0x24_0x28 = ReadLL( m_stream );
+    header->m_LL_Unknown1 = ReadLL( m_stream );
+    header->m_LL_0x2B = ReadLL( m_stream );
+    header->m_LL_0x03_0x30 = ReadLL( m_stream );
+    header->m_LL_0x0A = ReadLL( m_stream );
+    header->m_LL_0x1D_0x1E_0x1F = ReadLL( m_stream );
+    header->m_LL_Unknown2 = ReadLL( m_stream );
+    header->m_LL_0x38 = ReadLL( m_stream );
+    header->m_LL_0x2C = ReadLL( m_stream );
+    header->m_LL_0x0C_2 = ReadLL( m_stream );
+    header->m_LL_Unknown3 = ReadLL( m_stream );
 
-    ReadCond( m_stream, m_fmtVer, header->m_0x35_Start_preV18 );
-    ReadCond( m_stream, m_fmtVer, header->m_0x35_End_preV18 );
+    header->m_LL_0x35 = ReadLL( m_stream );
+    header->m_LL_0x36 = ReadLL( m_stream );
+    header->m_LL_Unknown4 = ReadLL( m_stream );
+    header->m_LL_Unknown5 = ReadLL( m_stream );
+    header->m_LL_0x0A_2 = ReadLL( m_stream );
 
-    ReadCond( m_stream, m_fmtVer, header->m_LL_Unknown5_V18 );
-    header->m_LL_0x36 = ReadLL( m_stream, m_fmtVer );
-    ReadCond( m_stream, m_fmtVer, header->m_LL_Unknown5_preV18 );
+    ReadCond( m_stream, m_fmtVer, header->m_LL_0x03_2 );
 
-    header->m_LL_Unknown6 = ReadLL( m_stream, m_fmtVer );
-    header->m_LL_0x0A_2 = ReadLL( m_stream, m_fmtVer );
+    header->m_Unknown_LlTrailer = m_stream.ReadU32();
 
-    ReadCond( m_stream, m_fmtVer, header->m_Unknown3 );
-
-    ReadCond( m_stream, m_fmtVer, header->m_LL_V18_6 );
-    ReadCond( m_stream, m_fmtVer, header->m_0x35_Start_V18 );
     ReadCond( m_stream, m_fmtVer, header->m_Unknown_V181 );
-    ReadCond( m_stream, m_fmtVer, header->m_0x35_End_V18 );
 
     // Quick check that the positions line up
     // (start of the m_AllegroVersion string is easy to find)
@@ -866,20 +856,19 @@ static std::unique_ptr<BLOCK_BASE> ParseBlock_0x0F( FILE_STREAM& stream, FMT_VER
 
     data.m_Key = stream.ReadU32();
     block->SetKey( data.m_Key );
-    data.m_SlotName = stream.ReadU32();
+    data.m_SlotNameStrId = stream.ReadU32();
 
     ReadCond( stream, aVer, data.m_Unknown1 );
 
-    if( aVer < FMT_VER::V_190 )
-        stream.ReadBytes( data.m_CompDeviceType.data(), data.m_CompDeviceType.size() );
+    ReadCond( stream, aVer, data.m_CompDeviceType );
+    ReadCond( stream, aVer, data.m_CompDeviceTypeStrId );
 
-    ReadCond( stream, aVer, data.m_CompDeviceTypePtr );
+    data.m_Next = stream.ReadU32();
+    block->SetNext( data.m_Next );
 
-    ReadCond( stream, aVer, data.m_Next );
-    block->SetNext( data.m_Next.value_or( 0 ) );
+    ReadCond( stream, aVer, data.m_ParentComponentPtr );
 
-    data.m_Ptr0x06 = stream.ReadU32();
-    data.m_Ptr0x11 = stream.ReadU32();
+    data.m_PinNamePtr = stream.ReadU32();
     data.m_Unknown2 = stream.ReadU32();
 
     return block;
@@ -897,11 +886,15 @@ static std::unique_ptr<BLOCK_BASE> ParseBlock_0x10( FILE_STREAM& stream, FMT_VER
     data.m_Key = stream.ReadU32();
     block->SetKey( data.m_Key );
 
-    ReadCond( stream, aVer, data.m_Unknown1 );
+    ReadCond( stream, aVer, data.m_Next );
+    block->SetNext( data.m_Next.value_or( 0 ) );
+
     data.m_ComponentInstPtr = stream.ReadU32();
-    ReadCond( stream, aVer, data.m_Unknown2 );
-    data.m_PtrX12 = stream.ReadU32();
-    data.m_Unknown3 = stream.ReadU32();
+    ReadCond( stream, aVer, data.m_Unknown1 );
+
+    data.m_FirstPinInstance16x = stream.ReadU32();
+    data.m_FirstPinInstance = stream.ReadU32();
+
     data.m_FunctionName = stream.ReadU32();
     data.m_Slots = stream.ReadU32();
     data.m_Fields = stream.ReadU32();
@@ -934,7 +927,7 @@ static std::unique_ptr<BLOCK_BASE> ParseBlock_0x11( FILE_STREAM& aStream, FMT_VE
 
 static std::unique_ptr<BLOCK_BASE> ParseBlock_0x12( FILE_STREAM& aStream, FMT_VER aVer )
 {
-    auto block = std::make_unique<BLOCK<BLK_0x12_XREF>>( aStream.Position() );
+    auto block = std::make_unique<BLOCK<BLK_0x12_PIN_INST>>( aStream.Position() );
 
     auto& data = block->GetData();
 
@@ -942,9 +935,10 @@ static std::unique_ptr<BLOCK_BASE> ParseBlock_0x12( FILE_STREAM& aStream, FMT_VE
     data.m_R = aStream.ReadU16();
     data.m_Key = aStream.ReadU32();
     block->SetKey( data.m_Key );
-    data.m_Ptr1 = aStream.ReadU32();
-    data.m_Ptr2 = aStream.ReadU32();
-    data.m_Ptr3 = aStream.ReadU32();
+    data.m_Next = aStream.ReadU32();
+    block->SetNext( data.m_Next );
+    data.m_PtrPinName = aStream.ReadU32();
+    data.m_PtrPad = aStream.ReadU32();
     data.m_Unknown1 = aStream.ReadU32();
 
     ReadCond( aStream, aVer, data.m_Unknown2 );
@@ -1505,13 +1499,35 @@ static std::unique_ptr<BLOCK_BASE> ParseBlock_0x26( FILE_STREAM& aStream, FMT_VE
 }
 
 
+/**
+ * Parse the 0x27 constraint-manager cross-reference block.
+ *
+ * @param aEndOff one past the last byte of the block, or zero when the file records no end
+ *                for it. In that case the block occupies the rest of the file.
+ */
 static std::unique_ptr<BLOCK_BASE> ParseBlock_0x27( FILE_STREAM& aStream, FMT_VER aVer, size_t aEndOff )
 {
     auto block = std::make_unique<BLOCK<BLK_0x27_CSTRMGR_XREF>>( aStream.Position() );
 
     auto& data = block->GetData();
 
-    const size_t totalBytes = aEndOff - 1 - aStream.Position();
+    size_t totalBytes = 0;
+
+    if( aEndOff == 0 )
+    {
+        // We take the rest of the file as the block content.
+        totalBytes = aStream.Size() - aStream.Position();
+    }
+    else
+    {
+        if( aEndOff - 1 > aStream.Size() )
+        {
+            THROW_IO_ERRORF( wxT( "Block 0x27 end offset %#010zx is past the end of the file at %#010zx" ),
+                             aEndOff, aStream.Size() );
+        }
+
+        totalBytes = aEndOff - 1 - aStream.Position();
+    }
 
     // The blob starts with 3 bytes of padding, then uint32 LE values
     constexpr size_t kPadding = 3;
@@ -1528,10 +1544,16 @@ static std::unique_ptr<BLOCK_BASE> ParseBlock_0x27( FILE_STREAM& aStream, FMT_VE
     const size_t numValues = payloadBytes / 4;
     const size_t remainder = payloadBytes % 4;
 
-    data.m_Refs.resize( numValues );
-
+    // A zero word (apparently) separates sections of the table.
+    // Until we work out the exact structure, we simply collect all non-zero references
+    // in order.
     for( size_t i = 0; i < numValues; i++ )
-        data.m_Refs[i] = aStream.ReadU32();
+    {
+        const uint32_t ref = aStream.ReadU32();
+
+        if( ref != 0 )
+            data.m_Refs.push_back( ref );
+    }
 
     if( remainder > 0 )
         aStream.Skip( remainder );
@@ -1886,6 +1908,7 @@ static std::unique_ptr<BLOCK_BASE> ParseBlock_0x30_STR_WRAPPER( FILE_STREAM& aSt
     data.m_Rotation = aStream.ReadU32();
 
     ReadCond( aStream, aVer, data.m_PtrGroup_16x );
+    ReadCond( aStream, aVer, data.m_Ptr0x3E_V181 );
 
     return block;
 }
@@ -1954,12 +1977,12 @@ static std::unique_ptr<BLOCK_BASE> ParseBlock_0x32_PLACED_PAD( FILE_STREAM& aStr
     data.m_ParentFp = aStream.ReadU32();
     data.m_Track = aStream.ReadU32();
     data.m_PadPtr = aStream.ReadU32();
-    data.m_Ptr6 = aStream.ReadU32();
+    data.m_PinInstance = aStream.ReadU32();
     data.m_Ratline = aStream.ReadU32();
     data.m_PtrPinNumber = aStream.ReadU32();
     data.m_NextInCompInst = aStream.ReadU32();
 
-    ReadCond( aStream, aVer, data.m_Unknown2 );
+    ReadCond( aStream, aVer, data.m_ComponentInst );
 
     data.m_NameText = aStream.ReadU32();
     data.m_Ptr11 = aStream.ReadU32();
@@ -2048,7 +2071,30 @@ static std::unique_ptr<BLOCK_BASE> ParseBlock_0x35( FILE_STREAM& aStream, FMT_VE
 
     data.m_T2 = aStream.ReadU8();
     data.m_T3 = aStream.ReadU16();
-    aStream.ReadBytes( data.m_Content.data(), data.m_Content.size() );
+
+    data.m_Next = aStream.ReadU32();
+    block->SetNext( data.m_Next );
+
+    data.m_Unknown1 = aStream.ReadU32();
+
+    aStream.ReadBytes( data.m_LogFile.data(), data.m_LogFile.size() );
+
+    data.m_Unknown2 = aStream.ReadU32();
+
+    aStream.ReadBytes( data.m_UnusedFile.data(), data.m_UnusedFile.size() );
+    aStream.ReadBytes( data.m_EclReportFile.data(), data.m_EclReportFile.size() );
+    aStream.ReadBytes( data.m_EclLogFile.data(), data.m_EclLogFile.size() );
+
+    data.m_Unknown3 = aStream.ReadU32();
+
+    aStream.ReadBytes( data.m_Version.data(), data.m_Version.size() );
+
+    data.m_Unknown4 = aStream.ReadU32();
+    data.m_Unknown5 = aStream.ReadU32();
+    data.m_Unknown6 = aStream.ReadU32();
+
+    data.m_Key = aStream.ReadU32();
+    block->SetKey( data.m_Key );
 
     return block;
 }
@@ -2262,6 +2308,25 @@ static std::unique_ptr<BLOCK_BASE> ParseBlock_0x37( FILE_STREAM& aStream, FMT_VE
 
     ReadCond( aStream, aVer, data.m_Unknown3 );
 
+    // The table is m_Capacity entries long. m_Count indicates how many entries are valid.
+    // But we read all of them.
+
+    // Defend against a mis-parse that would index beyond the end of the file
+    const size_t maxCapacity = ( aStream.Size() - aStream.Position() ) / sizeof( uint32_t );
+
+    if( data.m_Capacity > maxCapacity )
+    {
+        THROW_IO_ERRORF( wxT( "Block 0x37 capacity %u exceeds the %zu entries left in the file at offset %#010zx" ),
+                         data.m_Capacity, maxCapacity, aStream.Position() );
+    }
+
+    if( data.m_Count > data.m_Capacity )
+    {
+        THROW_IO_ERRORF( wxT( "Block 0x37 count %u exceeds capacity %u at offset %#010zx" ),
+                         data.m_Count, data.m_Capacity, aStream.Position() );
+    }
+
+    data.m_Ptrs.resize( data.m_Capacity );
     ReadArrayU32( aStream, data.m_Ptrs );
 
     return block;
@@ -2586,13 +2651,18 @@ std::unique_ptr<BLOCK_BASE> ALLEGRO::BLOCK_PARSER::ParseBlock( bool& aEndOfObjec
     }
     case 0x27:
     {
-        if( m_x27_end <= m_stream.Position() )
+        if( m_x27_end != 0 && m_x27_end <= m_stream.Position() )
         {
             THROW_IO_ERRORF( wxT( "Current offset %#010zx is at or past the expected end of block 0x27 at %#010zx" ),
                              m_stream.Position(), m_x27_end );
         }
 
         block = ParseBlock_0x27( m_stream, m_ver, m_x27_end );
+
+        // With no end offset, we're done at the end of the file.
+        if( m_x27_end == 0 )
+            aEndOfObjectsMarker = true;
+
         break;
     }
     case 0x28:
@@ -2707,7 +2777,9 @@ std::unique_ptr<BLOCK_BASE> ALLEGRO::BLOCK_PARSER::ParseBlock( bool& aEndOfObjec
     }
     case 0x00:
     {
-        // Block type 0x00 marks the end of the objects section
+        // A 0x00 type byte is not a block.
+        // It's only "real" if the rest of the file is zero padding, otherwise
+        // it's probably an error in the previous block's length.
         aEndOfObjectsMarker = true;
         break;
     }
@@ -2738,10 +2810,6 @@ void ALLEGRO::PARSER::readObjects( BRD_DB& aBoard )
     {
         const size_t offset = m_stream.Position();
 
-        // This seems to be always true and is quite useful for debugging out-of-sync objects
-        wxASSERT_MSG( offset % 4 == 0,
-                      wxString::Format( "Allegro object at %#010zx, offset not aligned to 4 bytes", offset ) );
-
         // Peek at the block type byte before ParseBlock consumes it so we
         // have the value available for error messages if the type is unknown
         // and ParseBlock returns nullptr.
@@ -2749,52 +2817,47 @@ void ALLEGRO::PARSER::readObjects( BRD_DB& aBoard )
         m_stream.GetU8( blockTypeByte );
         m_stream.Seek( offset );
 
+        // This seems to be always true and is quite useful for debugging out-of-sync
+        // objects with non-zero type tags.
+        if( blockTypeByte != 0x00 )
+        {
+            wxASSERT_MSG( offset % 4 == 0,
+                          wxString::Format( "Allegro object at %#010zx, offset not aligned to 4 bytes",
+                                            offset ) );
+        }
+
         bool                        endOfObjectsMarker = false;
         std::unique_ptr<BLOCK_BASE> block = blockParser.ParseBlock( endOfObjectsMarker );
 
         if( endOfObjectsMarker )
         {
-            if( ver >= FMT_VER::V_180 )
+            // Everything from here has to be zero padding. Anything else means an earlier
+            // block was parsed into the wrong length, and ending the stream would junk
+            // real content after the presumed end of objects.
+            const size_t zeroRunStart = m_stream.Position();
+
+            while( !m_stream.Eof() )
             {
-                // V18 files can have zero-padded gaps between block groups. Skip
-                // consecutive zero bytes and check if more blocks follow.
-                size_t scanPos = m_stream.Position();
-                uint8_t nextByte = 0;
+                const size_t  zeroOffset = m_stream.Position();
+                const uint8_t zeroValue = m_stream.ReadU8();
 
-                while( m_stream.GetU8( nextByte ) && nextByte == 0x00 )
-                    scanPos = m_stream.Position();
-
-                if( nextByte > 0x00 && nextByte <= 0x3E )
+                if( zeroValue != 0x00 )
                 {
-                    size_t blockStart = scanPos;
-
-                    if( blockStart % 4 != 0 )
-                        blockStart -= ( blockStart % 4 );
-
-                    // After backward alignment the byte at blockStart may
-                    // differ from the non-zero byte we found. Verify it
-                    // still looks like a valid block type before continuing.
-                    uint8_t alignedByte = 0;
-                    m_stream.Seek( blockStart );
-                    m_stream.GetU8( alignedByte );
-                    m_stream.Seek( blockStart );
-
-                    if( alignedByte == 0x00 || alignedByte > 0x3E )
-                        break;
-
-                    wxLogTrace( traceAllegroParser,
-                                wxString::Format( "V18 zero gap from %#010zx to %#010zx, "
-                                                  "continuing at block type %#04x",
-                                                  offset, blockStart, nextByte ) );
-                    continue;
+                    THROW_IO_ERRORF( wxT( "Expected only zero padding to the end of the file after the " )
+                                     wxT( "zero type byte at offset %#010zx, but found %#02x at offset " )
+                                     wxT( "%#010zx, at object index %zu of %u" ),
+                                     offset, zeroValue, zeroOffset, aBoard.GetObjectCount(),
+                                     aBoard.m_Header->m_ObjectCount );
                 }
             }
 
             if( wxLog::IsAllowedTraceMask( traceAllegroParser ) )
             {
                 wxLogTrace( traceAllegroParser,
-                            wxString::Format( "End of objects marker (0x00) at index %zu, offset %#010zx",
-                                              aBoard.GetObjectCount(), offset ) );
+                            wxString::Format( "End of objects at index %zu, offset %#010zx, "
+                                              "%zu bytes of zero padding to the end of the file",
+                                              aBoard.GetObjectCount(), offset,
+                                              m_stream.Size() - zeroRunStart ) );
             }
 
             break;
@@ -2821,10 +2884,8 @@ void ALLEGRO::PARSER::readObjects( BRD_DB& aBoard )
         }
         else
         {
-            wxLogTrace( traceAllegroParserBlocks,
-                        wxString::Format( "Added block %zu, type %#04x from %#010zx to %#010zx",
-                                          aBoard.GetObjectCount(), block->GetBlockType(), offset,
-                                          m_stream.Position() ) );
+            wxLogTrace( traceAllegroParserBlocks, "Added block %zu, type %#04x from %#010zx to %#010zx",
+                        aBoard.GetObjectCount(), block->GetBlockType(), offset, m_stream.Position() );
 
             aBoard.InsertBlock( std::move( block ) );
 
@@ -2880,12 +2941,6 @@ std::unique_ptr<BRD_DB> ALLEGRO::PARSER::Parse()
         {
             wxLogTrace( traceAllegroParser, "Header linked lists (ver=%#010x):", board->m_Header->m_Magic );
 
-            dumpLL( "V18_1", board->m_Header->m_LL_V18_1 );
-            dumpLL( "V18_2", board->m_Header->m_LL_V18_2 );
-            dumpLL( "V18_3", board->m_Header->m_LL_V18_3 );
-            dumpLL( "V18_4", board->m_Header->m_LL_V18_4 );
-            dumpLL( "V18_5", board->m_Header->m_LL_V18_5 );
-
             dumpLL( "0x04", board->m_Header->m_LL_0x04 );
             dumpLL( "0x06", board->m_Header->m_LL_0x06 );
             dumpLL( "0x0C", board->m_Header->m_LL_0x0C );
@@ -2904,13 +2959,17 @@ std::unique_ptr<BRD_DB> ALLEGRO::PARSER::Parse()
             dumpLL( "0x2C", board->m_Header->m_LL_0x2C );
             dumpLL( "0x0C_2", board->m_Header->m_LL_0x0C_2 );
             dumpLL( "Unknown3", board->m_Header->m_LL_Unknown3 );
-            dumpLL( "Unknown5", board->m_Header->m_LL_Unknown5_preV18 );
-            dumpLL( "Unknown5", board->m_Header->m_LL_Unknown5_V18 );
+
+            dumpLL( "0x35", board->m_Header->m_LL_0x35 );
             dumpLL( "0x36", board->m_Header->m_LL_0x36 );
-            dumpLL( "Unknown6", board->m_Header->m_LL_Unknown6 );
+            dumpLL( "Unknown4", board->m_Header->m_LL_Unknown4 );
+            dumpLL( "Unknown5", board->m_Header->m_LL_Unknown5 );
             dumpLL( "0x0A_2", board->m_Header->m_LL_0x0A_2 );
 
-            dumpLL( "V18_6", board->m_Header->m_LL_V18_6 );
+            dumpLL( "0x03_2", board->m_Header->m_LL_0x03_2 );
+
+            wxLogTrace( traceAllegroParser, "  LL trailing word       %#010x",
+                        board->m_Header->m_Unknown_LlTrailer );
         }
     }
     catch( const IO_ERROR& e )
@@ -2969,10 +3028,6 @@ std::unique_ptr<BRD_DB> ALLEGRO::PARSER::Parse()
         THROW_IO_ERROR( s );
     }
 
-    // Now the object are read, collect sentinel keys
-    board->ResolveAndValidate();
-
-    wxLogTrace( traceAllegroPerf, wxT( "  ResolveAndValidate: %.3f ms" ), parseTimer.msecs( true ) ); //format:allow
     wxLogTrace( traceAllegroPerf, wxT( "  Phase 1 total: %.3f ms" ), parseTimer.msecs() ); //format:allow
 
     return board;

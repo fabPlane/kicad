@@ -324,7 +324,9 @@ void PCB_SHAPE::Serialize( google::protobuf::Any &aContainer ) const
     }
 
     kiapi::common::PackCustomProperties( msg.mutable_custom_properties(), *this );
-    aContainer.PackFrom( msg );
+
+    if( !aContainer.PackFrom( msg ) )
+        wxFAIL_MSG( wxT( "Failed to pack PCB_SHAPE" ) );
 }
 
 
@@ -1583,7 +1585,14 @@ void PCB_SHAPE::syncLibCoords()
 
 void PCB_SHAPE::Mirror( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
 {
-    flip( aCentre, aFlipDirection );
+    Mirror( MIRROR_AXIS( aCentre, aFlipDirection ) );
+}
+
+
+void PCB_SHAPE::Mirror( const SEG& aAxis )
+{
+    EDA_SHAPE::mirror( aAxis );
+    syncLibCoords();
 }
 
 
@@ -1610,8 +1619,8 @@ void PCB_SHAPE::SetIsProxyItem( bool aIsProxy )
     {
         if( GetShape() == SHAPE_T::SEGMENT )
         {
-            if( parentPad && parentPad->GetLocalThermalSpokeWidthOverride().has_value() )
-                SetWidth( parentPad->GetLocalThermalSpokeWidthOverride().value() );
+            if( parentPad && parentPad->GetLocalThermalSpokeWidthOverride( m_layer ).has_value() )
+                SetWidth( parentPad->GetLocalThermalSpokeWidthOverride( m_layer ).value() );
             else
                 SetWidth( pcbIUScale.mmToIU( ZONE_THERMAL_RELIEF_COPPER_WIDTH_MM ) );
         }
@@ -2051,7 +2060,8 @@ static struct PCB_SHAPE_DESC
 
         propMgr.ReplaceProperty( TYPE_HASH( BOARD_CONNECTED_ITEM ), _HKI( "Layer" ),
                     new PROPERTY_ENUM<PCB_SHAPE, PCB_LAYER_ID>( _HKI( "Layer" ),
-                                shapeLayerSetter, shapeLayerGetter ) ).SetIsCopyable();
+                                shapeLayerSetter, shapeLayerGetter ) )
+                .SetIsCopyable();
 
         auto isPolygonOrEllipse =
                 []( INSPECTABLE* aItem ) -> bool
@@ -2206,12 +2216,14 @@ static struct PCB_SHAPE_DESC
         propMgr.AddProperty( new PROPERTY<PCB_SHAPE, bool>( _HKI( "Soldermask" ),
                     &PCB_SHAPE::SetHasSolderMask, &PCB_SHAPE::HasSolderMask ),
                     groupTechLayers )
-                .SetAvailableFunc( isExternalCuLayer ).SetIsCopyable();
+                .SetAvailableFunc( isExternalCuLayer )
+                .SetIsCopyable();
 
         propMgr.AddProperty( new PROPERTY<PCB_SHAPE, std::optional<int>>( _HKI( "Soldermask Margin Override" ),
                     &PCB_SHAPE::SetLocalSolderMaskMargin, &PCB_SHAPE::GetLocalSolderMaskMargin,
                     PROPERTY_DISPLAY::PT_SIZE ),
                     groupTechLayers )
-                .SetAvailableFunc( isExternalCuLayer ).SetIsCopyable();
+                .SetAvailableFunc( isExternalCuLayer )
+                .SetIsCopyable();
     }
 } _PCB_SHAPE_DESC;

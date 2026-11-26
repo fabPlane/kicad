@@ -66,6 +66,17 @@ const char* const PARITY_FIXTURES[] = {
     "issue23840/BusAndVectors"
 };
 
+void CheckRows( const SCH_CONNECTIVITY::DUMP_ROWS& aExpected, const SCH_CONNECTIVITY::DUMP_ROWS& aActual )
+{
+    if( aExpected == aActual )
+        return;
+
+    BOOST_ERROR( nlohmann::json::diff( nlohmann::json::parse( SCH_CONNECTIVITY::Dump( aExpected ) ),
+                                       nlohmann::json::parse( SCH_CONNECTIVITY::Dump( aActual ) ) )
+                         .dump( 2 ) );
+}
+
+
 // Legacy records each island's own driver while the engine records the whole net's winner
 void EraseDrivers( nlohmann::json& aValue )
 {
@@ -490,13 +501,13 @@ BOOST_DATA_TEST_CASE_F( CONNECTIVITY_DUMP_FIXTURE,
                     }
                 }
 
-                const std::string incremental = SCH_CONNECTIVITY::Dump( *schematic, schematic->Connectivity() );
+                const auto incremental = SCH_CONNECTIVITY::CaptureRows( *schematic, schematic->Connectivity() );
                 rebuilt.Update( *schematic, true );
-                BOOST_CHECK_EQUAL( incremental, SCH_CONNECTIVITY::Dump( *schematic, rebuilt ) );
+                CheckRows( incremental, SCH_CONNECTIVITY::CaptureRows( *schematic, rebuilt ) );
                 // A separate fresh engine also detects stale content-keyed caches retained by a full rebuild
                 SCH_CONNECTIVITY::FACADE fresh;
                 fresh.Update( *schematic, true );
-                BOOST_CHECK_EQUAL( incremental, SCH_CONNECTIVITY::Dump( *schematic, fresh ) );
+                CheckRows( incremental, SCH_CONNECTIVITY::CaptureRows( *schematic, fresh ) );
                 std::map<int, int> toFresh;
                 std::map<int, int> fromFresh;
                 const auto& current = schematic->Connectivity();
@@ -517,7 +528,7 @@ BOOST_DATA_TEST_CASE_F( CONNECTIVITY_DUMP_FIXTURE,
                 }
             };
 
-    const std::string original = SCH_CONNECTIVITY::Dump( *schematic, schematic->Connectivity() );
+    const auto original = SCH_CONNECTIVITY::CaptureRows( *schematic, schematic->Connectivity() );
 
     const auto restoreGeometry =
             [&]()
@@ -559,8 +570,11 @@ BOOST_DATA_TEST_CASE_F( CONNECTIVITY_DUMP_FIXTURE,
                 for( SCH_ITEM* item : removed )
                     delete item;
 
-                verify();
-                BOOST_CHECK_EQUAL( original, SCH_CONNECTIVITY::Dump( *schematic, schematic->Connectivity() ) );
+                // The original dump already passed verify, so matching it covers both rebuilds
+                CheckRows( original, SCH_CONNECTIVITY::CaptureRows( *schematic, schematic->Connectivity() ) );
+
+                // Net codes follow update history, so the rebuild must see every state the commit did
+                rebuilt.Update( *schematic, true );
             };
 
     for( const VECTOR2I& movement : { offset, VECTOR2I( -offset.x, -offset.y ) } )
@@ -584,7 +598,7 @@ BOOST_DATA_TEST_CASE_F( CONNECTIVITY_DUMP_FIXTURE,
     BOOST_REQUIRE( !symbolScreen->CheckIfOnDrawList( symbol ) );
     delete symbol;
     verify();
-    BOOST_CHECK_NE( original, SCH_CONNECTIVITY::Dump( *schematic, schematic->Connectivity() ) );
+    BOOST_CHECK( original != SCH_CONNECTIVITY::CaptureRows( *schematic, schematic->Connectivity() ) );
 
     SCH_COMMIT addition( &manager );
     addition.Add( symbolReplacement.get(), symbolScreen );
@@ -653,18 +667,19 @@ BOOST_DATA_TEST_CASE_F( CONNECTIVITY_DUMP_FIXTURE,
             delete item;
 
             verify();
-            BOOST_CHECK_NE( original, SCH_CONNECTIVITY::Dump( *schematic, schematic->Connectivity() ) );
+            BOOST_CHECK( original != SCH_CONNECTIVITY::CaptureRows( *schematic, schematic->Connectivity() ) );
 
             restoreGeometry();
         }
     }
 
+    verify();
     BOOST_TEST_MESSAGE( fixture << ": checked " << labels.size() << " native label renames and restores, and "
                                << geometry.size() << " native geometry move/remove/restore sequences" );
-    const std::string incremental = SCH_CONNECTIVITY::Dump( *schematic, schematic->Connectivity() );
-    BOOST_CHECK_EQUAL( original, incremental );
+    const auto incremental = SCH_CONNECTIVITY::CaptureRows( *schematic, schematic->Connectivity() );
+    CheckRows( original, incremental );
     schematic->RebuildConnectivity();
-    BOOST_CHECK_EQUAL( incremental, SCH_CONNECTIVITY::Dump( *schematic, schematic->Connectivity() ) );
+    CheckRows( incremental, SCH_CONNECTIVITY::CaptureRows( *schematic, schematic->Connectivity() ) );
 }
 
 

@@ -29,6 +29,7 @@
 #include <bus_alias.h>
 #include <core/mirror.h>
 #include <core/kicad_algo.h>
+#include <set>
 #include <eda_text.h>
 #include <macros.h>
 #include <progress_reporter.h>
@@ -36,6 +37,7 @@
 #include <sch_bus_entry.h>
 #include <sch_edit_frame.h> //SYMBOL_ORIENTATION_T
 #include <sch_io/sch_io_mgr.h>
+#include <sch_io/sch_io_wire_detour.h>
 #include <sch_junction.h>
 #include <sch_line.h>
 #include <sch_screen.h>
@@ -157,11 +159,16 @@ CADSTAR_SCH_ARCHIVE_LOADER::loadLibPart( const CADSTAR_PART_ENTRY& aPart )
         wxASSERT( m_symDefTerminalsMap.count( symbolID ) ); //loadSymDef should have populated this
 
 
-        // Update the pin numbers to match those defined in the Cadstar part
+        // Look up every terminal's pins before renumbering, as a new number can match a later terminal
+        std::vector<std::pair<TERMINAL_ID, std::vector<SCH_PIN*>>> terminalPins;
+
         for( auto& [storedPinNum, termID] : m_symDefTerminalsMap[symbolID] )
+            terminalPins.emplace_back( termID, kiSymDef->GetPinsByNumber( storedPinNum ) );
+
+        // Update the pin numbers to match those defined in the Cadstar part
+        for( auto& [termID, pins] : terminalPins )
         {
             wxCHECK( termID > 0 && sym.m_Pins.size() >= size_t( termID ), nullptr );
-            std::vector<SCH_PIN*> pins = kiSymDef->GetPinsByNumber( storedPinNum );
             size_t                termIdx = size_t( termID ) - 1;
 
             // For now leave numerical pin number. Otherwise, when loading the
@@ -1106,16 +1113,124 @@ void CADSTAR_SCH_ARCHIVE_LOADER::loadBusses()
 
 void CADSTAR_SCH_ARCHIVE_LOADER::loadNets()
 {
+    // Every pin is an obstacle for wires of other nets, the terminals of a net carry its identity
+    std::map<LAYER_ID, SCH_IO_WIRE_DETOUR> detours;
+    std::map<NET_ID, int>                  netIds;
+    std::set<std::pair<LAYER_ID, VECTOR2I>> terminalPoints;
+
+    for( const auto& [netID, net] : Schematic.Nets )
+    {
+        const int netIndex = netIds.try_emplace( netID, static_cast<int>( netIds.size() ) + 1 ).first->second;
+
+        for( const auto& [termID, term] : net.Terminals )
+        {
+            auto  symIt = Schematic.Symbols.find( term.SymbolID );
+            POINT pos = getLocationOfNetElement( net, termID );
+
+            if( symIt == Schematic.Symbols.end() || pos.x == UNDEFINED_VALUE )
+                continue;
+
+            const VECTOR2I kiPos = getKiCadPoint( pos );
+
+            detours[symIt->second.LayerID].AddContact( kiPos, netIndex );
+            terminalPoints.emplace( symIt->second.LayerID, kiPos );
+        }
+    }
+
+    for( const auto& [layerID, sheet] : m_sheetMap )
+    {
+        for( SCH_ITEM* item : sheet->GetScreen()->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+
+            for( const SCH_PIN* pin : symbol->GetLibPins() )
+            {
+                if( symbol->GetUnit() && pin->GetUnit() && pin->GetUnit() != symbol->GetUnit() )
+                    continue;
+
+                const VECTOR2I pos = symbol->GetPinPhysicalPosition( pin );
+
+                if( !terminalPoints.count( { layerID, pos } ) )
+                    detours[layerID].AddContact( pos, detours[layerID].AnonymousNet() );
+            }
+        }
+    }
+
+    auto getHierarchicalLabel =
+            [&]( const NET_SCH& aNet, const NETELEMENT_ID& aNode ) -> SCH_HIERLABEL*
+            {
+                if( aNode.Contains( "BLKT" ) )
+                {
+                    NET_SCH::BLOCK_TERM blockTerm = aNet.BlockTerminals.at( aNode );
+                    BLOCK_PIN_ID        blockPinID = std::make_pair( blockTerm.BlockID, blockTerm.TerminalID );
+
+                    if( m_sheetPinMap.find( blockPinID ) != m_sheetPinMap.end() )
+                        return m_sheetPinMap.at( blockPinID );
+                }
+
+                return nullptr;
+            };
+
+    // Connections are routed once every net has registered its geometry
+    struct PENDING_CONNECTION
+    {
+        NET_ID                              NetID;
+        NET_SCH::CONNECTION_SCH             Conn;
+        SHAPE_LINE_CHAIN                    Chain;
+        std::map<NETELEMENT_ID, SCH_LABEL_BASE*> Labels;
+    };
+
+    std::vector<PENDING_CONNECTION> pending;
+
     for( std::pair<NET_ID, NET_SCH> netPair : Schematic.Nets )
     {
+        const int                           netIndex = netIds.at( netPair.first );
         NET_SCH                             net     = netPair.second;
         wxString                            netName = net.Name;
-        std::map<NETELEMENT_ID, SCH_LABEL*> netlabels;
+        std::map<NETELEMENT_ID, SCH_LABEL_BASE*> netlabels;
 
         if( netName.IsEmpty() )
             netName = wxString::Format( "$%ld", net.SignalNum );
 
         netName = HandleTextOverbar( netName );
+
+        // A CADSTAR signal name is design-wide, so a label on a named net spanning sheets must be global
+        std::set<LAYER_ID> netSheets;
+
+        for( const auto& [id, term] : net.Terminals )
+        {
+            if( Schematic.Symbols.count( term.SymbolID ) )
+                netSheets.insert( Schematic.Symbols.at( term.SymbolID ).LayerID );
+        }
+
+        for( const auto& [id, dangler] : net.Danglers )
+            netSheets.insert( dangler.LayerID );
+
+        for( const auto& [id, junc] : net.Junctions )
+            netSheets.insert( junc.LayerID );
+
+        for( const auto& [id, busTerm] : net.BusTerminals )
+            netSheets.insert( Schematic.Buses.at( busTerm.BusID ).LayerID );
+
+        for( const NET_SCH::CONNECTION_SCH& conn : net.Connections )
+            netSheets.insert( conn.LayerID );
+
+        netSheets.erase( wxT( "NO_SHEET" ) );
+
+        const bool globalNetLabels = !net.Name.IsEmpty() && netSheets.size() > 1;
+
+        auto newNetLabel =
+                [&]() -> SCH_LABEL_BASE*
+                {
+                    if( globalNetLabels )
+                    {
+                        SCH_GLOBALLABEL* label = new SCH_GLOBALLABEL;
+                        label->SetShape( LABEL_FLAG_SHAPE::L_UNSPECIFIED );
+                        return label;
+                    }
+
+                    return new SCH_LABEL();
+                };
 
         for( std::pair<NETELEMENT_ID, NET_SCH::SYM_TERM> terminalPair : net.Terminals )
         {
@@ -1156,7 +1271,7 @@ void CADSTAR_SCH_ARCHIVE_LOADER::loadNets()
                      && netTerm.HasNetLabel )
             {
                 // This is a named net that connects to a schematic symbol pin - we need to put a label
-                SCH_LABEL* label = new SCH_LABEL();
+                SCH_LABEL_BASE* label = newNetLabel();
                 label->SetText( netName );
 
                 POINT pinLocation = getLocationOfNetElement( net, netTerm.ID );
@@ -1173,28 +1288,28 @@ void CADSTAR_SCH_ARCHIVE_LOADER::loadNets()
             }
         }
 
-        auto getHierarchicalLabel =
-                [&]( const NETELEMENT_ID& aNode ) -> SCH_HIERLABEL*
-                {
-                    if( aNode.Contains( "BLKT" ) )
-                    {
-                        NET_SCH::BLOCK_TERM blockTerm = net.BlockTerminals.at( aNode );
-                        BLOCK_PIN_ID blockPinID = std::make_pair( blockTerm.BlockID, blockTerm.TerminalID );
-
-                        if( m_sheetPinMap.find( blockPinID ) != m_sheetPinMap.end() )
-                            return m_sheetPinMap.at( blockPinID );
-                    }
-
-                    return nullptr;
-                };
-
         //Add net name to all hierarchical pins (block terminals in CADSTAR)
         for( std::pair<NETELEMENT_ID, NET_SCH::BLOCK_TERM> blockPair : net.BlockTerminals )
         {
-            SCH_HIERLABEL* label = getHierarchicalLabel( blockPair.first );
+            SCH_HIERLABEL* label = getHierarchicalLabel( net, blockPair.first );
 
             if( label )
                 label->SetText( netName );
+
+            // Terminals a connection ends on are registered after their position is fixed up below
+            const bool connected = std::any_of( net.Connections.begin(), net.Connections.end(),
+                                                [&]( const NET_SCH::CONNECTION_SCH& aConn )
+                                                {
+                                                    return aConn.LayerID != wxT( "NO_SHEET" )
+                                                           && ( aConn.StartNode == blockPair.first
+                                                                || aConn.EndNode == blockPair.first );
+                                                } );
+
+            if( label && !connected )
+            {
+                detours[Schematic.Blocks.at( blockPair.second.BlockID ).LayerID].AddContact( label->GetPosition(),
+                                                                                              netIndex );
+            }
         }
 
         // Load all bus entries and add net label if required
@@ -1217,7 +1332,7 @@ void CADSTAR_SCH_ARCHIVE_LOADER::loadNets()
             // If the original design does not have a label, just make it very small
             // to keep connectivity but make the design look visually similar to
             // the original.
-            SCH_LABEL* label = new SCH_LABEL();
+            SCH_LABEL_BASE* label = newNetLabel();
             label->SetText( netName );
             label->SetPosition( getKiCadPoint( busTerm.SecondPoint ) );
             label->SetVisible( true );
@@ -1233,6 +1348,7 @@ void CADSTAR_SCH_ARCHIVE_LOADER::loadNets()
             }
 
             netlabels.insert( { busTerm.ID, label } );
+            detours[bus.LayerID].AddContact( label->GetPosition(), netIndex );
             m_sheetMap.at( bus.LayerID )->GetScreen()->Append( label );
         }
 
@@ -1240,7 +1356,7 @@ void CADSTAR_SCH_ARCHIVE_LOADER::loadNets()
         {
             NET_SCH::DANGLER dangler = danglerPair.second;
 
-            SCH_LABEL* label = new SCH_LABEL();
+            SCH_LABEL_BASE* label = newNetLabel();
             label->SetPosition( getKiCadPoint( dangler.Position ) );
             label->SetVisible( true );
 
@@ -1252,6 +1368,7 @@ void CADSTAR_SCH_ARCHIVE_LOADER::loadNets()
 
             label->SetText( netName ); // set text after applying settings to avoid double-escaping
             netlabels.insert( { dangler.ID, label } );
+            detours[dangler.LayerID].AddContact( label->GetPosition(), netIndex );
 
             m_sheetMap.at( dangler.LayerID )->GetScreen()->Append( label );
         }
@@ -1275,11 +1392,6 @@ void CADSTAR_SCH_ARCHIVE_LOADER::loadNets()
             if( conn.Path.size() < 2 || conn.Path.back().End != end )
                 conn.Path.push_back( VERTEX( VERTEX_TYPE::VT_POINT, end ) );
 
-            bool      firstPt  = true;
-            bool      secondPt = false;
-            VECTOR2I  last;
-            SCH_LINE* wire = nullptr;
-
             SHAPE_LINE_CHAIN wireChain; // Create a temp. line chain representing the connection
 
             auto cadstarToKicadPoint = [this]( const VECTOR2I& aPoint ) -> VECTOR2I
@@ -1301,7 +1413,7 @@ void CADSTAR_SCH_ARCHIVE_LOADER::loadNets()
 
             for( const NETELEMENT_ID& node : nodes )
             {
-                SCH_HIERLABEL* sheetPin = getHierarchicalLabel( node );
+                SCH_HIERLABEL* sheetPin = getHierarchicalLabel( net, node );
 
                 if( sheetPin )
                 {
@@ -1359,59 +1471,16 @@ void CADSTAR_SCH_ARCHIVE_LOADER::loadNets()
                 }
             }
 
-            auto fixNetLabelsAndSheetPins =
-                    [&]( const EDA_ANGLE& aWireAngle, NETELEMENT_ID& aNetEleID )
-                    {
-                        SPIN_STYLE spin = getSpinStyle( aWireAngle );
+            for( int i = 1; i < wireChain.PointCount(); i++ )
+                detours[conn.LayerID].AddWire( SEG( wireChain.CPoint( i - 1 ), wireChain.CPoint( i ) ), netIndex );
 
-                        if( netlabels.find( aNetEleID ) != netlabels.end() )
-                            netlabels.at( aNetEleID )->SetSpinStyle( spin.MirrorY() );
-
-                        SCH_HIERLABEL* sheetPin = getHierarchicalLabel( aNetEleID );
-
-                        if( sheetPin )
-                            sheetPin->SetSpinStyle( spin.MirrorX() );
-                    };
-
-            // Now we can load the wires and fix the label orientations
-            for( const VECTOR2I& pt : wireChain.CPoints() )
+            for( const NETELEMENT_ID& node : nodes )
             {
-                if( firstPt )
-                {
-                    last     = pt;
-                    firstPt  = false;
-                    secondPt = true;
-                    continue;
-                }
-
-                if( secondPt )
-                {
-                    secondPt = false;
-
-                    EDA_ANGLE wireAngle( last - pt );
-                    fixNetLabelsAndSheetPins( wireAngle, conn.StartNode );
-                }
-
-                wire = new SCH_LINE();
-
-                wire->SetStartPoint( last );
-                wire->SetEndPoint( pt );
-                wire->SetLayer( LAYER_WIRE );
-
-                if( !conn.ConnectionLineCode.IsEmpty() )
-                    wire->SetLineWidth( getLineThickness( conn.ConnectionLineCode ) );
-
-                last = pt;
-
-                m_sheetMap.at( conn.LayerID )->GetScreen()->Append( wire );
+                if( SCH_HIERLABEL* sheetPin = getHierarchicalLabel( net, node ) )
+                    detours[conn.LayerID].AddContact( sheetPin->GetPosition(), netIndex );
             }
 
-            //Fix labels on the end wire
-            if( wire )
-            {
-                EDA_ANGLE wireAngle( wire->GetEndPoint() - wire->GetStartPoint() );
-                fixNetLabelsAndSheetPins( wireAngle, conn.EndNode );
-            }
+            pending.push_back( { netPair.first, conn, wireChain, netlabels } );
         }
 
         for( std::pair<NETELEMENT_ID, NET_SCH::JUNCTION_SCH> juncPair : net.Junctions )
@@ -1421,13 +1490,14 @@ void CADSTAR_SCH_ARCHIVE_LOADER::loadNets()
             SCH_JUNCTION* kiJunc = new SCH_JUNCTION();
 
             kiJunc->SetPosition( getKiCadPoint( junc.Location ) );
+            detours[junc.LayerID].AddContact( kiJunc->GetPosition(), netIndex );
             m_sheetMap.at( junc.LayerID )->GetScreen()->Append( kiJunc );
 
             if( junc.HasNetLabel )
             {
                 // In CADSTAR the label can be placed anywhere, but in KiCad it has to be placed
                 // in the same location as the junction for it to be connected to it.
-                SCH_LABEL* label = new SCH_LABEL();
+                SCH_LABEL_BASE* label = newNetLabel();
                 label->SetText( netName );
                 label->SetPosition( getKiCadPoint( junc.Location ) );
                 label->SetVisible( true );
@@ -1439,6 +1509,105 @@ void CADSTAR_SCH_ARCHIVE_LOADER::loadNets()
 
                 m_sheetMap.at( junc.LayerID )->GetScreen()->Append( label );
             }
+        }
+    }
+
+    for( PENDING_CONNECTION& pend : pending )
+    {
+        const NET_SCH&                  net = Schematic.Nets.at( pend.NetID );
+        const NET_SCH::CONNECTION_SCH&  conn = pend.Conn;
+        SCH_IO_WIRE_DETOUR&             detour = detours[conn.LayerID];
+        const int                       netIndex = netIds.at( pend.NetID );
+        SHAPE_LINE_CHAIN                wireChain;
+        bool                            detourFailed = false;
+
+        for( int i = 0; i < pend.Chain.PointCount(); i++ )
+        {
+            if( i == 0 )
+            {
+                wireChain.Append( pend.Chain.CPoint( 0 ) );
+                continue;
+            }
+
+            SCH_IO_WIRE_DETOUR::RESULT result =
+                    detour.Route( SEG( pend.Chain.CPoint( i - 1 ), pend.Chain.CPoint( i ) ), netIndex );
+
+            detourFailed |= result.Failed;
+
+            // A bend lying on another net's pin cannot be detoured by moving one segment
+            if( i + 1 < pend.Chain.PointCount() && detour.TouchesOtherNet( pend.Chain.CPoint( i ), netIndex ) )
+                detourFailed = true;
+
+            for( const SEG& piece : result.Pieces )
+                wireChain.Append( piece.B );
+        }
+
+        if( detourFailed )
+        {
+            m_reporter->Report( wxString::Format( _( "A connection of net %s passes over a pin or wire of another "
+                                                     "net and could not be rerouted. The nets may be joined and "
+                                                     "require manual fixing." ),
+                                                  getNetName( net ) ),
+                                RPT_SEVERITY_WARNING );
+        }
+
+        auto fixNetLabelsAndSheetPins =
+                [&]( const EDA_ANGLE& aWireAngle, const NETELEMENT_ID& aNetEleID )
+                {
+                    SPIN_STYLE spin = getSpinStyle( aWireAngle );
+
+                    if( pend.Labels.find( aNetEleID ) != pend.Labels.end() )
+                        pend.Labels.at( aNetEleID )->SetSpinStyle( spin.MirrorY() );
+
+                    SCH_HIERLABEL* sheetPin = getHierarchicalLabel( net, aNetEleID );
+
+                    if( sheetPin )
+                        sheetPin->SetSpinStyle( spin.MirrorX() );
+                };
+
+        bool      firstPt = true;
+        bool      secondPt = false;
+        VECTOR2I  last;
+        SCH_LINE* wire = nullptr;
+
+        // Now we can load the wires and fix the label orientations
+        for( const VECTOR2I& pt : wireChain.CPoints() )
+        {
+            if( firstPt )
+            {
+                last = pt;
+                firstPt = false;
+                secondPt = true;
+                continue;
+            }
+
+            if( secondPt )
+            {
+                secondPt = false;
+
+                EDA_ANGLE wireAngle( last - pt );
+                fixNetLabelsAndSheetPins( wireAngle, conn.StartNode );
+            }
+
+            wire = new SCH_LINE();
+
+            wire->SetStartPoint( last );
+            wire->SetEndPoint( pt );
+            wire->SetLayer( LAYER_WIRE );
+
+            if( !conn.ConnectionLineCode.IsEmpty() )
+                wire->SetLineWidth( getLineThickness( conn.ConnectionLineCode ) );
+
+            last = pt;
+
+            m_sheetMap.at( conn.LayerID )->GetScreen()->Append( wire );
+        }
+
+        //Fix labels on the end wire
+        if( wire )
+        {
+            EDA_ANGLE wireAngle( wire->GetEndPoint() - wire->GetStartPoint() );
+            fixNetLabelsAndSheetPins( wireAngle, conn.EndNode );
         }
     }
 }
@@ -1834,13 +2003,18 @@ void CADSTAR_SCH_ARCHIVE_LOADER::loadSymbolGateAndPartFields( const SYMDEF_ID& a
     std::unique_ptr<LIB_SYMBOL> kiSymDef( loadSymdef( aSymdefID )->Duplicate() );
     wxCHECK( kiSymDef, /*void*/ );
 
+    // Look up every terminal's pins before renumbering, as a new number can match a later terminal
+    std::vector<std::pair<TERMINAL_ID, std::vector<SCH_PIN*>>> terminalPins;
+
+    for( auto&& [storedPinNum, termID] : m_symDefTerminalsMap[aSymdefID] )
+        terminalPins.emplace_back( termID, kiSymDef->GetPinsByNumber( storedPinNum ) );
+
     // Update the pin numbers to match those defined in the Cadstar part
     TERMINAL_TO_PINNUM_MAP pinNumMap;
 
-    for( auto&& [storedPinNum, termID] : m_symDefTerminalsMap[aSymdefID] )
+    for( auto&& [termID, pins] : terminalPins )
     {
         PART::DEFINITION::PIN     csPin = getPartDefinitionPin( aCadstarPart, aGateID, termID );
-        std::vector<SCH_PIN*>     pins = kiSymDef->GetPinsByNumber( storedPinNum );
 
         wxString pinName = HandleTextOverbar( csPin.Label );
         wxString pinNum = HandleTextOverbar( csPin.Name );

@@ -50,6 +50,7 @@
 #include <undo_redo_container.h>
 #include <units_provider.h>
 #include <origin_transforms.h>
+#include <scoped_set_reset.h>
 #include <ui_events.h>
 
 // Option for main frames
@@ -101,6 +102,32 @@ using ACTION_TOOLBAR_CONTROL_FACTORY = std::function<void( ACTION_TOOLBAR* )>;
 
 /// This is the handler functor for the update UI events
 typedef std::function< void( wxUpdateUIEvent& ) > UIUpdateHandler;
+
+
+/// What refuses a frame's close, and so which window the refusal raises
+enum class FRAME_CLOSE_BLOCK
+{
+    NONE,
+    QUASI_MODAL,    ///< A quasi-modal dialog under the frame
+    MODAL_DIALOG,   ///< A modal dialog from the registry in PGM_BASE
+    NESTED_LOOP     ///< A nested event loop, owned by a shown modal window when there is one
+};
+
+
+/**
+ * Decide whether a frame may close.  Destroying a frame while a modal loop runs frees the tool coroutine stack
+ * the loop may be running on.
+ *
+ * @param aFrameIsModal is true when the frame itself is shown modally.
+ * @param aCanVeto is true when the close can be vetoed.
+ * @param aNestedLoop is true when the active event loop is not the main loop.
+ * @param aUnderLoopOwner is true when the frame is inside the window tree of the shown modal window that owns
+ *                        that loop.
+ * @param aModalDialog is true when the modal registry holds a dialog that blocks this frame.
+ * @param aQuasiModal is true when a quasi-modal dialog is open under the frame.
+ */
+FRAME_CLOSE_BLOCK GetFrameCloseBlock( bool aFrameIsModal, bool aCanVeto, bool aNestedLoop, bool aUnderLoopOwner,
+                                      bool aModalDialog, bool aQuasiModal );
 
 
 /**
@@ -215,6 +242,12 @@ public:
     void SelectToolbarAction( const TOOL_ACTION& aAction ) override;
 
     void OnMaximize( wxMaximizeEvent& aEvent );
+
+    /**
+     * Raise the frame, without presenting an already shown frame where presenting can unmap it
+     * (see KIPLATFORM::UI::ActivateWithoutPresenting()).
+     */
+    void Raise() override;
 
     int GetAutoSaveInterval() const;
 
@@ -633,7 +666,9 @@ public:
 
     bool NonUserClose( bool aForce )
     {
-        m_isNonUserClose = true;
+        // Close() runs the whole close synchronously, so a vetoed or re-entrant close cannot leave the flag set
+        SCOPED_SET_RESET<bool> nonUserClose( m_isNonUserClose, true );
+
         return Close( aForce );
     }
 
@@ -721,10 +756,17 @@ protected:
      *                     extensions are considered. PCB editor passes kicad_pcb,
      *                     schematic editor passes kicad_sch.
      */
-    void CheckForAutosaveFiles( const wxString& aProjectPath, const std::vector<wxString>& aExtensions );
+    void CheckForAutosaveFiles( const wxString& aProjectPath, const std::vector<wxString>& aExtensions, int aCtl );
 
     virtual bool canCloseWindow( wxCloseEvent& aCloseEvent ) { return true; }
     virtual void doCloseWindow() { }
+
+    /**
+     * Return true when the session is ending on a platform that shows a shutdown block reason.
+     * A frame with unsaved changes then vetoes the close without prompting, and the OS shows
+     * the reason set by KIPLATFORM::APP::SetShutdownBlockReason().
+     */
+    bool isBlockableSessionEnd() const;
 
     void onSystemColorChange( wxSysColourChangedEvent& aEvent );
 

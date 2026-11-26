@@ -21,16 +21,21 @@
 #include <wx/panel.h>
 #include <wx/sizer.h>
 #include <dialog_shim.h>
+#include <scoped_set_reset.h>
+
+#include <utility>
 
 
 class LAZY_PAGE : public wxPanel
 {
 public:
-    LAZY_PAGE( wxWindow* aParent, std::function<wxWindow*( wxWindow* aParent )> aLazyCtor ) :
-            wxPanel( aParent, wxID_ANY ),
+    LAZY_PAGE( WX_TREEBOOK* aBook, std::function<wxWindow*( wxWindow* aParent )> aLazyCtor ) :
+            wxPanel( aBook, wxID_ANY ),
+            m_book( aBook ),
             m_lazyCtor( std::move( aLazyCtor ) ),
             m_mainSizer( nullptr ),
-            m_contents( nullptr )
+            m_contents( nullptr ),
+            m_active( false )
     {
         m_mainSizer = new wxBoxSizer( wxVERTICAL );
         SetSizer( m_mainSizer );
@@ -38,22 +43,40 @@ public:
 
     wxWindow* Resolve()
     {
+        build();
+        m_active = true;
+        return m_contents;
+    }
+
+    wxWindow* ResolveForSearch()
+    {
         if( !m_contents )
         {
-            m_contents = m_lazyCtor( this );
-            m_mainSizer->Add( m_contents, 1, wxEXPAND, 5 );
-            m_mainSizer->Layout();
+            build();
 
-            m_contents->TransferDataToWindow();
-
-            if( DIALOG_SHIM* dlg = dynamic_cast<DIALOG_SHIM*>( wxGetTopLevelParent( this ) ) )
-                dlg->SelectAllInTextCtrls( GetChildren() );
+            // Some panels finish building their controls in Show(), e.g. colour swatches
+            m_contents->Show( true );
         }
 
         return m_contents;
     }
 
     wxWindow* Contents() const { return m_contents; }
+
+    void Release()
+    {
+        if( m_active || !m_contents )
+            return;
+
+        m_contents->Destroy();
+        m_contents = nullptr;
+    }
+
+    bool IsActive() const { return m_active; }
+
+    bool Validate() override { return !m_active || wxPanel::Validate(); }
+
+    bool TransferDataFromWindow() override { return !m_active || wxPanel::TransferDataFromWindow(); }
 
     bool Show( bool show ) override
     {
@@ -70,16 +93,37 @@ public:
     }
 
 private:
+    void build()
+    {
+        if( m_contents )
+            return;
+
+        SCOPED_SET_RESET building( m_book->m_buildingPage, true );
+
+        m_contents = m_lazyCtor( this );
+        m_mainSizer->Add( m_contents, 1, wxEXPAND, 5 );
+        m_mainSizer->Layout();
+
+        m_contents->TransferDataToWindow();
+
+        if( DIALOG_SHIM* dlg = dynamic_cast<DIALOG_SHIM*>( wxGetTopLevelParent( this ) ) )
+            dlg->SelectAllInTextCtrls( GetChildren() );
+    }
+
+    WX_TREEBOOK*                                  m_book;
     std::function<wxWindow*( wxWindow* aParent )> m_lazyCtor;
 
     wxSizer*   m_mainSizer;
     wxWindow*  m_contents;
+    bool       m_active; ///< Shown or resolved for editing, so it takes part in validation
 };
 
 
-WX_TREEBOOK::WX_TREEBOOK( wxWindow *parent, wxWindowID id, const wxPoint& pos, const wxSize& size,
-                          long style, const wxString& name ) :
-        wxTreebook( parent, id, pos, size, style, name )
+WX_TREEBOOK::WX_TREEBOOK( wxWindow* parent, wxWindowID id, const wxPoint& pos, const wxSize& size, long style,
+                          const wxString& name ) :
+        wxTreebook( parent, id, pos, size, style, name ),
+        m_resolvingForSearch( false ),
+        m_buildingPage( false )
 {
 }
 
@@ -98,18 +142,34 @@ bool WX_TREEBOOK::AddLazySubPage( std::function<wxWindow*( wxWindow* aParent )> 
 }
 
 
+bool WX_TREEBOOK::InsertLazySubPage( size_t aPos, std::function<wxWindow*( wxWindow* aParent )> aLazyCtor,
+                                     const wxString& text, bool bSelect, int imageId )
+{
+    return InsertSubPage( aPos, new LAZY_PAGE( this, std::move( aLazyCtor ) ), text, bSelect, imageId );
+}
+
+
 wxWindow* WX_TREEBOOK::ResolvePage( size_t aPage )
 {
     wxWindow* page = GetPage( aPage );
 
     if( LAZY_PAGE* lazyPage = dynamic_cast<LAZY_PAGE*>( page ) )
-        return lazyPage->Resolve();
+        return m_resolvingForSearch ? lazyPage->ResolveForSearch() : lazyPage->Resolve();
 
     return page;
 }
 
 
-wxWindow* WX_TREEBOOK::GetResolvedPage( size_t aPage )
+wxWindow* WX_TREEBOOK::ResolvePageForSearch( size_t aPage )
+{
+    // Pages resolved by another page's constructor must stay passive too.
+    SCOPED_SET_RESET resolvingForSearch( m_resolvingForSearch, true );
+
+    return ResolvePage( aPage );
+}
+
+
+wxWindow* WX_TREEBOOK::GetResolvedPage( size_t aPage ) const
 {
     wxWindow* page = GetPage( aPage );
 
@@ -117,4 +177,26 @@ wxWindow* WX_TREEBOOK::GetResolvedPage( size_t aPage )
         return lazyPage->Contents();
 
     return page;
+}
+
+
+void WX_TREEBOOK::ReleasePageBuiltForSearch( size_t aPage )
+{
+    if( LAZY_PAGE* lazyPage = dynamic_cast<LAZY_PAGE*>( GetPage( aPage ) ) )
+        lazyPage->Release();
+}
+
+
+bool WX_TREEBOOK::IsPageActive( size_t aPage ) const
+{
+    if( LAZY_PAGE* lazyPage = dynamic_cast<LAZY_PAGE*>( GetPage( aPage ) ) )
+        return lazyPage->IsActive();
+
+    return true;
+}
+
+
+bool WX_TREEBOOK::IsLazyPage( size_t aPage ) const
+{
+    return dynamic_cast<LAZY_PAGE*>( GetPage( aPage ) ) != nullptr;
 }

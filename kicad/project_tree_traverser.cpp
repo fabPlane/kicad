@@ -21,8 +21,10 @@
 #include "kicad_manager_frame.h"
 #include <kiway.h>
 #include <kiway_mail.h>
+#include <pgm_base.h>
 #include <project/project_file.h>
 #include <project/project_local_settings.h>
+#include <settings/common_settings.h>
 #include <settings/settings_manager.h>
 #include <gestfich.h>
 #include <confirm.h>
@@ -54,6 +56,22 @@ wxDirTraverseResult PROJECT_TREE_TRAVERSER::OnFile( const wxString& aSrcFilePath
     wxFileName destFile( aSrcFilePath );
     wxString   ext = destFile.GetExt();
     bool       atRoot = destFile.GetPath() == m_projectDirPath;
+
+    auto saveAs =
+            [&]( KIWAY::FACE_T aFace )
+            {
+                if( KIFACE* kiface = m_frame->Kiway().KiFACE( aFace ) )
+                {
+                    kiface->SaveFileAs( m_projectDirPath, m_projectName, m_newProjectDirPath, m_newProjectName,
+                                        aSrcFilePath, m_errors );
+                    return;
+                }
+
+                if( !m_errors.empty() )
+                    m_errors += "\n";
+
+                m_errors += wxString::Format( _( "Cannot copy file '%s'." ), aSrcFilePath );
+            };
 
     if( ext == FILEEXT::LegacyProjectFileExtension
       || ext == FILEEXT::ProjectFileExtension
@@ -88,7 +106,8 @@ wxDirTraverseResult PROJECT_TREE_TRAVERSER::OnFile( const wxString& aSrcFilePath
         }
         else if( ext == FILEEXT::ProjectLocalSettingsFileExtension )
         {
-            PROJECT_LOCAL_SETTINGS projectLocalSettings( nullptr, aSrcFilePath );
+            PROJECT_LOCAL_SETTINGS projectLocalSettings( nullptr, aSrcFilePath,
+                                                         Pgm().GetCommonSettings()->m_BoardOpacityDefaults );
             projectLocalSettings.LoadFromFile();
             projectLocalSettings.SaveAs( destFile.GetPath(), destFile.GetName() );
         }
@@ -104,9 +123,7 @@ wxDirTraverseResult PROJECT_TREE_TRAVERSER::OnFile( const wxString& aSrcFilePath
              || ext == FILEEXT::NetlistFileExtension
              || destFile.GetName() == FILEEXT::SymbolLibraryTableFileName ) )
     {
-        KIFACE* eeschema = m_frame->Kiway().KiFACE( KIWAY::FACE_SCH );
-        eeschema->SaveFileAs( m_projectDirPath, m_projectName, m_newProjectDirPath,
-                              m_newProjectName, aSrcFilePath, m_errors );
+        saveAs( KIWAY::FACE_SCH );
     }
     else if( m_frame && ( ext == FILEEXT::KiCadPcbFileExtension
              || ext == FILEEXT::KiCadPcbFileExtension + FILEEXT::BackupFileSuffix
@@ -116,23 +133,17 @@ wxDirTraverseResult PROJECT_TREE_TRAVERSER::OnFile( const wxString& aSrcFilePath
              || ext == FILEEXT::FootprintAssignmentFileExtension
              || destFile.GetName() == FILEEXT::FootprintLibraryTableFileName ) )
     {
-        KIFACE* pcbnew = m_frame->Kiway().KiFACE( KIWAY::FACE_PCB );
-        pcbnew->SaveFileAs( m_projectDirPath, m_projectName, m_newProjectDirPath,
-                            m_newProjectName, aSrcFilePath, m_errors );
+        saveAs( KIWAY::FACE_PCB );
     }
     else if( m_frame && ext == FILEEXT::DrawingSheetFileExtension )
     {
-        KIFACE* pleditor = m_frame->Kiway().KiFACE( KIWAY::FACE_PL_EDITOR );
-        pleditor->SaveFileAs( m_projectDirPath, m_projectName, m_newProjectDirPath,
-                              m_newProjectName, aSrcFilePath, m_errors );
+        saveAs( KIWAY::FACE_PL_EDITOR );
     }
     else if( m_frame && ( ext == FILEEXT::GerberJobFileExtension
            || ext == FILEEXT::DrillFileExtension
              || FILEEXT::IsGerberFileExtension( ext ) ) )
     {
-        KIFACE* gerbview = m_frame->Kiway().KiFACE( KIWAY::FACE_GERBVIEW );
-        gerbview->SaveFileAs( m_projectDirPath, m_projectName, m_newProjectDirPath,
-                              m_newProjectName, aSrcFilePath, m_errors );
+        saveAs( KIWAY::FACE_GERBVIEW );
     }
     else if( destFile.GetName().StartsWith( FILEEXT::LockFilePrefix )
              && ext == FILEEXT::LockFileExtension )

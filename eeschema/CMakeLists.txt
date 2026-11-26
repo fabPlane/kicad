@@ -105,6 +105,7 @@ set( EESCHEMA_SCH_IO
     sch_io/pads/pads_sch_sdb.cpp
     sch_io/ole_emf.cpp
     sch_io/ole_image.cpp
+    sch_io/sch_io_wire_detour.cpp
 
     # DipTrace IO plugin
     sch_io/diptrace/sch_io_diptrace.cpp
@@ -319,6 +320,7 @@ set( EESCHEMA_SIM_SRCS
     sim/kibis/ibis_parser.cpp
     sim/kibis/kibis.cpp
 
+    sim/operating_point.cpp
     sim/spice_circuit_model.cpp
     sim/ngspice.cpp
     sim/simulator_frame.cpp
@@ -327,6 +329,7 @@ set( EESCHEMA_SIM_SRCS
     sim/sim_plot_colors.cpp
     sim/sim_plot_tab.cpp
     sim/sim_property.cpp
+    sim/sim_signal_utils.cpp
     sim/sim_tab.cpp
     sim/spice_simulator.cpp
     sim/spice_value.cpp
@@ -548,6 +551,7 @@ set( EESCHEMA_SRCS
     api/api_sch_utils.cpp
     api/api_handler_sch_libraries.cpp
     api/api_handler_sch.cpp
+    api/api_handler_sch_tasks.cpp
     api/api_handler_symbol.cpp
     api/api_handler_symbol_library.cpp
     api/api_undo_sch.cpp

@@ -134,13 +134,12 @@ private:
                        std::vector< SFVEC2F >& aInnerContourResult,
                        std::vector< SFVEC2F >& aOuterContourResult, bool aInvertOrder );
 
-    void generateCylinder( const SFVEC2F& aCenter, float aInnerRadius, float aOuterRadius,
-                           float aZtop, float aZbot, unsigned int aNr_sides_per_circle,
-                           std::shared_ptr<TRIANGLE_DISPLAY_LIST> aDstLayer );
+    void generateCylinder( const SFVEC2F& aCenter, float aInnerRadius, float aOuterRadius, float aZtop, float aZbot,
+                           unsigned int aNr_sides_per_circle, std::shared_ptr<TRIANGLE_DISPLAY_LIST> aDstLayer );
 
-    void generateInvCone( const SFVEC2F& aCenter, float aInnerRadius, float aOuterRadius,
-                          float aZtop, float aZbot, unsigned int aNr_sides_per_circle,
-                          std::shared_ptr<TRIANGLE_DISPLAY_LIST> aDstLayer, EDA_ANGLE aAngle );
+    void generateInvCone( const SFVEC2F& aCenter, float aInnerRadius, float aOuterRadius, float aZtop, float aZbot,
+                          unsigned int aNr_sides_per_circle, std::shared_ptr<TRIANGLE_DISPLAY_LIST> aDstLayer,
+                          EDA_ANGLE aAngle, bool aIsFront );
 
     void generateDisk( const SFVEC2F& aCenter, float aRadius, float aZ,
                        unsigned int aNr_sides_per_circle, std::shared_ptr<TRIANGLE_DISPLAY_LIST> aDstLayer,
@@ -157,6 +156,7 @@ private:
                                       PAD_DRILL_POST_MACHINING_MODE aMode,
                                       int aSizeIU,
                                       int aDepthIU,
+                                      const EDA_ANGLE& aAngle,
                                       float aHoleInnerRadius,
                                       float aZSurface,
                                       bool aIsFront,
@@ -164,9 +164,9 @@ private:
                                       float aUnitScale,
                                       float* aZEnd );
 
-    void generateViaBarrels( float aPlatingThickness3d, float aUnitScale );
+    void generateComplexHoles( float aPlatingThickness3d, float aUnitScale );
 
-    void generatePlatedHoleShells( int aPlatingThickness, float aUnitScale );
+    void generateSimplePlatedHoleShells( int aPlatingThickness, float aUnitScale );
 
     void generateViaCovers( float aPlatingThickness3d, float aUnitScale );
 
@@ -337,8 +337,8 @@ private:
     std::shared_ptr<OPENGL_RENDER_LIST_DEFERRED> m_boardWithHoles;
     std::shared_ptr<OPENGL_RENDER_LIST_DEFERRED> m_postMachinePlugs;     ///< Board material plugs for backdrill/counterbore/countersink
     std::shared_ptr<OPENGL_RENDER_LIST_DEFERRED> m_antiBoard;
-    std::shared_ptr<OPENGL_RENDER_LIST_DEFERRED> m_outerThroughHoles;
-    std::shared_ptr<OPENGL_RENDER_LIST_DEFERRED> m_outerViaThroughHoles;
+    std::shared_ptr<OPENGL_RENDER_LIST_DEFERRED> m_frontOuterThroughHoles;
+    std::shared_ptr<OPENGL_RENDER_LIST_DEFERRED> m_backOuterThroughHoles;
     std::shared_ptr<OPENGL_RENDER_LIST_DEFERRED> m_outerThroughHoleRings;
     std::vector<std::shared_ptr<void>>           m_retiredRenderPtrs;
 
@@ -348,7 +348,7 @@ private:
     GLuint              m_grid;             ///< oGL list that stores current grid
     GRID3D_TYPE         m_lastGridType;     ///< Stores the last grid type.
 
-    std::shared_ptr<OPENGL_RENDER_LIST_DEFERRED> m_microviaHoles;
+    std::shared_ptr<OPENGL_RENDER_LIST_DEFERRED> m_complexPlatedHoles;
     std::shared_ptr<OPENGL_RENDER_LIST_DEFERRED> m_padHoles;
     std::shared_ptr<OPENGL_RENDER_LIST_DEFERRED> m_viaFrontCover;
     std::shared_ptr<OPENGL_RENDER_LIST_DEFERRED> m_viaBackCover;

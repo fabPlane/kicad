@@ -31,8 +31,8 @@ class DRC_RE_CUSTOM_RULE_CONSTRAINT_DATA : public DRC_RE_BASE_CONSTRAINT_DATA
 public:
     DRC_RE_CUSTOM_RULE_CONSTRAINT_DATA() = default;
 
-    DRC_RE_CUSTOM_RULE_CONSTRAINT_DATA( int aId, int aParentId, const wxString& aRuleName ) :
-            DRC_RE_BASE_CONSTRAINT_DATA( aId, aParentId, aRuleName )
+    DRC_RE_CUSTOM_RULE_CONSTRAINT_DATA( int aId, const wxString& aRuleName ) :
+            DRC_RE_BASE_CONSTRAINT_DATA( aId, aRuleName )
     {
     }
 
@@ -50,28 +50,35 @@ public:
         if( m_ruleText.IsEmpty() )
             return wxEmptyString;
 
+        return FormatRule( aContext, m_ruleText );
+    }
+
+    /**
+     * Wraps a rule body as it is edited, without the indent the file gives it, in a rule.
+     */
+    static wxString FormatRule( const RULE_GENERATION_CONTEXT& aContext, const wxString& aBody )
+    {
         wxString ruleName = aContext.ruleName;
         ruleName.Replace( wxS( "\"" ), wxS( "\\\"" ) );
 
         wxString rule;
-        rule << wxS( "(rule \"" ) << ruleName << wxS( "\"\n" );
+        rule << wxS( "(rule \"" ) << ruleName << wxS( "\"" );
 
-        if( !aContext.comment.IsEmpty() )
+        for( const wxString& line : wxSplit( aContext.comment, '\n', '\0' ) )
         {
-            wxArrayString lines = wxSplit( aContext.comment, '\n', '\0' );
-
-            for( const wxString& line : lines )
-            {
-                if( line.IsEmpty() )
-                    continue;
-
-                rule << wxS( "\t# " ) << line << wxS( "\n" );
-            }
+            if( !line.IsEmpty() )
+                rule << wxS( "\n\t# " ) << line;
         }
 
-        rule << m_ruleText << wxS( ")" );
+        for( const wxString& line : wxSplit( aBody, '\n', '\0' ) )
+        {
+            rule << wxS( "\n" );
 
-        return rule;
+            if( !line.IsEmpty() )
+                rule << wxS( "\t" ) << line;
+        }
+
+        return rule + wxS( ")" );
     }
 
     VALIDATION_RESULT Validate() const override

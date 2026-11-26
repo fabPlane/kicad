@@ -127,6 +127,7 @@ public:
     /// Mirroring of selected items
     static TOOL_ACTION mirrorH;
     static TOOL_ACTION mirrorV;
+    static TOOL_ACTION mirrorInteractive;
 
     /// Swapping of selected items
     static TOOL_ACTION swap;
@@ -294,6 +295,8 @@ public:
     static TOOL_ACTION routerRouteSelectedFromEnd;
     static TOOL_ACTION routerAutorouteSelected;
     static TOOL_ACTION routerOptimizeSelected;
+    static TOOL_ACTION routerSpreadTracks;
+
     static TOOL_ACTION cancelCurrentItem;
 
     /// Activation of the Push and Shove settings dialogs

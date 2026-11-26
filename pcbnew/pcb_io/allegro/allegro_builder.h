@@ -177,6 +177,16 @@ private:
     std::unique_ptr<PCB_TEXT>  buildPcbText( const BLK_0x30_STR_WRAPPER& aStrWrapper, BOARD_ITEM_CONTAINER& aParent );
 
     /**
+     * Add a 0x30 text object to a footprint, either as one of the built-in fields or as a
+     * graphic, depending on the Allegro class it is on.
+     *
+     * @param aValueFieldSet tracks whether the VALUE field has been filled already, so only
+     *                       the first candidate replaces it.
+     */
+    void addFootprintText( FOOTPRINT& aFp, GRAPHIC_DEDUP& aGraphics, const BLK_0x30_STR_WRAPPER& aStrWrapper,
+                           bool& aValueFieldSet );
+
+    /**
      * Build a rectangular shape from a 0x24 RECT block.
      */
     std::unique_ptr<PCB_SHAPE> buildRect( const BLK_0x24_RECT& aRect, BOARD_ITEM_CONTAINER& aParent );
@@ -270,6 +280,13 @@ private:
      * @return the group name, or empty string if none
      */
     wxString resolveMatchGroupName( const BLK_0x1B_NET& aNet ) const;
+
+    /**
+     * Follow a net's match group pointer to its 0x2C TABLE.
+     *
+     * @return the table, or nullptr if the net is in no match group
+     */
+    const BLK_0x2C_TABLE* resolveMatchGroupTable( const BLK_0x1B_NET& aNet ) const;
 
     /**
      * Extract constraint set name from a 0x03 FIELD block pointer.

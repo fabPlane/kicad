@@ -66,7 +66,9 @@ void SCH_SHAPE::Serialize( google::protobuf::Any& aContainer ) const
     EDA_SHAPE::Serialize( *msg.mutable_shape(), schIUScale );
 
     kiapi::common::PackCustomProperties( msg.mutable_custom_properties(), *this );
-    aContainer.PackFrom( msg );
+
+    if( !aContainer.PackFrom( msg ) )
+        wxFAIL_MSG( wxT( "Failed to pack SCH_SHAPE" ) );
 }
 
 
@@ -467,10 +469,18 @@ void SCH_SHAPE::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS& 
     {
         ptList.clear();     // clear every time; it's static
 
-        SHAPE_LINE_CHAIN chain = buildShapeEllipse().ConvertToPolyline( getMaxError() );
+        const SHAPE_LINE_CHAIN ellipsePoly = buildShapeEllipse().ConvertToPolyline( getMaxError() );
 
-        if( GetShortenedBodyPolyPoints( chain, 0, ptList, pen_size ) )
+        for( const VECTOR2I& pt : ellipsePoly.CPoints() )
+            ptList.push_back( renderSettings->TransformCoordinate( pt ) + aOffset );
+
+        if( ShortenBodyPolyPoints( ptList, 0, pen_size ) )
+        {
+            if( GetShape() == SHAPE_T::ELLIPSE )
+                ptList.push_back( ptList.front() );
+
             aPlotter->PlotPoly( ptList, fill, pen_size, nullptr );
+        }
 
         break;
     }

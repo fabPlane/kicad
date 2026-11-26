@@ -88,8 +88,8 @@ enum class GIT_EDITOR_PREP
 
 /**
  * Offer to save unsaved schematic and board edits before a git operation. Returns false when
- * the user cancelled or a save failed. Library edits must be saved or discarded in their editor
- * before a working tree rewrite. They do not block a commit or take part in its save prompt.
+ * the user cancelled or a save failed. Before a working tree rewrite the library editors are saved
+ * too, or the rewrite is cancelled. Library edits do not block a commit or take part in its save prompt.
  *
  * When the working tree is about to be rewritten the only choices are to save or to cancel,
  * since a stale editor's next save would overwrite whatever arrived. The project file is
@@ -177,6 +177,36 @@ void ProjectClearOfUncommittedWork( EDA_BASE_FRAME* aFrame, wxWindow* aParent, K
  */
 void SwitchProjectToBranch( EDA_BASE_FRAME* aFrame, wxWindow* aParent, const wxString& aBranch, KIGIT_QUERY& aQuery,
                             std::function<void()> aFinished = {} );
+
+/// Which change to the project's ignored files a menu item asks for.
+enum class GIT_IGNORE_CHANGE
+{
+    IGNORE_PATH,      ///< Ignore the paths themselves.
+    IGNORE_EXTENSION, ///< Ignore every file sharing the paths' extension.
+    KEEP_PATH,        ///< Stop ignoring the paths themselves.
+    KEEP_EXTENSION    ///< Stop ignoring every file sharing the paths' extension.
+};
+
+
+/// One path an ignore change applies to, relative to the project folder with forward slashes.
+struct GIT_IGNORE_TARGET
+{
+    wxString path;
+    bool     isDirectory = false;
+};
+
+
+/**
+ * Write a change to the project's ignored files and refresh every Git surface.
+ *
+ * A path that stays ignored because a broader rule covers it is reported, since removing that
+ * rule would stop ignoring everything else it covers.
+ *
+ * @param aFrame Frame whose project supplies the repository and the ignore file.
+ * @param aParent Window to parent any message to.
+ */
+void ChangeGitIgnore( EDA_BASE_FRAME* aFrame, wxWindow* aParent, GIT_IGNORE_CHANGE aChange,
+                      const std::vector<GIT_IGNORE_TARGET>& aTargets );
 
 /**
  * Open the diff for a changed file, comparing the committed version at HEAD with the working

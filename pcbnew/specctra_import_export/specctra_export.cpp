@@ -441,30 +441,14 @@ static SPECCTRA_SHAPE_ID appendPadstackShape( PADSTACK* aPadstack, PAD* aPad, PC
     case PAD_SHAPE::ROUNDRECT:
     {
         // Export the shape as as polygon, round rect does not exist as primitive
-        const int      circleToSegmentsCount = 36;
         int            rradius = aPad->GetRoundRectCornerRadius( aPadLayer );
         SHAPE_POLY_SET cornerBuffer;
+        bool           doChamfer = aPad->GetShape( aPadLayer ) == PAD_SHAPE::CHAMFERED_RECT;
 
-        // Use a slightly bigger shape because the round corners are approximated by
-        // segments, giving to the polygon a slightly smaller shape than the actual shape
-
-        /* calculates the coeff to compensate radius reduction of holes clearance
-         * due to the segment approx.
-         * For a circle the min radius is radius * cos( 2PI / s_CircleToSegmentsCount / 2)
-         * correctionFactor is cos( PI/s_CircleToSegmentsCount  )
-         */
-        double correctionFactor = cos( M_PI / (double) circleToSegmentsCount );
-        int    extra_clearance = KiROUND( rradius * ( 1.0 - correctionFactor ) );
-        VECTOR2I psize = padSize;
-        psize.x += extra_clearance * 2;
-        psize.y += extra_clearance * 2;
-        rradius += extra_clearance;
-        bool doChamfer = aPad->GetShape( aPadLayer ) == PAD_SHAPE::CHAMFERED_RECT;
-
-        TransformRoundChamferedRectToPolygon( cornerBuffer, VECTOR2I( 0, 0 ), psize, ANGLE_0,
-                rradius, aPad->GetChamferRectRatio( aPadLayer ),
-                doChamfer ? aPad->GetChamferPositions( aPadLayer ) : 0,
-                0, aPad->GetMaxError(), ERROR_INSIDE );
+        TransformRoundChamferedRectToPolygon( cornerBuffer, VECTOR2I( 0, 0 ), padSize, ANGLE_0, rradius,
+                                              aPad->GetChamferRectRatio( aPadLayer ),
+                                              doChamfer ? aPad->GetChamferPositions( aPadLayer ) : 0,
+                                              0, aPad->GetMaxError(), ERROR_OUTSIDE );
 
         SHAPE_LINE_CHAIN& polygonal_shape = cornerBuffer.Outline( 0 );
 
@@ -486,8 +470,7 @@ static SPECCTRA_SHAPE_ID appendPadstackShape( PADSTACK* aPadstack, PAD* aPad, PC
 
             for( int idx = 0; idx < polygonal_shape.PointCount(); idx++ )
             {
-                POINT corner( scale( polygonal_shape.CPoint( idx ).x ),
-                              scale( -polygonal_shape.CPoint( idx ).y ) );
+                POINT corner( scale( polygonal_shape.CPoint( idx ).x ), scale( -polygonal_shape.CPoint( idx ).y ) );
                 corner += dsnOffset;
                 polygon->AppendPoint( corner );
 
@@ -927,26 +910,24 @@ IMAGE* SPECCTRA_DB::makeIMAGE( BOARD* aBoard, FOOTPRINT* aFootprint )
             continue;
 
         // IMAGE object coordinates are relative to the IMAGE not absolute board coordinates.
-        ZONE untransformedZone( *zone );
-
-        EDA_ANGLE angle = -aFootprint->GetOrientation();
-        angle.Normalize();
-        untransformedZone.Rotate( aFootprint->GetPosition(), angle );
+        SHAPE_POLY_SET boardOutline = zone->GetBoardOutline();
 
         // keepout areas have a type. types are
         // T_place_keepout, T_via_keepout, T_wire_keepout,
         // T_bend_keepout, T_elongate_keepout, T_keepout.
         // Pcbnew knows only T_keepout, T_via_keepout and T_wire_keepout
+        // Rule areas that allow tracks and vias mean nothing to the router
+        if( !zone->GetDoNotAllowVias() && !zone->GetDoNotAllowTracks() )
+            continue;
+
         DSN_T keepout_type;
 
         if( zone->GetDoNotAllowVias() && zone->GetDoNotAllowTracks() )
             keepout_type = T_keepout;
         else if( zone->GetDoNotAllowVias() )
             keepout_type = T_via_keepout;
-        else if( zone->GetDoNotAllowTracks() )
-            keepout_type = T_wire_keepout;
         else
-            keepout_type = T_keepout;
+            keepout_type = T_wire_keepout;
 
         // Now, build keepout polygon on each copper layer where the zone
         // keepout is living (keepout zones can live on many copper layers)
@@ -967,11 +948,9 @@ IMAGE* SPECCTRA_DB::makeIMAGE( BOARD* aBoard, FOOTPRINT* aFootprint )
             bool is_first_point = true;
             VECTOR2I startpoint;
 
-            for( iterator = untransformedZone.IterateWithHoles(); iterator; iterator++ )
+            for( iterator = boardOutline.IterateWithHoles(); iterator; iterator++ )
             {
-                VECTOR2I point( iterator->x, iterator->y );
-
-                point -= aFootprint->GetPosition();
+                VECTOR2I point = aFootprint->GetTransform().InverseApply( VECTOR2I( iterator->x, iterator->y ) );
 
                 if( is_first_point )
                 {
@@ -1011,8 +990,8 @@ IMAGE* SPECCTRA_DB::makeIMAGE( BOARD* aBoard, FOOTPRINT* aFootprint )
 
                 isStartContour = iterator.IsEndContour();
 
-                wxASSERT( window );
-                wxASSERT( cutout );
+                wxCHECK2( window, continue );
+                wxCHECK2( cutout, continue );
 
                 VECTOR2I point( iterator->x, iterator->y );
 
@@ -1397,16 +1376,18 @@ void SPECCTRA_DB::FromBOARD( BOARD* aBoard )
             // Keepout areas have a type: T_place_keepout, T_via_keepout, T_wire_keepout,
             // T_bend_keepout, T_elongate_keepout, T_keepout.
             // Pcbnew knows only T_keepout, T_via_keepout and T_wire_keepout
+            // Rule areas that allow tracks and vias mean nothing to the router
+            if( !zone->GetDoNotAllowVias() && !zone->GetDoNotAllowTracks() )
+                continue;
+
             DSN_T keepout_type;
 
             if( zone->GetDoNotAllowVias() && zone->GetDoNotAllowTracks() )
                 keepout_type = T_keepout;
             else if( zone->GetDoNotAllowVias() )
                 keepout_type = T_via_keepout;
-            else if( zone->GetDoNotAllowTracks() )
-                keepout_type = T_wire_keepout;
             else
-                keepout_type = T_keepout;
+                keepout_type = T_wire_keepout;
 
             // Now, build keepout polygon on each copper layer where the zone
             // keepout is living (keepout zones can live on many copper layers)
@@ -1468,8 +1449,8 @@ void SPECCTRA_DB::FromBOARD( BOARD* aBoard )
 
                     isStartContour = iterator.IsEndContour();
 
-                    wxASSERT( window );
-                    wxASSERT( cutout );
+                    wxCHECK2( window, continue );
+                    wxCHECK2( cutout, continue );
 
                     VECTOR2I point( iterator->x, iterator->y );
 
@@ -1671,7 +1652,7 @@ void SPECCTRA_DB::FromBOARD( BOARD* aBoard )
                 continue;
 
             NETINFO_ITEM* net = aBoard->FindNet( netcode );
-            wxASSERT( net );
+            wxCHECK2( net, continue );
 
             WIRE* wire = new WIRE( wiring );
 

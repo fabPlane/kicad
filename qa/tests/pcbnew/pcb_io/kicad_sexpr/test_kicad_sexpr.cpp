@@ -44,6 +44,7 @@
 #include <footprint.h>
 #include <netinfo.h>
 #include <pad.h>
+#include <pcb_group.h>
 #include <pcb_shape.h>
 #include <pcb_track.h>
 #include <zone.h>
@@ -478,10 +479,16 @@ BOOST_AUTO_TEST_CASE( Issue24642_AppendBoardPromptsOnlyOnNameMismatch )
     bool handlerCalled = false;
 
     kicadPlugin.RegisterCallback(
-            [&]( const std::vector<INPUT_LAYER_DESC>& ) -> std::map<wxString, PCB_LAYER_ID>
+            [&]( const std::vector<INPUT_LAYER_DESC>& aDescs ) -> std::map<wxString, PCB_LAYER_ID>
             {
                 handlerCalled = true;
-                return {};
+
+                std::map<wxString, PCB_LAYER_ID> remap;
+
+                for( const INPUT_LAYER_DESC& desc : aDescs )
+                    remap[desc.Name] = desc.AutoMapLayer;
+
+                return remap;
             } );
 
     // Appending onto a board with identical layer names must not prompt
@@ -1016,6 +1023,38 @@ BOOST_AUTO_TEST_CASE( MissingLibraryThrowsOnEveryEnumerate )
 }
 
 
+// A library load must finish a footprint the way Parse() does, or the next save drops its groups
+BOOST_AUTO_TEST_CASE( LibraryFootprintKeepsGroupsAndLoadsUnlocked )
+{
+    KI_TEST::SCOPED_TEMP_DIR temp( wxS( "fp_finish" ) );
+
+    std::filesystem::path libPath = temp.Path() / "finish.pretty";
+    std::filesystem::create_directories( libPath );
+
+    std::filesystem::path source = std::filesystem::path( KI_TEST::GetTestDataRootDir() ) / "libraries"
+                                   / "Resistor_SMD.pretty" / "R_0402_1005Metric.kicad_mod";
+
+    wxString                   name;
+    std::unique_ptr<FOOTPRINT> footprint = kicadPlugin.ImportFootprint( wxString( source.string() ), name );
+
+    footprint->SetFPID( LIB_ID( wxEmptyString, wxS( "grouped" ) ) );
+    footprint->SetLocked( true );
+
+    PCB_GROUP* group = new PCB_GROUP( footprint.get() );
+    group->AddItem( footprint->Pads().front() );
+    footprint->Add( group );
+
+    kicadPlugin.FootprintSave( libPath.string(), footprint.get() );
+
+    std::unique_ptr<FOOTPRINT> loaded =
+            kicadPlugin.ImportFootprint( wxString( ( libPath / "grouped.kicad_mod" ).string() ), name );
+
+    BOOST_CHECK( !loaded->IsLocked() );
+    BOOST_REQUIRE_EQUAL( loaded->Groups().size(), 1u );
+    BOOST_CHECK_EQUAL( loaded->Groups().front()->GetBoardItems().size(), 1u );
+}
+
+
 // A parse warning leaves the footprint usable, so it must not stop the rest of the library loading
 // fails on revert, since the warning then makes the whole library fail
 BOOST_AUTO_TEST_CASE( ParseWarningDoesNotFailTheLibrary )
@@ -1056,6 +1095,16 @@ BOOST_AUTO_TEST_CASE( ParseWarningDoesNotFailTheLibrary )
     names.clear();
 
     BOOST_CHECK_THROW( kicadPlugin.FootprintEnumerate( names, libPath.string(), false ), IO_ERROR );
+}
+
+
+BOOST_AUTO_TEST_CASE( LegacyModuleFileImports )
+{
+    const std::string  fpPath = KI_TEST::GetPcbnewTestDataDir() + "legacy_module/Crystal_SMD_HC49-US.kicad_mod";
+    PCB_IO_KICAD_SEXPR kicadPlugin;
+    wxString           name;
+
+    BOOST_CHECK( kicadPlugin.ImportFootprint( fpPath, name ) != nullptr );
 }
 
 

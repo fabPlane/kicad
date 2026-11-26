@@ -19,6 +19,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <dialogs/dialog_export_older_version.h>
+#include <jobs/job_pcb_downgrade.h>
 #include "board_editor_control.h"
 
 #include <algorithm>
@@ -51,7 +53,6 @@
 #include <dialogs/dialog_assign_netclass.h>
 #include <dialogs/dialog_footprint_fields_table.h>
 #include <dialog_plot.h>
-#include <dialogs/rule_editor_dialog_base.h>
 #include <dialogs/dialog_find_by_properties.h>
 #include <kiface_base.h>
 #include <kiway.h>
@@ -476,27 +477,48 @@ bool BOARD_EDITOR_CONTROL::Init()
 }
 
 
-int BOARD_EDITOR_CONTROL::Save( const TOOL_EVENT& aEvent )
+int BOARD_EDITOR_CONTROL::ExportForOlderVersion( const TOOL_EVENT& aEvent )
 {
-    wxWindow* focus = wxWindow::FindFocus();
+    const wxString title = _( "Export for Older KiCad Version" );
 
-    if( focus )
+    // The export reads the files on disk, so they have to match what is on screen.
+    if( m_frame->IsContentModified() )
     {
-        wxWindow* topLevel = focus;
+        int answer = wxMessageBox( _( "You have unsaved changes. Save them before exporting?" ), title,
+                                   wxYES_NO | wxCANCEL | wxICON_WARNING, m_frame );
 
-        while( topLevel && !topLevel->IsTopLevel() )
-            topLevel = topLevel->GetParent();
+        if( answer == wxCANCEL )
+            return 0;
 
-        RULE_EDITOR_DIALOG_BASE* reDlg = dynamic_cast<RULE_EDITOR_DIALOG_BASE*>( topLevel );
-
-        if( reDlg )
+        if( answer == wxYES && !m_frame->SaveBoard() )
         {
-            wxCommandEvent evt;
-            reDlg->OnSave( evt );
+            wxMessageBox( _( "The board was not saved. Nothing was exported." ), title, wxOK | wxICON_ERROR, m_frame );
             return 0;
         }
     }
 
+    const wxString board = m_frame->GetBoard()->GetFileName();
+
+    RunExportForOlderVersion(
+            m_frame,
+            [&]( const DOWNGRADE_EXPORT_PASS& aPass, DOWNGRADE_EXPORT_RESULT& aResult ) -> bool
+            {
+                JOB_PCB_DOWNGRADE job;
+                job.m_filename = board;
+                job.m_variant = aPass.m_variant;
+
+                if( !aPass.m_dryRun )
+                    job.m_outputFile = wxFileName( aPass.m_folder, wxFileName( board ).GetFullName() ).GetFullPath();
+
+                return RunDowngradeJob( m_frame->Kiway(), KIWAY::FACE_PCB, job, aPass, aResult );
+            } );
+
+    return 0;
+}
+
+
+int BOARD_EDITOR_CONTROL::Save( const TOOL_EVENT& aEvent )
+{
     m_frame->SaveBoard();
     return 0;
 }
@@ -642,6 +664,13 @@ int BOARD_EDITOR_CONTROL::FindByProperties( const TOOL_EVENT& aEvent )
 int BOARD_EDITOR_CONTROL::BoardSetup( const TOOL_EVENT& aEvent )
 {
     getEditFrame<PCB_EDIT_FRAME>()->ShowBoardSetupDialog();
+    return 0;
+}
+
+
+int BOARD_EDITOR_CONTROL::DesignRules( const TOOL_EVENT& aEvent )
+{
+    getEditFrame<PCB_EDIT_FRAME>()->ShowBoardSetupDialog( _( "Clearance" ) );
     return 0;
 }
 
@@ -976,18 +1005,7 @@ int BOARD_EDITOR_CONTROL::ShowEeschema( const TOOL_EVENT& aEvent )
                     // On Windows, it happens always after the library editor was called,
                     // and the dialog field editor was used
                     if( !frame )
-                    {
-                        try
-                        {
-                            frame = boardFrame->Kiway().Player( FRAME_SCH, true );
-                        }
-                        catch( const IO_ERROR& err )
-                        {
-                            DisplayErrorMessage( boardFrame,
-                                                 _( "Eeschema failed to load." ) + wxS( "\n" ) + err.What() );
-                            return;
-                        }
-                    }
+                        frame = boardFrame->Kiway().Player( FRAME_SCH, true );
 
                     wxEventBlocker blocker( boardFrame );
 
@@ -2367,6 +2385,7 @@ void BOARD_EDITOR_CONTROL::setTransitions()
     Go( &BOARD_EDITOR_CONTROL::New,                    ACTIONS::doNew.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::Open,                   ACTIONS::open.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::Save,                   ACTIONS::save.MakeEvent() );
+    Go( &BOARD_EDITOR_CONTROL::ExportForOlderVersion, ACTIONS::exportForOlderVersion.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::SaveAs,                 ACTIONS::saveAs.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::SaveCopy,               ACTIONS::saveCopy.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::Revert,                 ACTIONS::revert.MakeEvent() );
@@ -2382,6 +2401,7 @@ void BOARD_EDITOR_CONTROL::setTransitions()
     Go( &BOARD_EDITOR_CONTROL::OpenNonKicadBoard,      PCB_ACTIONS::openNonKicadBoard.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::ExportFootprints,       PCB_ACTIONS::exportFootprints.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::BoardSetup,             PCB_ACTIONS::boardSetup.MakeEvent() );
+    Go( &BOARD_EDITOR_CONTROL::DesignRules,            PCB_ACTIONS::drcRuleEditor.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::ImportNetlist,          PCB_ACTIONS::importNetlist.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::ImportSpecctraSession,  PCB_ACTIONS::importSpecctraSession.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::ExportSpecctraDSN,      PCB_ACTIONS::exportSpecctraDSN.MakeEvent() );

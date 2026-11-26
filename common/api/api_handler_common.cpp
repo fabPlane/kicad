@@ -25,6 +25,7 @@
 
 #include <api/api_handler_common.h>
 #include <api/api_job_registry.h>
+#include <api/api_task_scheduler.h>
 #include <build_version.h>
 #include <eda_shape.h>
 #include <eda_text.h>
@@ -207,6 +208,8 @@ API_HANDLER_COMMON::API_HANDLER_COMMON() :
 
     registerHandler<CreateDocument, OpenDocumentResponse>(
             &API_HANDLER_COMMON::handleCreateDocument );
+    registerHandler<tasks::GetTaskStatus, tasks::TaskStatusResponse>(
+            &API_HANDLER_COMMON::handleGetTaskStatus, true );
 }
 
 
@@ -258,7 +261,7 @@ tl::expected<bool, ApiResponseStatus> API_HANDLER_COMMON::validateProject( const
 
     const PROJECT& prj = Pgm().GetSettingsManager().Prj();
 
-    if( aProject.name().compare( prj.GetProjectName().ToUTF8() ) != 0 )
+    if( !aProject.name().empty() && aProject.name() != prj.GetProjectName().utf8_string() )
     {
         ApiResponseStatus e;
         e.set_status( ApiStatusCode::AS_BAD_REQUEST );
@@ -266,11 +269,12 @@ tl::expected<bool, ApiResponseStatus> API_HANDLER_COMMON::validateProject( const
         return tl::unexpected( e );
     }
 
-    if( aProject.path().compare( prj.GetProjectPath().ToUTF8() ) != 0 )
+    if( !aProject.path().empty() && aProject.path() != prj.GetProjectPath().utf8_string() )
     {
         ApiResponseStatus e;
         e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        e.set_error_message( fmt::format( "the requested project {} is not open at path {}", aProject.name(),
+        e.set_error_message( fmt::format( "the requested project {} is not open at path {}",
+                                          aProject.name(),
                                           aProject.path() ) );
         return tl::unexpected( e );
     }
@@ -286,18 +290,24 @@ HANDLER_RESULT<NetClassesResponse> API_HANDLER_COMMON::handleGetNetClasses( cons
 
     NetClassesResponse reply;
 
-    std::shared_ptr<NET_SETTINGS>& netSettings =
-            Pgm().GetSettingsManager().Prj().GetProjectFile().m_NetSettings;
+    std::shared_ptr<NET_SETTINGS>& netSettings = Pgm().GetSettingsManager().Prj().GetProjectFile().m_NetSettings;
 
     google::protobuf::Any any;
 
     netSettings->GetDefaultNetclass()->Serialize( any );
-    any.UnpackTo( reply.add_net_classes() );
 
-    for( const auto& netClass : netSettings->GetNetclasses() | std::views::values )
+    if( !any.UnpackTo( reply.add_net_classes() ) )
+        wxFAIL_MSG( wxT( "Failed to unpack Default netclasss from internal serialization" ) );
+
+    for( const std::shared_ptr<NETCLASS>& netClass : netSettings->GetNetclasses() | std::views::values )
     {
         netClass->Serialize( any );
-        any.UnpackTo( reply.add_net_classes() );
+
+        if( !any.UnpackTo( reply.add_net_classes() ) )
+        {
+            wxFAIL_MSG( wxString::Format( wxT( "Failed to unpack netclass %s from internal serialization" ),
+                                          netClass->GetName() ) );
+        }
     }
 
     return reply;
@@ -309,32 +319,32 @@ HANDLER_RESULT<Empty> API_HANDLER_COMMON::handleSetNetClasses( const HANDLER_CON
     if( tl::expected<bool, ApiResponseStatus> result = validateProject( aCtx.Request.project(), true ); !result )
         return tl::unexpected( result.error() );
 
-    std::shared_ptr<NET_SETTINGS>& netSettings =
-            Pgm().GetSettingsManager().Prj().GetProjectFile().m_NetSettings;
+    std::shared_ptr<NET_SETTINGS>& netSettings = Pgm().GetSettingsManager().Prj().GetProjectFile().m_NetSettings;
 
-    if( aCtx.Request.merge_mode() == MapMergeMode::MMM_REPLACE )
-        netSettings->ClearNetclasses();
+    std::map<wxString, std::shared_ptr<NETCLASS>> netClasses;
+    google::protobuf::Any                         any;
 
-    auto netClasses = netSettings->GetNetclasses();
-    google::protobuf::Any any;
+    if( aCtx.Request.merge_mode() != MapMergeMode::MMM_REPLACE )
+        netClasses = netSettings->GetNetclasses();
 
-    for( const auto& ncProto : aCtx.Request.net_classes() )
+    for( const kiapi::common::project::NetClass& ncProto : aCtx.Request.net_classes() )
     {
-        any.PackFrom( ncProto );
         wxString name = wxString::FromUTF8( ncProto.name() );
-
         bool deserialized = false;
 
-        if( name == wxT( "Default" ) )
+        if( any.PackFrom( ncProto ) )
         {
-            deserialized = netSettings->GetDefaultNetclass()->Deserialize( any );
-        }
-        else
-        {
-            if( !netClasses.contains( name ) )
-                netClasses.insert( { name, std::make_shared<NETCLASS>( name, false ) } );
+            if( name == wxT( "Default" ) )
+            {
+                deserialized = netSettings->GetDefaultNetclass()->Deserialize( any );
+            }
+            else
+            {
+                if( !netClasses.contains( name ) )
+                    netClasses.insert( { name, std::make_shared<NETCLASS>( name, false ) } );
 
-            deserialized = netClasses[name]->Deserialize( any );
+                deserialized = netClasses[name]->Deserialize( any );
+            }
         }
 
         if( !deserialized )
@@ -346,6 +356,7 @@ HANDLER_RESULT<Empty> API_HANDLER_COMMON::handleSetNetClasses( const HANDLER_CON
         }
     }
 
+    netSettings->ClearNetclasses();
     netSettings->SetNetclasses( netClasses );
     publishProjectChanged( kiapi::common::events::PCK_NET_CLASSES, aCtx.ClientName );
     requestNetSettingsNotification();
@@ -398,22 +409,17 @@ API_HANDLER_COMMON::handleSetNetClassAssignments( const HANDLER_CONTEXT<SetNetCl
     for( const wxString& name : netSettings->GetNetclasses() | std::views::keys )
         knownNetclasses.insert( name );
 
-    auto checkNetclassName = [&]( const std::string& aName, const char* aKind ) -> std::optional<ApiResponseStatus>
-    {
-        if( knownNetclasses.contains( wxString::FromUTF8( aName ) ) )
-            return std::nullopt;
+    auto checkNetclassName =
+            [&]( const std::string& aName, const char* aKind ) -> std::optional<ApiResponseStatus>
+            {
+                if( knownNetclasses.contains( wxString::FromUTF8( aName ) ) )
+                    return std::nullopt;
 
-        ApiResponseStatus e;
-        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        e.set_error_message( fmt::format( "unknown netclass '{}' in {} assignment", aName, aKind ) );
-        return e;
-    };
-
-    if( aCtx.Request.merge_mode() == MapMergeMode::MMM_REPLACE )
-    {
-        netSettings->ClearNetclassLabelAssignments();
-        netSettings->ClearNetclassPatternAssignments();
-    }
+                ApiResponseStatus e;
+                e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+                e.set_error_message( fmt::format( "unknown netclass '{}' in {} assignment", aName, aKind ) );
+                return e;
+            };
 
     for( const project::NetClassAssignment& assignment : aCtx.Request.assignments() )
     {
@@ -430,16 +436,6 @@ API_HANDLER_COMMON::handleSetNetClassAssignments( const HANDLER_CONTEXT<SetNetCl
             if( std::optional<ApiResponseStatus> err = checkNetclassName( netclassName, "net" ) )
                 return tl::unexpected( *err );
         }
-
-        std::set<wxString> netclasses;
-
-        for( const std::string& netclassName : assignment.netclasses() )
-            netclasses.insert( wxString::FromUTF8( netclassName ) );
-
-        if( netclasses.empty() )
-            netSettings->ClearNetclassLabelAssignment( wxString::FromUTF8( assignment.net() ) );
-        else
-            netSettings->SetNetclassLabelAssignment( wxString::FromUTF8( assignment.net() ), netclasses );
     }
 
     for( const project::NetClassPatternAssignment& pattern : aCtx.Request.pattern_assignments() )
@@ -457,7 +453,29 @@ API_HANDLER_COMMON::handleSetNetClassAssignments( const HANDLER_CONTEXT<SetNetCl
             if( std::optional<ApiResponseStatus> err = checkNetclassName( pattern.netclass(), "pattern" ) )
                 return tl::unexpected( *err );
         }
+    }
 
+    if( aCtx.Request.merge_mode() == MapMergeMode::MMM_REPLACE )
+    {
+        netSettings->ClearNetclassLabelAssignments();
+        netSettings->ClearNetclassPatternAssignments();
+    }
+
+    for( const project::NetClassAssignment& assignment : aCtx.Request.assignments() )
+    {
+        std::set<wxString> netclasses;
+
+        for( const std::string& netclassName : assignment.netclasses() )
+            netclasses.insert( wxString::FromUTF8( netclassName ) );
+
+        if( netclasses.empty() )
+            netSettings->ClearNetclassLabelAssignment( wxString::FromUTF8( assignment.net() ) );
+        else
+            netSettings->SetNetclassLabelAssignment( wxString::FromUTF8( assignment.net() ), netclasses );
+    }
+
+    for( const project::NetClassPatternAssignment& pattern : aCtx.Request.pattern_assignments() )
+    {
         std::vector<std::pair<std::unique_ptr<EDA_COMBINED_MATCHER>, wxString>> kept;
 
         for( auto& existing : netSettings->GetNetclassPatternAssignments() )
@@ -489,14 +507,12 @@ HANDLER_RESULT<Empty> API_HANDLER_COMMON::handlePing( const HANDLER_CONTEXT<Ping
 }
 
 
-HANDLER_RESULT<types::Box2> API_HANDLER_COMMON::handleGetTextExtents(
-        const HANDLER_CONTEXT<GetTextExtents>& aCtx )
+HANDLER_RESULT<types::Box2> API_HANDLER_COMMON::handleGetTextExtents( const HANDLER_CONTEXT<GetTextExtents>& aCtx )
 {
     EDA_TEXT text( pcbIUScale );
     google::protobuf::Any any;
-    any.PackFrom( aCtx.Request.text() );
 
-    if( !text.Deserialize( any ) )
+    if( !any.PackFrom( aCtx.Request.text() ) || !text.Deserialize( any ) )
     {
         ApiResponseStatus e;
         e.set_status( ApiStatusCode::AS_BAD_REQUEST );
@@ -540,9 +556,8 @@ HANDLER_RESULT<GetTextAsShapesResponse> API_HANDLER_COMMON::handleGetTextAsShape
 
         EDA_TEXT text( pcbIUScale );
         google::protobuf::Any any;
-        any.PackFrom( *textPtr );
 
-        if( !text.Deserialize( any ) )
+        if( !any.PackFrom( *textPtr ) || !text.Deserialize( any ) )
         {
             ApiResponseStatus e;
             e.set_status( ApiStatusCode::AS_BAD_REQUEST );
@@ -571,14 +586,16 @@ HANDLER_RESULT<GetTextAsShapesResponse> API_HANDLER_COMMON::handleGetTextAsShape
             EDA_SHAPE proxy( *subshape );
             proxy.Serialize( any );
             GraphicShape* shapeMsg = entry->mutable_shapes()->add_shapes();
-            any.UnpackTo( shapeMsg );
+
+            if( !any.UnpackTo( shapeMsg ) )
+                wxFAIL_MSG( wxT( "Failed to unpack text-as-shapes component from internal serialization" ) );
         }
 
         // The border follows the box, so it turns with the text
         for( size_t ii = 0; textMsg.textbox().border_enabled() && ii < corners.size(); ii++ )
         {
             GraphicShape* border = entry->mutable_shapes()->add_shapes();
-            int width = textMsg.textbox().attributes().stroke_width().value_nm();
+            int width = (int) textMsg.textbox().attributes().stroke_width().value_nm();
             border->mutable_attributes()->mutable_stroke()->mutable_width()->set_value_nm( width );
             PackVector2( *border->mutable_segment()->mutable_start(), corners[ii] );
             PackVector2( *border->mutable_segment()->mutable_end(), corners[( ii + 1 ) % corners.size()] );
@@ -879,6 +896,32 @@ HANDLER_RESULT<GetPathsResponse> API_HANDLER_COMMON::handleGetPaths( const HANDL
     addPath( types::PATH_STOCK_TEMPLATES, PATHS::GetStockTemplatesPath() );
 
     return reply;
+}
+
+
+HANDLER_RESULT<tasks::TaskStatusResponse> API_HANDLER_COMMON::handleGetTaskStatus(
+        const HANDLER_CONTEXT<tasks::GetTaskStatus>& aCtx )
+{
+    if( !aCtx.Request.has_token() || aCtx.Request.token().value().empty() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "no task token provided" );
+        return tl::unexpected( e );
+    }
+
+    std::optional<tasks::TaskStatusResponse> status =
+            API_TASK_SCHEDULER::Instance().GetStatus( aCtx.Request.token().value() );
+
+    if( !status )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "unknown task token {}", aCtx.Request.token().value() ) );
+        return tl::unexpected( e );
+    }
+
+    return *status;
 }
 
 

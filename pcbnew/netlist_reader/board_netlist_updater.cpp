@@ -304,10 +304,7 @@ bool BOARD_NETLIST_UPDATER::updateComponentClass( FOOTPRINT* aFootprint, COMPONE
     FOOTPRINT* copy = nullptr;
 
     if( !m_isDryRun && !m_commit.GetStatus( aFootprint ) )
-    {
         copy = static_cast<FOOTPRINT*>( aFootprint->Clone() );
-        copy->SetParentGroup( nullptr );
-    }
 
     wxString msg;
 
@@ -335,7 +332,7 @@ bool BOARD_NETLIST_UPDATER::updateComponentClass( FOOTPRINT* aFootprint, COMPONE
     }
     else
     {
-        wxASSERT_MSG( newClass != nullptr, "Component class should not be nullptr" );
+        wxCHECK_MSG( newClass != nullptr, false, "Component class should not be nullptr" );
 
         aFootprint->SetStaticComponentClass( newClass );
 
@@ -459,7 +456,7 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
 
     const COMPONENT_VARIANT* firstAssociatedVariant = nullptr;
 
-    if( fpidsEquivalent( aFootprint->GetFPID(), aNetlistComponent->GetFPID() ) )
+    if( !fpidsEquivalent( aFootprint->GetFPID(), aNetlistComponent->GetFPID() ) )
     {
         for( const auto& [_, test] : aNetlistComponent->GetVariants() )
         {
@@ -477,10 +474,7 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
     FOOTPRINT* copy = nullptr;
 
     if( !m_commit.GetStatus( aFootprint ) )
-    {
         copy = static_cast<FOOTPRINT*>( aFootprint->Clone() );
-        copy->SetParentGroup( nullptr );
-    }
 
     bool       changed = false;
 
@@ -1014,6 +1008,32 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
 }
 
 
+PCB_GROUP* BOARD_NETLIST_UPDATER::findBoardGroup( const KIID& aUuid ) const
+{
+    for( PCB_GROUP* group : m_board->Groups() )
+    {
+        if( group->m_Uuid == aUuid )
+            return group;
+    }
+
+    return nullptr;
+}
+
+
+PCB_GROUP* BOARD_NETLIST_UPDATER::addBoardGroup( const NETLIST_GROUP& aNetlistGroup )
+{
+    PCB_GROUP* group = new PCB_GROUP( m_board );
+    group->SetUuid( aNetlistGroup.uuid );
+    group->SetName( aNetlistGroup.name );
+
+    m_board->Add( group );
+    m_commit.Added( group );
+    m_addedGroups.push_back( group );
+
+    return group;
+}
+
+
 bool BOARD_NETLIST_UPDATER::updateFootprintGroup( FOOTPRINT* aPcbFootprint, COMPONENT* aNetlistComponent )
 {
     if( !m_transferGroups )
@@ -1033,26 +1053,13 @@ bool BOARD_NETLIST_UPDATER::updateFootprintGroup( FOOTPRINT* aPcbFootprint, COMP
     FOOTPRINT* copy = nullptr;
 
     if( !m_isDryRun && !m_commit.GetStatus( aPcbFootprint ) )
-    {
         copy = static_cast<FOOTPRINT*>( aPcbFootprint->Clone() );
-        copy->SetParentGroup( nullptr );
-    }
 
     bool changed = false;
 
     // newGroup may point to an existing group on the board if we find an
     // incoming group UUID that matches an existing group
-    PCB_GROUP* newGroup = nullptr;
-
-    // Find existing group based on matching UUIDs
-    auto it = std::find_if( m_board->Groups().begin(), m_board->Groups().end(),
-                [&](PCB_GROUP* group) {
-                    return group->m_Uuid == newGroupKIID;
-                });
-
-    // If we find a group with the same UUID, use it
-    if( it != m_board->Groups().end() )
-        newGroup = *it;
+    PCB_GROUP* newGroup = findBoardGroup( newGroupKIID );
 
     // Remove from existing group
     if( existingGroupKIID != 0 )
@@ -1102,15 +1109,7 @@ bool BOARD_NETLIST_UPDATER::updateFootprintGroup( FOOTPRINT* aPcbFootprint, COMP
 
             if( newGroup == nullptr )
             {
-                newGroup = new PCB_GROUP( m_board );
-                newGroup->SetUuid( newGroupKIID );
-                newGroup->SetName( aNetlistComponent->GetGroup()->name );
-
-                // Add the group to the board manually so we can find it by checking
-                // board groups for later footprints that are checking for existing groups
-                m_board->Add( newGroup );
-                m_commit.Added( newGroup );
-                m_addedGroups.push_back( newGroup );
+                newGroup = addBoardGroup( *aNetlistComponent->GetGroup() );
             }
             else
             {
@@ -1140,10 +1139,7 @@ bool BOARD_NETLIST_UPDATER::updateComponentPadConnections( FOOTPRINT* aFootprint
     FOOTPRINT* copy = nullptr;
 
     if( !m_isDryRun && !m_commit.GetStatus( aFootprint ) )
-    {
         copy = static_cast<FOOTPRINT*>( aFootprint->Clone() );
-        copy->SetParentGroup( nullptr );
-    }
 
     bool changed = false;
 
@@ -1396,10 +1392,7 @@ bool BOARD_NETLIST_UPDATER::updateComponentUnits( FOOTPRINT* aFootprint, COMPONE
     FOOTPRINT* copy = nullptr;
 
     if( !m_commit.GetStatus( aFootprint ) )
-    {
         copy = static_cast<FOOTPRINT*>( aFootprint->Clone() );
-        copy->SetParentGroup( nullptr );
-    }
 
     aFootprint->SetUnitInfo( newUnits );
 
@@ -1480,10 +1473,7 @@ void BOARD_NETLIST_UPDATER::applyComponentVariants( COMPONENT* aComponent,
         FOOTPRINT* copy = nullptr;
 
         if( !m_isDryRun && !m_commit.GetStatus( footprint ) )
-        {
             copy = static_cast<FOOTPRINT*>( footprint->Clone() );
-            copy->SetParentGroup( nullptr );
-        }
 
         bool changed = false;
 
@@ -1780,9 +1770,12 @@ void BOARD_NETLIST_UPDATER::applyComponentVariants( COMPONENT* aComponent,
                                             fieldName,
                                             info.name );
                             }
+
+                            currentVariant->RemoveFieldValue( fieldName );
                         }
 
-                        currentVariant->RemoveFieldValue( fieldName );
+                        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                        changed = true;
                     }
                 }
             }
@@ -2061,6 +2054,30 @@ bool BOARD_NETLIST_UPDATER::updateGroups( NETLIST& aNetlist )
 
     wxString msg;
 
+    for( size_t ii = 0; ii < m_board->Groups().size(); ++ii )
+    {
+        PCB_GROUP*     childGroup = m_board->Groups()[ii];
+        NETLIST_GROUP* childNetlistGroup = aNetlist.GetGroupByUuid( childGroup->m_Uuid );
+
+        if( !childNetlistGroup )
+            continue;
+
+        NETLIST_GROUP* parentNetlistGroup = aNetlist.GetParentGroup( childNetlistGroup->path );
+
+        if( !parentNetlistGroup || findBoardGroup( parentNetlistGroup->uuid ) )
+            continue;
+
+        if( m_isDryRun )
+        {
+            msg.Printf( _( "Add group '%s' to group '%s'." ), EscapeHTML( childGroup->GetName() ),
+                        EscapeHTML( parentNetlistGroup->name ) );
+            m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+            continue;
+        }
+
+        addBoardGroup( *parentNetlistGroup );
+    }
+
     for( PCB_GROUP* pcbGroup : m_board->Groups() )
     {
         NETLIST_GROUP* netlistGroup = aNetlist.GetGroupByUuid( pcbGroup->m_Uuid );
@@ -2108,26 +2125,16 @@ bool BOARD_NETLIST_UPDATER::updateGroups( NETLIST& aNetlist )
             m_reporter->Report( msg, RPT_SEVERITY_ACTION );
         }
 
-        // A group member may be another group's uuid (a nested group).  Restore that
-        // parent/child relationship on the board.
+        // A group member may be another group (a nested group).  Restore that parent/child
+        // relationship on the board.
         for( const KIID_PATH& member : netlistGroup->members )
         {
-            if( member.empty() )
+            NETLIST_GROUP* memberGroup = aNetlist.GetGroupByPath( member );
+
+            if( !memberGroup )
                 continue;
 
-            KIID memberGroupUuid =
-                    member.size() == 1 ? member.front() : KIID::FromName( std::string( member.AsString().ToUTF8() ) );
-
-            PCB_GROUP* childGroup = nullptr;
-
-            for( PCB_GROUP* candidate : m_board->Groups() )
-            {
-                if( candidate->m_Uuid == memberGroupUuid )
-                {
-                    childGroup = candidate;
-                    break;
-                }
-            }
+            PCB_GROUP* childGroup = findBoardGroup( memberGroup->uuid );
 
             if( !childGroup || childGroup == pcbGroup || childGroup->GetParentGroup() == pcbGroup )
             {
@@ -2150,6 +2157,44 @@ bool BOARD_NETLIST_UPDATER::updateGroups( NETLIST& aNetlist )
 
             m_reporter->Report( msg, RPT_SEVERITY_ACTION );
         }
+    }
+
+    // Run after the nesting above so a child that moved to another parent is already there.
+    // The netlist does not describe board-only members, so only a child group it knows about
+    // can be said to have left its parent.
+    for( PCB_GROUP* childGroup : m_board->Groups() )
+    {
+        NETLIST_GROUP* childNetlistGroup = aNetlist.GetGroupByUuid( childGroup->m_Uuid );
+
+        if( !childNetlistGroup || !childGroup->GetParentGroup() )
+            continue;
+
+        PCB_GROUP*     parentGroup = static_cast<PCB_GROUP*>( childGroup->GetParentGroup() );
+        NETLIST_GROUP* parentNetlistGroup = aNetlist.GetGroupByUuid( parentGroup->m_Uuid );
+
+        if( !parentNetlistGroup )
+            continue;
+
+        const std::vector<KIID_PATH>& members = parentNetlistGroup->members;
+
+        if( std::find( members.begin(), members.end(), childNetlistGroup->path ) != members.end() )
+            continue;
+
+        if( m_isDryRun )
+        {
+            msg.Printf( _( "Remove group '%s' from group '%s'." ), EscapeHTML( childGroup->GetName() ),
+                        EscapeHTML( parentGroup->GetName() ) );
+        }
+        else
+        {
+            msg.Printf( _( "Removed group '%s' from group '%s'." ), EscapeHTML( childGroup->GetName() ),
+                        EscapeHTML( parentGroup->GetName() ) );
+            m_commit.Modify( parentGroup->AsEdaItem(), nullptr, RECURSE_MODE::NO_RECURSE );
+            m_commit.Modify( childGroup->AsEdaItem(), nullptr, RECURSE_MODE::NO_RECURSE );
+            parentGroup->RemoveItem( childGroup );
+        }
+
+        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
     }
 
     return true;
@@ -2506,9 +2551,6 @@ bool BOARD_NETLIST_UPDATER::UpdateNetlist( NETLIST& aNetlist )
         bool matched = false;
         bool doDelete = m_deleteUnusedFootprints;
 
-        if( ( footprint->GetAttributes() & FP_BOARD_ONLY ) > 0 )
-            doDelete = false;
-
         bool isStaleVariantFootprint = false;
 
         if( usedFootprints.count( footprint ) )
@@ -2543,6 +2585,9 @@ bool BOARD_NETLIST_UPDATER::UpdateNetlist( NETLIST& aNetlist )
         // regardless of m_deleteUnusedFootprints setting.
         if( isStaleVariantFootprint )
             doDelete = true;
+
+        if( ( footprint->GetAttributes() & FP_BOARD_ONLY ) > 0 )
+            doDelete = false;
 
         if( doDelete && !matched && footprint->IsLocked() && !m_overrideLocks )
         {

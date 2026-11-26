@@ -27,7 +27,6 @@
 #include <map>
 #include <core/map_helpers.h>
 #include <fmt/core.h>
-#include <ki_exception.h>
 #include <macros.h>
 #include <core/kicad_algo.h>
 #include <string_utils.h>
@@ -908,7 +907,7 @@ wxString GetISO8601CurrentDateTime()
 }
 
 
-int StrNumCmp( const wxString& aString1, const wxString& aString2, bool aIgnoreCase )
+int StrNumCmp( const wxString& aString1, const wxString& aString2, CMP_T aCaseSensitivity )
 {
     int nb1 = 0, nb2 = 0;
 
@@ -953,7 +952,7 @@ int StrNumCmp( const wxString& aString1, const wxString& aString2, bool aIgnoreC
         }
 
         // Any numerical comparisons to here are identical.
-        if( aIgnoreCase )
+        if( aCaseSensitivity == CMP_T::IGNORE_CASE )
         {
             if( c1 != c2 )
             {
@@ -1067,6 +1066,21 @@ bool ApplyModifier( double& value, const wxString& aString )
     wxChar   modifier;
     wxString units;
 
+    if( aString.Strip() == wxT( "m" ) )
+    {
+        // a single m is meters, not milli-undefineds
+        return true;
+    }
+    else if( aString.Strip() == wxT( "mils" ) )
+    {
+        value *= 0.0000254;
+        return true;
+    }
+    else if( aString.Strip() == wxT( "in" ) )
+    {
+        value *= 0.0254;
+        return true;
+    }
     if( modifiers.Find( aString[ 0 ] ) >= 0 )
     {
         modifier = aString[ 0 ];
@@ -1081,10 +1095,13 @@ bool ApplyModifier( double& value, const wxString& aString )
     if( units.length()
             && !units.IsSameAs( wxT( "F" ), false )
             && !units.IsSameAs( wxT( "hz" ), false )
+            && !units.IsSameAs( wxT( "Ω" ), false )
             && !units.IsSameAs( wxT( "W" ), false )
             && !units.IsSameAs( wxT( "V" ), false )
             && !units.IsSameAs( wxT( "A" ), false )
-            && !units.IsSameAs( wxT( "H" ), false ) )
+            && !units.IsSameAs( wxT( "H" ), false )
+            && !units.IsSameAs( wxT( "s" ), false )
+            && !units.IsSameAs( wxT( "m" ), false ) )
     {
         return false;
     }
@@ -1105,6 +1122,8 @@ bool ApplyModifier( double& value, const wxString& aString )
         value *= 1.0e-3;
     else if( modifier == 'R' || modifier == 'F' )
         ; // unity scalar
+    else if( modifier == 'c' )  // primarily for cm
+        value *= 1.0e2;
     else if( modifier == 'k' || modifier == 'K' )
         value *= 1.0e3;
     else if( modifier == 'M' )
@@ -1236,6 +1255,37 @@ bool convertSeparators( wxString* value )
     // Convert to C-locale
     value->Replace( thousandsSeparator, wxEmptyString );
     value->Replace( decimalSeparator, '.' );
+
+    return true;
+}
+
+
+// Return true if aStr can be parsed as a numeric value (including units and scalers, so
+// something like "4K7Ω" will return true).
+bool QuacksLikeADuck( const wxString& aStr, double* aValue )
+{
+    if( aValue )
+        *aValue = NAN;
+
+    wxString str = UnescapeString( aStr );
+
+    wxString beforeDigits, digits, afterDigits;
+    SplitString( str, &beforeDigits, &digits, &afterDigits );
+
+    if( !beforeDigits.Trim( true ).Trim( false ).IsEmpty() )
+        return false;
+
+    double number = 0;
+    convertSeparators( &digits );
+
+    if( !digits.ToCDouble( &number ) )
+        return false;
+
+   if( !afterDigits.IsEmpty() && !ApplyModifier( number, afterDigits ) )
+       return false;
+
+    if( aValue )
+        *aValue = number;
 
     return true;
 }
@@ -1714,14 +1764,25 @@ wxString ConvertPathToFileUri( const wxString& aPath, const PROJECT* aProject )
         resolved = fname.GetFullPath();
     }
 
+#ifdef __WINDOWS__
+    // A rooted path names no drive, so it lives on the current one
+    if( !fname.IsAbsolute() && aPath.StartsWith( wxS( "/" ) ) )
+    {
+        fname.MakeAbsolute();
+        resolved = fname.GetFullPath();
+    }
+#endif
+
     // Only convert if the file actually exists
     bool isUNC = resolved.StartsWith( wxS( "\\\\" ) );
 
     if( !isUNC && !wxFileExists( resolved ) && !wxDirExists( resolved ) )
         return aPath;
 
+#ifndef __WINDOWS__
     if( aPath.StartsWith( wxS( "/" ) ) )
         return wxS( "file://" ) + aPath;
+#endif
 
     if( aPath.StartsWith( wxS( "${" ) ) )
         return wxS( "file://" ) + aPath;
@@ -1737,9 +1798,10 @@ wxString ConvertPathToFileUri( const wxString& aPath, const PROJECT* aProject )
         return wxS( "file://" ) + path;
     }
 
-    if( aPath.Length() >= 2 && wxIsalpha( aPath[0] ) && aPath[1] == ':' )
+    if( aPath.StartsWith( wxS( "/" ) ) || ( aPath.Length() >= 2 && wxIsalpha( aPath[0] ) && aPath[1] == ':' ) )
     {
-        wxString path = aPath;
+        // A rooted path needs the resolved drive, while a drive path keeps its variables as typed
+        wxString path = aPath.StartsWith( wxS( "/" ) ) ? resolved : aPath;
         path.Replace( wxS( "\\" ), wxS( "/" ) );
         return wxS( "file:///" ) + path;
     }
@@ -2103,33 +2165,6 @@ int SortVariantNames( const wxString& aLhs, const wxString& aRhs )
         return 1;
 
     return StrNumCmp( aLhs, aRhs );
-}
-
-
-wxString ExtractLibraryLoadException( const IO_ERROR& aException )
-{
-    wxString err;
-
-    // Errors are separated by newlines. We want to keep:
-    // - Lines starting with "Library '" (library-level errors)
-    // - Lines containing "Expecting" (file error location)
-    // And strip:
-    // - Lines starting with "from " (internal code location info)
-    wxStringTokenizer tokenizer( aException.What(), wxS( "\n" ), wxTOKEN_STRTOK );
-#if 0
-    while( tokenizer.HasMoreTokens() )
-    {
-        wxString line = tokenizer.GetNextToken();
-
-        // Skip internal code location lines (e.g., "from pcb_io_kicad_sexpr_parser.cpp : ...")
-        if( line.StartsWith( wxS( "from " ) ) )
-            continue;
-
-        if( line.StartsWith( wxS( "Library '" ) ) || line.Contains( wxS( "Expecting" ) ) )
-        messages.push_back( KI_ERROR( static_cast<SEVERITY>( aSeverity ), line ) );
-    }
-#endif
-    return err;
 }
 
 

@@ -232,6 +232,9 @@ void PCB_IO_PADS_BINARY::loadNets()
 
     std::shared_ptr<NET_SETTINGS> netSettings = m_loadBoard->GetDesignSettings().m_NetSettings;
 
+    // Without this flag BOARD::SetProject drops the imported net classes
+    m_loadBoard->m_LegacyNetclassesLoaded = true;
+
     for( const PADS_IO::BIN_NET_CLASS_DEF& nc : netClasses )
     {
         if( nc.name.empty() || nc.nets.empty() )
@@ -463,8 +466,7 @@ void PCB_IO_PADS_BINARY::buildPad( FOOTPRINT* aFootprint, const PADS_IO::PART_DE
         }
 
         bool modernZeroDefaultSmd = m_parser->GetVersion() == 0x2024 && layerDef.drill == 0 && layerDef.sizeA <= 0;
-        bool legacyZeroDefaultSmd = m_parser->GetVersion() == 0x2022 && layerDef.drill == 0
-                                    && layerDef.sizeA <= 0;
+        bool legacyZeroDefaultSmd = m_parser->GetVersion() == 0x2022 && layerDef.drill == 0 && layerDef.sizeA <= 0;
         bool zeroDefaultSmd = modernZeroDefaultSmd || legacyZeroDefaultSmd;
         bool hasExplicitLayers = stack.size() > 1 && ( layerDef.drill > 0 || zeroDefaultSmd ) && !ambiguousLayers;
         LSET layerSet;
@@ -492,13 +494,24 @@ void PCB_IO_PADS_BINARY::buildPad( FOOTPRINT* aFootprint, const PADS_IO::PART_DE
                 if( stackLayer.sizeA <= 0 )
                     continue;
 
-                // RT/ST are plane thermal-relief spoke patterns and RA/SA are anti-pad
-                // clearances. Neither is pad copper, so they must not reach the shape below.
-                // KiCad derives the relief geometry from the zone, so an RT/ST row only says
-                // that this pad connects through spokes rather than solid copper.
+                // RT/ST are plane thermal-relief spoke patterns and RA/SA are anti-pad clearances. Neither
+                // is pad copper, so they must not reach the shape below.  KiCad derives the relief geometry
+                // from the zone, so an RT/ST row only says that this pad connects through spokes rather
+                // than solid copper.
                 if( PADS_IO::IsThermalReliefPadRow( stackLayer ) )
                 {
-                    pad->SetLocalZoneConnection( ZONE_CONNECTION::THERMAL );
+                    // Note that neither the Kicad GUI nor the PADS importer currently supports these being
+                    // different on different layers.
+
+                    pad->Padstack().ForEachUniqueLayer(
+                            [&]( PCB_LAYER_ID layer )
+                            {
+                                pad->Padstack().ZoneConnection( layer ) = ZONE_CONNECTION::THERMAL;
+                            } );
+
+                    // TODO: the ASCII PADS importer also handles the spoke width, thermal gap, and spoke
+                    // angle here....
+
                     continue;
                 }
 

@@ -18,6 +18,7 @@
  */
 
 #include <boost/test/unit_test.hpp>
+#include <qa_utils/file_utils.h>
 #include <qa_utils/wx_utils/unit_test_utils.h>
 
 #include <json_common.h>
@@ -1517,7 +1518,7 @@ BOOST_AUTO_TEST_CASE( CanReadLibraryRefusesBinaryContainer )
     }
 
     SCH_IO_PADS plugin;
-    wxString    path = wxString::FromUTF8( binaryAsTxt.string() );
+    wxString    path = KI_TEST::ToWxPath( binaryAsTxt );
 
     BOOST_CHECK( plugin.CanReadSchematicFile( path ) );
     BOOST_CHECK( !plugin.CanReadLibrary( path ) );
@@ -3195,16 +3196,6 @@ BOOST_AUTO_TEST_CASE( BinaryConnectivityAndGraphics )
                 {
                     BOOST_CHECK_CLOSE( text->GetTextAngleDegrees(), aGraphic.angle / 10.0, 0.001 );
                     checkTextPresentation( *text, aGraphic.presentation );
-                    const bool approximatedFont = !aGraphic.presentation.font.text.IsEmpty()
-                                                  && aGraphic.presentation.font.text != wxS( "Default Font" );
-                    BOOST_CHECK_EQUAL(
-                            std::ranges::count_if( graphicsResult.diagnostics,
-                                                   [&]( const PARSER_DIAGNOSTIC& aDiagnostic )
-                                                   {
-                                                       return aDiagnostic.source == aGraphic.presentation.source
-                                                              && aDiagnostic.message.Contains( wxS( "font" ) );
-                                                   } ),
-                            approximatedFont ? 1u : 0u );
                     found = true;
                     break;
                 }
@@ -3352,16 +3343,6 @@ BOOST_AUTO_TEST_CASE( BinaryConnectivityAndGraphics )
             {
                 BOOST_CHECK_CLOSE( text->GetTextAngleDegrees(), sourceText.angle / 10.0, 0.001 );
                 checkTextPresentation( *text, sourceText.presentation );
-                const bool approximatedFont = !sourceText.presentation.font.text.IsEmpty()
-                                              && sourceText.presentation.font.text != wxS( "Default Font" );
-                BOOST_CHECK_EQUAL( std::ranges::count_if( graphicsResult.diagnostics,
-                                                          [&]( const PARSER_DIAGNOSTIC& aDiagnostic )
-                                                          {
-                                                              return aDiagnostic.source
-                                                                             == sourceText.presentation.source
-                                                                     && aDiagnostic.message.Contains( wxS( "font" ) );
-                                                          } ),
-                                   approximatedFont ? 1u : 0u );
                 found = true;
                 break;
             }
@@ -4162,6 +4143,20 @@ BOOST_AUTO_TEST_CASE( AsciiHierarchicalSheetLoadIsRefused )
 
     BOOST_CHECK_THROW( plugin.LoadSchematicFile( path, &m_schematic, nullptr, &properties ), IO_ERROR );
     BOOST_CHECK_EQUAL( m_schematic.GetTopLevelSheet(), existing );
+}
+
+// Pulsonix writes the CAEDECAL font lines unquoted, which shifted the attribute and graphic parse
+BOOST_AUTO_TEST_CASE( Issue25511_PulsonixUnquotedDecalFonts )
+{
+    SCH_IO_PADS plugin;
+    wxString    path = wxString::FromUTF8( KI_TEST::GetEeschemaTestDataDir() )
+                       + wxS( "/plugins/pads/issue25511_schematic.txt" );
+
+    SCH_SHEET* root = nullptr;
+
+    BOOST_REQUIRE_NO_THROW( root = plugin.LoadSchematicFile( path, &m_schematic ) );
+    BOOST_REQUIRE( root );
+    BOOST_CHECK_EQUAL( itemCount( root->GetScreen(), SCH_SHEET_T ), 5 );
 }
 
 

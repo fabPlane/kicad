@@ -35,4 +35,20 @@
 #include <GL/glu.h>
 #endif
 
+// Windows headers define CALLBACK, so a Windows build without it should fail rather than lose __stdcall
+#if !defined( CALLBACK ) && !defined( _WIN32 )
+#define CALLBACK
+#endif
+
+/**
+ * Convert a tessellator callback to the untyped pointer gluTessCallback takes.
+ *
+ * A direct cast between function pointer types raises MSVC C4191; the hop through void* does not.
+ */
+template <typename FN>
+inline auto ToGluCallback( FN* aCallback )
+{
+    return reinterpret_cast<void( CALLBACK* )()>( reinterpret_cast<void*>( aCallback ) );
+}
+
 #endif  // KIGLU_H_

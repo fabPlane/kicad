@@ -223,7 +223,9 @@ void SCH_FIELD::Serialize( google::protobuf::Any& aContainer ) const
 {
     kiapi::schematic::types::SchematicField field;
     Serialize( field, schIUScale );
-    aContainer.PackFrom( field );
+
+    if( !aContainer.PackFrom( field ) )
+        wxFAIL_MSG( wxT( "Failed to pack SCH_FIELD" ) );
 }
 
 
@@ -288,10 +290,30 @@ void SCH_FIELD::Copy( SCH_FIELD* aTarget ) const
 }
 
 
+/// A sheet field takes its type from its name, so every path that creates or renames one agrees
+static FIELD_T sheetFieldId( FIELD_T aId, const wxString& aName )
+{
+    if( aId != FIELD_T::SHEET_USER && aId != FIELD_T::SHEET_REF_SUFFIX )
+        return aId;
+
+    if( aName == GetDefaultFieldName( FIELD_T::SHEET_REF_SUFFIX, UNTRANSLATED ) )
+        return FIELD_T::SHEET_REF_SUFFIX;
+
+    return FIELD_T::SHEET_USER;
+}
+
+
 void SCH_FIELD::setId( FIELD_T aId )
 {
-    m_id = aId;
+    m_id = sheetFieldId( aId, m_name );
     SetLayer( GetDefaultLayer() );
+}
+
+
+void SCH_FIELD::SetOrdinal( int aOrdinal, FIELD_T aType )
+{
+    m_id = sheetFieldId( aType, m_name );
+    m_ordinal = aOrdinal;
 }
 
 
@@ -506,7 +528,8 @@ SCH_LAYER_ID SCH_FIELD::GetDefaultLayer() const
     case FIELD_T::VALUE:           return LAYER_VALUEPART;
     case FIELD_T::SHEET_NAME:      return LAYER_SHEETNAME;
     case FIELD_T::SHEET_FILENAME:  return LAYER_SHEETFILENAME;
-    case FIELD_T::SHEET_USER:      return LAYER_SHEETFIELDS;
+    case FIELD_T::SHEET_USER:
+    case FIELD_T::SHEET_REF_SUFFIX: return LAYER_SHEETFIELDS;
     case FIELD_T::INTERSHEET_REFS: return LAYER_INTERSHEET_REFS;
     default:                       return LAYER_FIELDS;
     }
@@ -705,7 +728,7 @@ bool SCH_FIELD::Matches( const EDA_SEARCH_DATA& aSearchData, void* aAuxData ) co
                 return true;
 
             if( parentSymbol->GetUnitCount() > 1 )
-                text << parentSymbol->SubReference( parentSymbol->GetUnitSelection( sheet ) );
+                text = parentSymbol->GetRef( sheet, true );
         }
     }
 
@@ -770,11 +793,11 @@ void SCH_FIELD::OnScintillaCharAdded( SCINTILLA_TRICKS* aScintillaTricks, wxStyl
                     std::vector<EMBEDDED_FILES*> embeddedFilesStack;
                     embeddedFilesStack.push_back( schematic->GetEmbeddedFiles() );
 
-                    if( EMBEDDED_FILES* symbolEmbeddedFiles = symbol->GetEmbeddedFiles() )
-                    {
-                        embeddedFilesStack.push_back( symbolEmbeddedFiles );
+                    if( symbol->GetLibSymbolRef() )
                         symbol->GetLibSymbolRef()->AppendParentEmbeddedFiles( embeddedFilesStack );
-                    }
+
+                    if( EMBEDDED_FILES* symbolEmbeddedFiles = symbol->GetEmbeddedFiles() )
+                        embeddedFilesStack.push_back( symbolEmbeddedFiles );
 
                     mgr.SetFilesStack( std::move( embeddedFilesStack ) );
 
@@ -906,11 +929,18 @@ bool SCH_FIELD::Replace( const EDA_SEARCH_DATA& aSearchData, void* aAuxData )
 
         wxCHECK_MSG( aAuxData, false, wxT( "Need sheetpath to replace in refdes." ) );
 
-        text = parentSymbol->GetRef( (SCH_SHEET_PATH*) aAuxData );
-        isReplaced = EDA_ITEM::Replace( aSearchData, text );
+        const SCH_SHEET_PATH* sheet = static_cast<const SCH_SHEET_PATH*>( aAuxData );
+
+        text = parentSymbol->GetRef( sheet );
+
+        // Only the base is stored, and the sheet suffix must survive the replacement
+        const wxString suffix = text.Mid( parentSymbol->GetBaseRef( sheet ).length() );
+
+        isReplaced = EDA_ITEM::Replace( aSearchData, text )
+                     && ( suffix.IsEmpty() || ( text.EndsWith( suffix ) && text.length() > suffix.length() ) );
 
         if( isReplaced )
-            parentSymbol->SetRef( (SCH_SHEET_PATH*) aAuxData, text );
+            parentSymbol->SetUserRef( *sheet, text.Left( text.length() - suffix.length() ) );
     }
     else
     {
@@ -1139,6 +1169,9 @@ void SCH_FIELD::SetName( const wxString& aName )
 
     if( m_isGeneratedField )
         EDA_TEXT::SetText( aName );
+
+    if( sheetFieldId( m_id, m_name ) != m_id )
+        setId( m_id );
 
     if( changed )
         invalidateConnectivity();
@@ -1808,7 +1841,7 @@ wxString SCH_FIELD::getUnescapedText( const SCH_SHEET_PATH* aPath, const wxStrin
         case SCH_SHEET_T:
             if( const SCH_SHEET* sheet = static_cast<const SCH_SHEET*>( m_parent ) )
             {
-                if( !aVariantName.IsEmpty() )
+                if( !aVariantName.IsEmpty() && m_id != FIELD_T::SHEET_REF_SUFFIX )
                 {
                     const SCH_SHEET_INSTANCE* instance = sheet->GetInstance( aPath->Path() );
 

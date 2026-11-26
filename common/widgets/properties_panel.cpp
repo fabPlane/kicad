@@ -28,6 +28,7 @@
 #include <import_export.h>
 #include <pgm_base.h>
 #include <properties/pg_cell_renderer.h>
+#include <properties/pg_properties.h>
 #include <properties/property.h>
 #include <properties/property_mgr.h>
 #include <widgets/bitmap_button.h>
@@ -207,7 +208,8 @@ PROPERTIES_PANEL::PROPERTIES_PANEL( wxWindow* aParent, EDA_BASE_FRAME* aFrame ) 
     Bind( wxEVT_TIMER,
           [this]( wxTimerEvent& )
           {
-              rebuildProperties( m_deferredSelection );
+              // The selection may have changed or lost items since the deferral
+              UpdateData();
           },
           m_deferredRebuildTimer.GetId() );
 }
@@ -258,10 +260,11 @@ void PROPERTIES_PANEL::rebuildProperties( const SELECTION& aSelection )
     if( static_cast<PROPERTIES_PANEL_GRID*>( m_grid )->IsProcessingWxPGEvent() )
     {
         hideCategoryButtons();
-        m_deferredSelection = aSelection;
         m_deferredRebuildTimer.StartOnce( 1 );
         return;
     }
+
+    m_deferredRebuildTimer.Stop();
 
     auto reset =
             [&]()
@@ -440,7 +443,7 @@ void PROPERTIES_PANEL::rebuildProperties( const SELECTION& aSelection )
             pgProp->SetChoices( choices );
 
         pgProp->SetValue( commonVal );
-        pgProp->ChangeFlag( wxPG_PROP_READONLY, !writeable );
+        pgProp->ChangeFlag( PG_PROP_READONLY, !writeable );
 
         // If it's no longer writable any pending edits will be lost.  Life's tough.
         if( !writeable && pgProp == m_grid->GetSelection() && m_grid->IsEditorFocused() )
@@ -448,7 +451,11 @@ void PROPERTIES_PANEL::rebuildProperties( const SELECTION& aSelection )
     }
 
     if( !existingProps.empty() && existingProps == availableProps )
+    {
+        // A deferred rebuild hid the buttons and ends up here when the selection is unchanged
+        updateCategoryButtons();
         return;
+    }
 
     // Some difference exists:  start from scratch
     reset();
@@ -472,7 +479,7 @@ void PROPERTIES_PANEL::rebuildProperties( const SELECTION& aSelection )
                 pgProp->SetChoices( choices );
 
             pgProp->SetValue( commonVal );
-            pgProp->ChangeFlag( wxPG_PROP_READONLY, !writeable );
+            pgProp->ChangeFlag( PG_PROP_READONLY, !writeable );
             m_displayed.push_back( property );
 
             wxASSERT( displayOrder.count( name ) );
@@ -605,7 +612,7 @@ bool PROPERTIES_PANEL::extractValueAndWritability( const SELECTION& aSelection, 
         if( getItemValue( item, property, value ) )
         {
             // Null value indicates different property values between items
-            if( !different && !aValue.IsNull() && value != aValue )
+            if( !different && ( property->IsIndeterminate( item ) || ( !aValue.IsNull() && value != aValue ) ) )
             {
                 different = true;
                 aValue.MakeNull();
@@ -830,7 +837,7 @@ void PROPERTIES_PANEL::onCharHook( wxKeyEvent& aEvent )
                 []( wxPGProperty* aProp )
                 {
                     return aProp && !aProp->IsCategory() && aProp->IsVisible() && aProp->IsEnabled()
-                           && !aProp->HasFlag( wxPG_PROP_READONLY ) && aProp->GetEditorClass();
+                           && !aProp->HasFlag( PG_PROP_READONLY ) && aProp->GetEditorClass();
                 };
 
         auto findTarget =

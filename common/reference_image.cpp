@@ -188,19 +188,24 @@ BOX2I REFERENCE_IMAGE::GetBoundingBox() const
 
 VECTOR2I REFERENCE_IMAGE::boundingSize() const
 {
-    // Un-rotated size of the image.
-    const VECTOR2I  size = m_bitmapBase->GetSize();
-    const EDA_ANGLE angle = m_orientation.GetAngle();
+    return boundingSize( m_orientation.GetAngle() );
+}
 
-    if( angle.IsHorizontal() )
+
+VECTOR2I REFERENCE_IMAGE::boundingSize( const EDA_ANGLE& aOrientation ) const
+{
+    // Un-rotated size of the image.
+    const VECTOR2I size = m_bitmapBase->GetSize();
+
+    if( aOrientation.IsHorizontal() )
         return size;
 
-    if( angle.IsVertical() )
+    if( aOrientation.IsVertical() )
         return VECTOR2I{ size.y, size.x };
 
     // The raster is stored unrotated, so its axis-aligned extent grows with the orientation.
-    const double angleCos = std::abs( angle.Cos() );
-    const double angleSin = std::abs( angle.Sin() );
+    const double angleCos = std::abs( aOrientation.Cos() );
+    const double angleSin = std::abs( aOrientation.Sin() );
 
     const double w = size.x * angleCos + size.y * angleSin;
     const double h = size.x * angleSin + size.y * angleCos;
@@ -329,6 +334,31 @@ bool REFERENCE_IMAGE::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirecti
 }
 
 
+bool REFERENCE_IMAGE::Mirror( const SEG& aAxis )
+{
+    const EDA_ANGLE axisAngle = -EDA_ANGLE( aAxis.B - aAxis.A );
+    const EDA_ANGLE newOrientation = m_orientation.GetAngle().Reflect( axisAngle );
+    const VECTOR2I  newPos = aAxis.ReflectPoint( m_pos );
+
+    // Check the bounding box with the new orientation to ensure it fits within the coordinate system.
+    const BOX2D newBox = BOX2D::ByCenter( newPos, boundingSize( newOrientation ) );
+
+    if( !IsBOX2Safe( newBox ) )
+        return false;
+
+    m_pos = newPos;
+    m_bitmapBase->Mirror( FLIP_DIRECTION::TOP_BOTTOM );
+    m_orientation = newOrientation;
+
+    // The transform origin is an offset from the image center, so it reflects about the axis
+    // through the image origin and not about the mirror axis itself.
+    const SEG offsetAxis( VECTOR2I( 0, 0 ), aAxis.B - aAxis.A );
+    m_transformOriginOffset = offsetAxis.ReflectPoint( m_transformOriginOffset );
+
+    return true;
+}
+
+
 void REFERENCE_IMAGE::Rotate( const VECTOR2I& aCenter, const EDA_ANGLE& aAngle )
 {
     RotatePoint( m_pos, aCenter, aAngle );
@@ -449,11 +479,10 @@ void REFERENCE_IMAGE::PlotImage( PLOTTER* aPlotter, const VECTOR2I& aPos, const 
 
     const double    scaleFactor = m_bitmapBase->GetScalingFactor();
     const EDA_ANGLE angle = m_orientation.GetAngle();
-    const bool      faded = m_opacity < 1.0;
 
-    if( angle.IsZero() && !faded )
+    if( angle.IsZero() )
     {
-        aPlotter->PlotImage( *image, aPos, scaleFactor );
+        aPlotter->PlotImage( *image, aPos, scaleFactor, m_opacity );
         return;
     }
 
@@ -484,21 +513,7 @@ void REFERENCE_IMAGE::PlotImage( PLOTTER* aPlotter, const VECTOR2I& aPos, const 
 
     wxCHECK_MSG( turned.IsOk(), /* void */, wxT( "Failed to rotate image" ) );
 
-    // Apply fading if the image opacity is less than 1.0
-    if( faded )
-    {
-        if( !turned.HasAlpha() )
-            turned.InitAlpha();
-
-        unsigned char* alpha = turned.GetAlpha();
-        const int      pixels = turned.GetWidth() * turned.GetHeight();
-
-        // Post-multiply the alpha channel by the image overall opacity
-        for( int ii = 0; ii < pixels; ++ii )
-            alpha[ii] = static_cast<unsigned char>( KiROUND( alpha[ii] * m_opacity ) );
-    }
-
-    aPlotter->PlotImage( turned, aPos, scaleFactor );
+    aPlotter->PlotImage( turned, aPos, scaleFactor, m_opacity );
 }
 
 

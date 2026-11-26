@@ -325,7 +325,7 @@ bool SCH_EDIT_TOOL::Init()
     SCH_DRAWING_TOOLS* drawingTools = m_toolMgr->GetTool<SCH_DRAWING_TOOLS>();
     SCH_MOVE_TOOL*     moveTool = m_toolMgr->GetTool<SCH_MOVE_TOOL>();
 
-    wxASSERT_MSG( drawingTools, "eeshema.InteractiveDrawing tool is not available" );
+    wxCHECK_MSG( drawingTools, false, "eeshema.InteractiveDrawing tool is not available" );
 
     static const std::vector<KICAD_T> attribTypes = { SCH_SYMBOL_T, SCH_SHEET_T, SCH_RULE_AREA_T };
     static const std::vector<KICAD_T> sheetTypes = { SCH_SHEET_T };
@@ -354,23 +354,9 @@ bool SCH_EDIT_TOOL::Init()
                     switch( item->Type() )
                     {
                     case SCH_SYMBOL_T:
-                        if( static_cast<const SCH_SYMBOL*>( item )->GetDNP( sheet, variant ) )
-                            checked++;
-                        else
-                            unchecked++;
-
-                        break;
-
                     case SCH_SHEET_T:
-                        if( static_cast<const SCH_SHEET*>( item )->GetDNP( sheet, variant ) )
-                            checked++;
-                        else
-                            unchecked++;
-
-                        break;
-
                     case SCH_RULE_AREA_T:
-                        if( static_cast<const SCH_RULE_AREA*>( item )->GetDNP() )
+                        if( static_cast<const SCH_ITEM*>( item )->GetDNP( sheet, variant ) )
                             checked++;
                         else
                             unchecked++;
@@ -398,23 +384,9 @@ bool SCH_EDIT_TOOL::Init()
                     switch( item->Type() )
                     {
                     case SCH_SYMBOL_T:
-                        if( static_cast<const SCH_SYMBOL*>( item )->GetExcludedFromSim( sheet, variant ) )
-                            checked++;
-                        else
-                            unchecked++;
-
-                        break;
-
                     case SCH_SHEET_T:
-                        if( static_cast<const SCH_SHEET*>( item )->GetExcludedFromSim( sheet, variant ) )
-                            checked++;
-                        else
-                            unchecked++;
-
-                        break;
-
                     case SCH_RULE_AREA_T:
-                        if( static_cast<const SCH_RULE_AREA*>( item )->GetExcludedFromSim() )
+                        if( static_cast<const SCH_ITEM*>( item )->GetExcludedFromSim( sheet, variant ) )
                             checked++;
                         else
                             unchecked++;
@@ -442,23 +414,9 @@ bool SCH_EDIT_TOOL::Init()
                     switch( item->Type() )
                     {
                     case SCH_SYMBOL_T:
-                        if( static_cast<const SCH_SYMBOL*>( item )->GetExcludedFromBOM( sheet, variant ) )
-                            checked++;
-                        else
-                            unchecked++;
-
-                        break;
-
                     case SCH_SHEET_T:
-                        if( static_cast<const SCH_SHEET*>( item )->GetExcludedFromBOM( sheet, variant ) )
-                            checked++;
-                        else
-                            unchecked++;
-
-                        break;
-
                     case SCH_RULE_AREA_T:
-                        if( static_cast<const SCH_RULE_AREA*>( item )->GetExcludedFromBOM() )
+                        if( static_cast<const SCH_ITEM*>( item )->GetExcludedFromBOM( sheet, variant ) )
                             checked++;
                         else
                             unchecked++;

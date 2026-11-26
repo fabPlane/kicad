@@ -21,6 +21,7 @@ set( Protobuf_IMPORT_DIRS ${Protobuf_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/pr
 set( KIAPI_PROTO_SRCS
     common/envelope.proto
     common/events.proto
+    common/tasks.proto
 
     common/types/base_types.proto
     common/types/embedded_files.proto
@@ -44,11 +45,13 @@ set( KIAPI_PROTO_SRCS
     board/board_jobs.proto
     board/board_types.proto
     board/board_rules.proto
+    board/board_tasks.proto
 
     schematic/schematic_types.proto
     schematic/schematic_commands.proto
     schematic/schematic_jobs.proto
     schematic/schematic_rules.proto
+    schematic/schematic_tasks.proto
     )
 
 # Generated C++ code must be in the build dir; it is dependent on the version of protoc installed
@@ -164,12 +167,13 @@ if( KICAD_USE_CMAKE_FINDPROTOBUF
     target_link_libraries( kiapi absl::hash )
 endif()
 
-target_include_directories( kiapi INTERFACE
+# The generated headers are external code, so their warnings stay out of every consumer's build
+target_include_directories( kiapi SYSTEM INTERFACE
     ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/cpp     # Leaving off the /api/ to make #include statments less ambiguous
     )
 
 # Because when building internally, the generated files do not include the "api" base path
-target_include_directories( kiapi PUBLIC ${KIAPI_CPP_BASEPATH} )
+target_include_directories( kiapi SYSTEM PUBLIC ${KIAPI_CPP_BASEPATH} )
 
 if( APPLE )
     # puts library into the main kicad.app bundle in build tree

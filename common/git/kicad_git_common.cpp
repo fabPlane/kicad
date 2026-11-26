@@ -26,15 +26,23 @@
 
 #include <git/git_progress.h>
 #include <git/kicad_git_compat.h>
-#include <kiplatform/secrets.h>
-#include <trace_helpers.h>
+#include <git/kigit_platform.h>
+#include <git/kigit_remote_url.h>
+#include <git/kigit_trace.h>
+
+#include <scoped_set_reset.h>
 
 #include <git2.h>
+#include <wx/app.h>
 #include <wx/arrstr.h>
 #include <wx/base64.h>
+#include <wx/ffile.h>
 #include <wx/filename.h>
 #include <wx/log.h>
+#include <wx/thread.h>
 #include <wx/utils.h>
+#include <wx/datetime.h>
+#include <wx/intl.h>
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -44,6 +52,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <filesystem>
 #include <thread>
 #include <vector>
 
@@ -56,14 +65,37 @@ wxWindow*& KIGIT::ActiveAdvancedGitWindow()
 }
 
 
+namespace
+{
+
+/// Every KIGIT_COMMON alive, so a credential saved for its server reaches the ones already open
+std::mutex& liveCommonsMutex()
+{
+    static auto* mutex = new std::mutex;
+    return *mutex;
+}
+
+
+std::set<KIGIT_COMMON*>& liveCommons()
+{
+    // Never destroyed, since PGM_BASE outlives function statics and its projects erase on teardown
+    static auto* commons = new std::set<KIGIT_COMMON*>;
+    return *commons;
+}
+
+} // namespace
+
+
 KIGIT_COMMON::KIGIT_COMMON( git_repository* aRepo, const wxString& aProjectPath ) :
         m_repo( aRepo ),
         m_projectPath( aProjectPath ),
         m_connType( GIT_CONN_TYPE::GIT_CONN_LOCAL ),
-        m_testedTypes( 0 ),
         m_nextPublicKey( 0 ),
         m_secretFetched( false )
-{}
+{
+    std::lock_guard<std::mutex> lock( liveCommonsMutex() );
+    liveCommons().insert( this );
+}
 
 
 KIGIT_COMMON::KIGIT_COMMON( const KIGIT_COMMON& aOther ) :
@@ -78,7 +110,6 @@ KIGIT_COMMON::KIGIT_COMMON( const KIGIT_COMMON& aOther ) :
         m_port( aOther.m_port ),
         m_username( aOther.m_username ),
         m_password( aOther.m_password ),
-        m_testedTypes( aOther.m_testedTypes.load() ),
 
         // The mutex is default-initialized, not copied
         m_gitActionMutex(),
@@ -86,14 +117,49 @@ KIGIT_COMMON::KIGIT_COMMON( const KIGIT_COMMON& aOther ) :
         m_publicKeys( aOther.m_publicKeys ),
         m_publicKeysHost( aOther.m_publicKeysHost ),
         m_projectSSHKey( aOther.m_projectSSHKey ),
+        m_acceptedSSHKey( aOther.m_acceptedSSHKey ),
         m_nextPublicKey( aOther.m_nextPublicKey ),
         m_secretFetched( aOther.m_secretFetched )
 {
+    std::lock_guard<std::mutex> lock( liveCommonsMutex() );
+    liveCommons().insert( this );
 }
 
 
 KIGIT_COMMON::~KIGIT_COMMON()
-{}
+{
+    std::lock_guard<std::mutex> lock( liveCommonsMutex() );
+    liveCommons().erase( this );
+}
+
+
+void KIGIT_COMMON::CredentialSaved( const wxString& aRealm, const wxString& aUsername )
+{
+    if( aRealm.IsEmpty() || aUsername.IsEmpty() )
+        return;
+
+    const KIGIT::PLATFORM_SERVICES& services = KIGIT::PlatformServices();
+
+    // Only the server's account is adopted, so a binding tested as someone else re-points no pane
+    const bool isDefault = services.getAccount && services.getAccount( aRealm ) == aUsername;
+
+    std::lock_guard<std::mutex> lock( liveCommonsMutex() );
+
+    for( KIGIT_COMMON* common : liveCommons() )
+    {
+        std::lock_guard<std::mutex> credentialsLock( common->m_credentialsMutex );
+
+        // Equality only, so one server's secret never reaches a repository on another
+        if( KIGIT::CredentialRealm( common->m_remote ) != aRealm )
+            continue;
+
+        if( common->m_username.IsEmpty() && isDefault )
+            common->m_username = aUsername;
+
+        if( common->m_username == aUsername )
+            common->m_secretFetched = false;
+    }
+}
 
 
 git_repository* KIGIT_COMMON::GetRepo() const
@@ -112,7 +178,7 @@ wxString KIGIT_COMMON::GetProjectDir() const
         const char* workdir = git_repository_workdir( m_repo );
 
         if( workdir )
-            return wxString( workdir );
+            return wxString::FromUTF8( workdir );
     }
 
     return wxEmptyString;
@@ -149,7 +215,7 @@ wxString KIGIT_COMMON::GetCurrentBranchName() const
 
     if( git_reference_resolve( &branch, head ) )
     {
-        wxLogTrace( traceGit, "Failed to resolve branch" );
+        wxLogTrace( KIGIT::traceKigit, "Failed to resolve branch" );
         return wxEmptyString;
     }
 
@@ -158,11 +224,12 @@ wxString KIGIT_COMMON::GetCurrentBranchName() const
 
     if( git_branch_name( &branchName, branch ) )
     {
-        wxLogTrace( traceGit, "Failed to get branch name" );
+        wxLogTrace( KIGIT::traceKigit, "Failed to get branch name" );
         return wxEmptyString;
     }
 
-    return wxString( branchName );
+    // Git names are UTF-8 whatever the locale
+    return wxString::FromUTF8( branchName );
 }
 
 
@@ -198,10 +265,16 @@ wxString KIGIT_COMMON::GetPassword()
         username = m_username;
     }
 
-    // The lock is not held here: asking the operating system can raise a permission dialog, so
-    // it finishes only once a person has decided.
-    wxString secret;
-    bool     found = KIPLATFORM::SECRETS::GetSecret( remote, username, secret );
+    // Transfer workers call this, so a locked keyring reads as empty rather than prompting off the UI
+    // thread. DeferForSecret reads it with a prompt first
+    const KIGIT::PLATFORM_SERVICES& services = KIGIT::PlatformServices();
+    const wxString                  realm = KIGIT::CredentialRealm( remote );
+    wxString                        secret;
+
+    // A legacy per-repository token outranks the server's, and a save for the server deletes it
+    bool found = services.getSecretNoPrompt
+                 && ( services.getSecretNoPrompt( remote, username, secret )
+                      || ( !realm.IsEmpty() && services.getSecretNoPrompt( realm, username, secret ) ) );
 
     std::lock_guard<std::mutex> lock( m_credentialsMutex );
 
@@ -210,11 +283,96 @@ wxString KIGIT_COMMON::GetPassword()
     if( m_secretFetched || m_remote != remote || m_username != username )
         return m_password;
 
+    // A miss may be a locked keyring, which DeferForSecret must still get to unlock
     if( found )
+    {
         m_password = secret;
+        m_secretFetched = true;
+    }
 
-    m_secretFetched = true;
     return m_password;
+}
+
+
+bool KIGIT_COMMON::DeferForSecret( const std::shared_ptr<KIGIT_COMMON>& aCommon, const std::weak_ptr<bool>& aOwner,
+                                   std::function<void()> aRetry )
+{
+    wxString remote;
+    wxString username;
+
+    {
+        std::lock_guard<std::mutex> lock( aCommon->m_credentialsMutex );
+
+        if( aCommon->secretReadLocked() )
+            return false;
+
+        // Without a vault there is nothing to wait for
+        if( !KIGIT::PlatformServices().getSecretAsync )
+        {
+            aCommon->m_secretFetched = true;
+            return false;
+        }
+
+        remote = aCommon->m_remote;
+        username = aCommon->m_username;
+    }
+
+    auto finish = [weak = std::weak_ptr<KIGIT_COMMON>( aCommon ), aOwner, remote, username,
+                   retry = std::move( aRetry )]( bool aFound, const wxString& aSecret )
+    {
+        // Held here because a project teardown can drop the last owner on a worker
+        std::shared_ptr<KIGIT_COMMON> common = weak.lock();
+
+        if( !common || aOwner.expired() )
+            return;
+
+        {
+            std::lock_guard<std::mutex> lock( common->m_credentialsMutex );
+
+            // A password typed meanwhile wins, and an answer about another remote is dropped
+            if( !common->m_secretFetched && common->m_remote == remote && common->m_username == username )
+            {
+                if( aFound )
+                    common->m_password = aSecret;
+
+                common->m_secretFetched = true;
+            }
+        }
+
+        retry();
+    };
+
+    ReadSecretAsync( remote, username, std::move( finish ) );
+    return true;
+}
+
+
+void KIGIT_COMMON::ReadSecretAsync( const wxString& aRemote, const wxString& aUsername,
+                                    std::function<void( bool, const wxString& )> aDone )
+{
+    const KIGIT::PLATFORM_SERVICES& services = KIGIT::PlatformServices();
+    const wxString                  realm = KIGIT::CredentialRealm( aRemote );
+
+    if( !services.getSecretAsync )
+    {
+        aDone( false, wxEmptyString );
+        return;
+    }
+
+    if( realm.IsEmpty() )
+    {
+        services.getSecretAsync( aRemote, aUsername, std::move( aDone ) );
+        return;
+    }
+
+    services.getSecretAsync( aRemote, aUsername,
+                             [realm, aUsername, done = std::move( aDone )]( bool aFound, const wxString& aSecret )
+                             {
+                                 if( aFound )
+                                     done( true, aSecret );
+                                 else
+                                     KIGIT::PlatformServices().getSecretAsync( realm, aUsername, done );
+                             } );
 }
 
 
@@ -532,7 +690,7 @@ std::vector<KIGIT_BRANCH_INFO> KIGIT_COMMON::GetBranches() const
 
     if( git_branch_iterator_new( &branchIterator, m_repo, GIT_BRANCH_ALL ) )
     {
-        wxLogTrace( traceGit, "Failed to get branch iterator" );
+        wxLogTrace( KIGIT::traceKigit, "Failed to get branch iterator" );
         return {};
     }
 
@@ -552,7 +710,7 @@ std::vector<KIGIT_BRANCH_INFO> KIGIT_COMMON::GetBranches() const
 
         if( rc != GIT_OK )
         {
-            wxLogTrace( traceGit, "Failed to iterate branches: %s", KIGIT_COMMON::GetLastGitError() );
+            wxLogTrace( KIGIT::traceKigit, "Failed to iterate branches: %s", KIGIT_COMMON::GetLastGitError() );
             break;
         }
 
@@ -565,7 +723,7 @@ std::vector<KIGIT_BRANCH_INFO> KIGIT_COMMON::GetBranches() const
 
         if( git_branch_name( &branchName, branchReference ) )
         {
-            wxLogTrace( traceGit, "Failed to get branch name in iter loop" );
+            wxLogTrace( KIGIT::traceKigit, "Failed to get branch name in iter loop" );
             continue;
         }
 
@@ -574,7 +732,7 @@ std::vector<KIGIT_BRANCH_INFO> KIGIT_COMMON::GetBranches() const
 
         if( !commitId || git_commit_lookup( &commit, m_repo, commitId ) != GIT_OK )
         {
-            wxLogTrace( traceGit, "Failed to get commit in iter loop" );
+            wxLogTrace( KIGIT::traceKigit, "Failed to get commit in iter loop" );
             continue;
         }
 
@@ -665,13 +823,13 @@ std::vector<wxString> KIGIT_COMMON::GetProjectDirs()
 
     if( git_reference_name_to_id( &oid, m_repo, "HEAD" ) != GIT_OK )
     {
-        wxLogTrace( traceGit, "An error occurred: %s", KIGIT_COMMON::GetLastGitError() );
+        wxLogTrace( KIGIT::traceKigit, "An error occurred: %s", KIGIT_COMMON::GetLastGitError() );
         return projDirs;
     }
 
     if( git_commit_lookup( &commit, m_repo, &oid ) != GIT_OK )
     {
-        wxLogTrace( traceGit, "An error occurred: %s", KIGIT_COMMON::GetLastGitError() );
+        wxLogTrace( KIGIT::traceKigit, "An error occurred: %s", KIGIT_COMMON::GetLastGitError() );
         return projDirs;
     }
 
@@ -679,7 +837,7 @@ std::vector<wxString> KIGIT_COMMON::GetProjectDirs()
 
     if( git_commit_tree( &tree, commit ) != GIT_OK )
     {
-        wxLogTrace( traceGit, "An error occurred: %s", KIGIT_COMMON::GetLastGitError() );
+        wxLogTrace( KIGIT::traceKigit, "An error occurred: %s", KIGIT_COMMON::GetLastGitError() );
         return projDirs;
     }
 
@@ -733,7 +891,7 @@ std::pair<std::set<wxString>, std::set<wxString>> KIGIT_COMMON::GetDifferentFile
 
     if( git_repository_head( &head, m_repo ) != GIT_OK )
     {
-        wxLogTrace( traceGit, "Failed to get modified HEAD" );
+        wxLogTrace( KIGIT::traceKigit, "Failed to get modified HEAD" );
         return modified_files;
     }
 
@@ -744,7 +902,7 @@ std::pair<std::set<wxString>, std::set<wxString>> KIGIT_COMMON::GetDifferentFile
         // Branch has no upstream tracking ref configured.  Without an upstream there is
         // nothing to compare against, so leave both sets empty.  Walking commits unbounded
         // would otherwise dump the entire history's root tree into the result.
-        wxLogTrace( traceGit, "Failed to get modified remote HEAD" );
+        wxLogTrace( KIGIT::traceKigit, "Failed to get modified remote HEAD" );
         return modified_files;
     }
 
@@ -762,7 +920,7 @@ std::pair<std::set<wxString>, std::set<wxString>> KIGIT_COMMON::GetDifferentFile
 
         if( git_commit_lookup( &commit, m_repo, aOid ) != GIT_OK )
         {
-            wxLogTrace( traceGit, "Failed to lookup commit for diff: %s", KIGIT_COMMON::GetLastGitError() );
+            wxLogTrace( KIGIT::traceKigit, "Failed to lookup commit for diff: %s", KIGIT_COMMON::GetLastGitError() );
             return nullptr;
         }
 
@@ -771,7 +929,7 @@ std::pair<std::set<wxString>, std::set<wxString>> KIGIT_COMMON::GetDifferentFile
 
         if( git_commit_tree( &tree, commit ) != GIT_OK )
         {
-            wxLogTrace( traceGit, "Failed to get commit tree for diff: %s", KIGIT_COMMON::GetLastGitError() );
+            wxLogTrace( KIGIT::traceKigit, "Failed to get commit tree for diff: %s", KIGIT_COMMON::GetLastGitError() );
             return nullptr;
         }
 
@@ -796,7 +954,7 @@ std::pair<std::set<wxString>, std::set<wxString>> KIGIT_COMMON::GetDifferentFile
 
     if( git_merge_base( &base_oid, m_repo, head_oid, remote_oid ) != GIT_OK )
     {
-        wxLogTrace( traceGit, "No merge base between local and remote: %s", KIGIT_COMMON::GetLastGitError() );
+        wxLogTrace( KIGIT::traceKigit, "No merge base between local and remote: %s", KIGIT_COMMON::GetLastGitError() );
         return modified_files;
     }
 
@@ -818,7 +976,7 @@ std::pair<std::set<wxString>, std::set<wxString>> KIGIT_COMMON::GetDifferentFile
 
         if( git_diff_tree_to_tree( &diff, m_repo, aOldTree, aNewTree, &localOpts ) != GIT_OK )
         {
-            wxLogTrace( traceGit, "Failed to diff trees: %s", KIGIT_COMMON::GetLastGitError() );
+            wxLogTrace( KIGIT::traceKigit, "Failed to diff trees: %s", KIGIT_COMMON::GetLastGitError() );
             return;
         }
 
@@ -890,28 +1048,9 @@ std::optional<KIGIT_AHEAD_BEHIND> KIGIT_COMMON::compareRefs( const git_reference
 
 bool KIGIT_COMMON::HasLocalCommits() const
 {
-    if( !m_repo || IsHeadDetached() )
-        return false;
+    std::optional<KIGIT_UPSTREAM_STATUS> status = UpstreamStatus();
 
-    git_reference* head = nullptr;
-
-    if( git_repository_head( &head, m_repo ) != GIT_OK )
-        return false;
-
-    KIGIT::GitReferencePtr headPtr( head );
-    git_reference*         upstream = nullptr;
-    int                    result = git_branch_upstream( &upstream, head );
-
-    if( result != GIT_OK )
-    {
-        // Treat a branch without an upstream as unpublished.
-        return result == GIT_ENOTFOUND;
-    }
-
-    KIGIT::GitReferencePtr            upstreamPtr( upstream );
-    std::optional<KIGIT_AHEAD_BEHIND> counts = compareRefs( head, upstream );
-
-    return counts && counts->ahead > 0;
+    return status && status->HasLocalCommits();
 }
 
 
@@ -938,26 +1077,33 @@ bool KIGIT_COMMON::IsPullRebaseConfigured() const
 }
 
 
-bool KIGIT_COMMON::HasUpstreamCommits() const
+std::optional<KIGIT_UPSTREAM_STATUS> KIGIT_COMMON::UpstreamStatus() const
 {
-    if( !m_repo )
-        return false;
+    if( !m_repo || IsHeadDetached() )
+        return std::nullopt;
 
     git_reference* head = nullptr;
 
     if( git_repository_head( &head, m_repo ) != GIT_OK )
-        return false;
+        return std::nullopt;
 
     KIGIT::GitReferencePtr headPtr( head );
     git_reference*         upstream = nullptr;
+    int                    result = git_branch_upstream( &upstream, head );
 
-    if( git_branch_upstream( &upstream, head ) != GIT_OK )
-        return false;
+    if( result == GIT_ENOTFOUND )
+        return KIGIT_UPSTREAM_STATUS();
+
+    if( result != GIT_OK )
+        return std::nullopt;
 
     KIGIT::GitReferencePtr            upstreamPtr( upstream );
     std::optional<KIGIT_AHEAD_BEHIND> counts = compareRefs( head, upstream );
 
-    return counts && counts->behind > 0;
+    if( !counts )
+        return std::nullopt;
+
+    return KIGIT_UPSTREAM_STATUS{ true, *counts };
 }
 
 
@@ -1017,6 +1163,10 @@ std::vector<wxString> KIGIT_COMMON::GetRecentCommitMessages( size_t aMax ) const
 
         KIGIT::GitCommitPtr commitPtr( commit );
         wxString            message;
+
+        // git writes a merge's message, so it is no message the user would start from
+        if( git_commit_parentcount( commit ) > 1 )
+            continue;
 
         if( const char* text = git_commit_message( commit ) )
             message = KIGIT::DecodeRepoText( text );
@@ -1694,6 +1844,12 @@ void KIGIT_COMMON::RemoveRefreshListener( void* aOwner )
 
 void KIGIT_COMMON::NotifyRefreshListeners()
 {
+    // A listener that saves the project notifies again
+    if( m_notifying )
+        return;
+
+    SCOPED_SET_RESET<bool> notifying( m_notifying, true );
+
     // Copy first: a listener could add or remove one while it runs.
     std::vector<std::pair<void*, std::function<void()>>> listeners = m_refreshListeners;
 
@@ -1753,7 +1909,7 @@ bool KIGIT_COMMON::HasPushAndPullRemote() const
 
     if( git_remote_list( &remotes, m_repo ) != GIT_OK )
     {
-        wxLogTrace( traceGit, "Failed to enumerate remotes for haspushpull" );
+        wxLogTrace( KIGIT::traceKigit, "Failed to enumerate remotes for haspushpull" );
         return false;
     }
 
@@ -1777,6 +1933,20 @@ wxString KIGIT_COMMON::GetRemoteNameOrDefault() const
         remoteName = wxS( "origin" );
 
     return remoteName;
+}
+
+
+wxString KIGIT_COMMON::GetPushUrl( const wxString& aRemoteName ) const
+{
+    git_remote* remote = nullptr;
+
+    if( !m_repo || git_remote_lookup( &remote, m_repo, aRemoteName.utf8_string().c_str() ) != GIT_OK )
+        return wxEmptyString;
+
+    KIGIT::GitRemotePtr remotePtr( remote );
+    const char*         url = git_remote_pushurl( remote ) ? git_remote_pushurl( remote ) : git_remote_url( remote );
+
+    return url ? wxString::FromUTF8( url ) : wxString();
 }
 
 
@@ -1810,7 +1980,7 @@ wxString KIGIT_COMMON::remoteNameWithoutUpstream() const
     }
     else
     {
-        wxLogTrace( traceGit, "Failed to list remotes: %s", KIGIT_COMMON::GetLastGitError() );
+        wxLogTrace( KIGIT::traceKigit, "Failed to list remotes: %s", KIGIT_COMMON::GetLastGitError() );
 
         // If we can't get the remote name from the upstream branch or the list of remotes,
         // just return the default remote name
@@ -1824,7 +1994,7 @@ wxString KIGIT_COMMON::remoteNameWithoutUpstream() const
         }
         else
         {
-            wxLogTrace( traceGit, "Failed to get remote name from default remote: %s",
+            wxLogTrace( KIGIT::traceKigit, "Failed to get remote name from default remote: %s",
                         KIGIT_COMMON::GetLastGitError() );
         }
     }
@@ -1841,39 +2011,39 @@ wxString KIGIT_COMMON::GetRemotename() const
 
     wxString retval;
     git_reference* head = nullptr;
-    git_reference* upstream = nullptr;
 
     // An unborn HEAD has no branch to track, but the remote still exists
     if( git_repository_head( &head, m_repo ) != GIT_OK )
     {
-        wxLogTrace( traceGit, "Failed to get remote name: %s", KIGIT_COMMON::GetLastGitError() );
+        wxLogTrace( KIGIT::traceKigit, "Failed to get remote name: %s", KIGIT_COMMON::GetLastGitError() );
         return remoteNameWithoutUpstream();
     }
 
     KIGIT::GitReferencePtr headPtr( head );
+    git_buf                remote_name = GIT_BUF_INIT_CONST( nullptr, 0 );
 
-    if( git_branch_upstream( &upstream, head ) != GIT_OK )
+    // The configured remote, read even when its tracking ref was pruned
+    int rc = git_reference_is_branch( head )
+                     ? git_branch_upstream_remote( &remote_name, m_repo, git_reference_name( head ) )
+                     : GIT_ENOTFOUND;
+
+    if( rc == GIT_ENOTFOUND )
     {
-        wxLogTrace( traceGit, "Failed to get upstream branch: %s", KIGIT_COMMON::GetLastGitError() );
+        wxLogTrace( KIGIT::traceKigit, "No upstream remote configured: %s", KIGIT_COMMON::GetLastGitError() );
         return remoteNameWithoutUpstream();
     }
 
-    KIGIT::GitReferencePtr upstreamPtr( upstream );
-    git_buf     remote_name = GIT_BUF_INIT_CONST( nullptr, 0 );
-
-    if( git_branch_remote_name( &remote_name, m_repo, git_reference_name( upstream ) ) == GIT_OK )
+    if( rc != GIT_OK )
     {
-        retval = remote_name.ptr;
-        git_buf_dispose( &remote_name );
-    }
-    else
-    {
-        wxLogTrace( traceGit,
-                    "Failed to get remote name from upstream branch: %s",
-                    KIGIT_COMMON::GetLastGitError() );
+        wxLogTrace( KIGIT::traceKigit, "Failed to get the upstream remote: %s", KIGIT_COMMON::GetLastGitError() );
+        return retval;
     }
 
-    return retval;
+    retval = wxString::FromUTF8( remote_name.ptr );
+    git_buf_dispose( &remote_name );
+
+    // A branch tracking another local branch names "." and has no remote
+    return retval == wxS( "." ) ? wxString() : retval;
 }
 
 
@@ -1918,6 +2088,20 @@ wxString KIGIT_COMMON::GetFirstOfferedSSHKey() const
 }
 
 
+wxString KIGIT_COMMON::GetAcceptedSSHKey() const
+{
+    std::lock_guard<std::mutex> lock( m_credentialsMutex );
+    return m_acceptedSSHKey;
+}
+
+
+void KIGIT_COMMON::SetAcceptedSSHKey( const wxString& aKey )
+{
+    std::lock_guard<std::mutex> lock( m_credentialsMutex );
+    m_acceptedSSHKey = aKey;
+}
+
+
 KIGIT_COMMON::CREDENTIAL_IDENTITY KIGIT_COMMON::GetCredentialIdentity() const
 {
     std::lock_guard<std::mutex> lock( m_credentialsMutex );
@@ -1948,7 +2132,6 @@ bool KIGIT_COMMON::ApplyPromptedCredentials( const CREDENTIAL_IDENTITY& aFor, co
     }
 
     m_nextPublicKey = 0;
-    m_testedTypes = 0;
     return true;
 }
 
@@ -1964,16 +2147,72 @@ int KIGIT_COMMON::SSHPortFor( const wxString& aHost ) const
 }
 
 
-std::unique_lock<std::mutex> KIGIT_COMMON::TryLockActionFor( std::chrono::milliseconds aWait )
+std::unique_ptr<KIGIT::REPO_ACTION_LOCK> KIGIT_COMMON::repoActionLock() const
 {
-    const auto                   deadline = std::chrono::steady_clock::now() + aWait;
-    std::unique_lock<std::mutex> lock( m_gitActionMutex, std::defer_lock );
+    return KIGIT::RepoActionLock( m_repo );
+}
+
+
+KIGIT::ACTION_LOCK KIGIT_COMMON::TryLockAction()
+{
+    std::unique_lock<std::mutex> mutex( m_gitActionMutex, std::try_to_lock );
+
+    if( !mutex.owns_lock() )
+        return {};
+
+    std::unique_ptr<KIGIT::REPO_ACTION_LOCK> repo = repoActionLock();
+
+    if( repo && repo->TryAcquire() != 0 )
+    {
+        if( repo->Error().empty() )
+            return {};
+
+        // A lock file that cannot be used guards nothing, so the mutex alone serves
+        wxLogTrace( KIGIT::traceKigit, wxS( "Repository lock file unusable: %s" ),
+                    wxString::FromUTF8( repo->Error() ) );
+        repo.reset();
+    }
+
+    return KIGIT::ACTION_LOCK( std::move( mutex ), std::move( repo ) );
+}
+
+
+KIGIT::ACTION_LOCK KIGIT_COMMON::TryLockActionFor( std::chrono::milliseconds aWait )
+{
+    const auto deadline = std::chrono::steady_clock::now() + aWait;
 
     // Not a timed mutex, so poll. A status read lets go within a few of these
-    while( !lock.try_lock() && std::chrono::steady_clock::now() < deadline )
-        std::this_thread::sleep_for( std::chrono::milliseconds( 20 ) );
+    for( ;; )
+    {
+        if( KIGIT::ACTION_LOCK lock = TryLockAction(); lock.owns_lock() )
+            return lock;
 
-    return lock;
+        if( std::chrono::steady_clock::now() >= deadline )
+            return {};
+
+        std::this_thread::sleep_for( std::chrono::milliseconds( 20 ) );
+    }
+}
+
+
+KIGIT::ACTION_LOCK KIGIT_COMMON::LockAction()
+{
+    std::unique_lock<std::mutex>             mutex( m_gitActionMutex );
+    std::unique_ptr<KIGIT::REPO_ACTION_LOCK> repo = repoActionLock();
+
+    if( repo )
+    {
+        repo->Acquire();
+
+        if( !repo->Held() && !repo->Error().empty() )
+        {
+            wxLogTrace( KIGIT::traceKigit, wxS( "Repository lock file unusable: %s" ),
+                        wxString::FromUTF8( repo->Error() ) );
+            repo.reset();
+        }
+    }
+
+    return KIGIT::ACTION_LOCK( std::move( mutex ), std::move( repo ) );
 }
 
 
@@ -1985,13 +2224,84 @@ void KIGIT_COMMON::rebuildPublicKeysUnlocked()
     if( KIGIT::IsOfferableSSHKey( m_projectSSHKey ) )
         m_publicKeys.push_back( m_projectSSHKey );
     else if( !m_projectSSHKey.IsEmpty() )
-        wxLogTrace( traceGit, "Not offering project SSH key %s, it or its .pub is missing", m_projectSSHKey );
+        wxLogTrace( KIGIT::traceKigit, "Not offering project SSH key %s, it or its .pub is missing", m_projectSSHKey );
+
+    // A refused key still counts toward the server's limit on attempts, and the right one can come too late.
+    // Only a key still found for the host moves up, so one dropped from the ssh config stays dropped
+    wxString remembered = KIGIT::RememberedSSHKey( m_remote );
+
+    bool current = std::any_of( m_discoveredKeys.begin(), m_discoveredKeys.end(),
+                                [&]( const wxString& aKey )
+                                {
+                                    return KIGIT::IsSameSSHKey( aKey, remembered );
+                                } );
+
+    if( !current || KIGIT::IsSameSSHKey( remembered, m_projectSSHKey ) )
+        remembered.clear();
+    else
+        m_publicKeys.push_back( remembered );
 
     for( const wxString& key : m_discoveredKeys )
     {
-        if( !KIGIT::IsSameSSHKey( key, m_projectSSHKey ) )
+        if( !KIGIT::IsSameSSHKey( key, m_projectSSHKey ) && !KIGIT::IsSameSSHKey( key, remembered ) )
             m_publicKeys.push_back( key );
     }
+}
+
+
+void KIGIT_COMMON::ResetNextKey()
+{
+    std::lock_guard<std::mutex> lock( m_credentialsMutex );
+    rebuildPublicKeysUnlocked();
+}
+
+
+void KIGIT_COMMON::SaveWhenAccepted( CREDENTIAL_SAVER aSave )
+{
+    std::lock_guard<std::mutex> lock( m_credentialsMutex );
+    m_saveWhenAccepted = std::move( aSave );
+}
+
+
+void KIGIT_COMMON::RememberWorkingCredential( const KIGIT_AUTH_ATTEMPT& aAttempt )
+{
+    CREDENTIAL_SAVER save;
+    wxString         remote;
+    wxString         username;
+    wxString         password;
+
+    {
+        std::lock_guard<std::mutex> lock( m_credentialsMutex );
+
+        // A server that took the agent's key or no login at all has verified no password
+        if( aAttempt.passwordGiven || aAttempt.passphraseGiven )
+        {
+            save = std::exchange( m_saveWhenAccepted, nullptr );
+            remote = m_remote;
+            username = m_username;
+            password = m_password;
+        }
+    }
+
+    // The transfer runs on a worker, and the save shows its outcome on the main thread
+    if( wxAppConsole* app = wxAppConsole::GetInstance(); save && app && !wxIsMainThread() )
+    {
+        app->CallAfter(
+                [save = std::move( save ), remote, username, password]()
+                {
+                    save( remote, username, password );
+                } );
+    }
+    else if( save )
+    {
+        save( remote, username, password );
+    }
+
+    // libgit2 asks for nothing more once a credential works, so the last key offered is the one that did
+    if( aAttempt.connType != GIT_CONN_TYPE::GIT_CONN_SSH || aAttempt.keysTried.empty() )
+        return;
+
+    KIGIT::RememberSSHKey( GetRemote(), aAttempt.keysTried.back() );
 }
 
 
@@ -2035,7 +2345,8 @@ void KIGIT_COMMON::updatePublicKeys()
     // first for that reason.
     std::lock_guard<std::mutex> lock( m_credentialsMutex );
 
-    m_discoveredKeys = KIGIT::DefaultSSHKeyCandidates( KIGIT::HomeDir(), m_hostname );
+    m_discoveredKeys =
+            KIGIT::DefaultSSHKeyCandidates( KIGIT::HomeDir(), m_hostname, KIGIT::ConfiguredSSHCommand( m_repo ) );
     m_publicKeysHost = m_hostname;
     rebuildPublicKeysUnlocked();
 }
@@ -2087,6 +2398,10 @@ void KIGIT_COMMON::SyncRemoteUrl( const wxString& aRawUrl )
             m_username = parsed.username;
             m_password = parsed.password;
             m_secretFetched = !m_password.IsEmpty();
+            m_acceptedSSHKey.clear();
+
+            // Another address on the same host can have a different key remembered for it
+            rebuildPublicKeysUnlocked();
         }
 
         // SetRemote can move the host without gathering keys, so compare against the gathered list
@@ -2134,28 +2449,6 @@ void KIGIT_COMMON::SetConnType( GIT_CONN_TYPE aConnType )
 }
 
 
-// Index of the '@' ending the userinfo of proto://user:password@host/path, or npos. The last
-// one, since the first would split inside a password that contains an '@'.
-static size_t findUserinfoAt( const wxString& aUrl )
-{
-    size_t protoSep = aUrl.find( "://" );
-
-    if( protoSep == wxString::npos )
-        return wxString::npos;
-
-    size_t hostStart = protoSep + 3;
-    size_t pathStart = aUrl.find_first_of( "/?#", hostStart );
-    size_t searchEnd = ( pathStart == wxString::npos ) ? aUrl.length() : pathStart;
-
-    if( searchEnd <= hostStart )
-        return wxString::npos;
-
-    size_t at = aUrl.rfind( '@', searchEnd - 1 );
-
-    return ( at != wxString::npos && at >= hostStart ) ? at : wxString::npos;
-}
-
-
 wxString KIGIT_COMMON::GetLastGitError()
 {
     const git_error* error = git_error_last();
@@ -2165,352 +2458,6 @@ wxString KIGIT_COMMON::GetLastGitError()
 
     // libgit2 quotes config lines and URLs verbatim, passwords included
     return KIGIT::StripEmbeddedUserinfo( wxString::FromUTF8( error->message ? error->message : "" ) );
-}
-
-
-KIGIT_ERROR_INFO KIGIT_COMMON::GetLastGitErrorInfo( int aCode )
-{
-    KIGIT_ERROR_INFO info;
-    info.code = aCode;
-
-    // libgit2 before 1.8 answers null rather than "no error"
-    if( const git_error* error = git_error_last() )
-    {
-        info.klass = error->klass;
-        info.message = wxString::FromUTF8( error->message ? error->message : "" );
-    }
-
-    return info;
-}
-
-
-// libgit2's git_str_decode_percent when the whole result is UTF-8; otherwise the component stays as written
-static wxString decodePercent( const wxString& aText )
-{
-    const std::string text = aText.utf8_string();
-    std::string       decoded;
-
-    for( size_t ii = 0; ii < text.size(); ++ii )
-    {
-        if( text[ii] == '%' && ii + 2 < text.size() && isxdigit( (unsigned char) text[ii + 1] )
-            && isxdigit( (unsigned char) text[ii + 2] ) )
-        {
-            decoded += static_cast<char>( std::stoi( text.substr( ii + 1, 2 ), nullptr, 16 ) );
-            ii += 2;
-        }
-        else
-        {
-            decoded += text[ii];
-        }
-    }
-
-    wxString result = wxString::FromUTF8( decoded );
-
-    // wxString cannot hold bytes that are not UTF-8, so such text stays as written
-    return result.IsEmpty() && !decoded.empty() ? aText : result;
-}
-
-
-// 0 when the address names no port, -1 when it names one that cannot be used
-static int parsePort( const wxString& aPort )
-{
-    long port = 0;
-
-    if( aPort.IsEmpty() )
-        return 0;
-
-    if( !aPort.ToLong( &port ) || port <= 0 || port > 65535 )
-        return -1;
-
-    return static_cast<int>( port );
-}
-
-
-static bool isScpIpv6( const wxString& aText, size_t aBracket )
-{
-    size_t colons = 0;
-
-    for( size_t ii = aBracket + 1; ii < aText.length(); ++ii )
-    {
-        wxUniChar c = aText[ii];
-
-        if( c == ':' )
-            colons++;
-
-        if( c == ']' )
-            return colons > 1;
-
-        if( c != ':' && !wxIsxdigit( c ) )
-            return false;
-    }
-
-    return false;
-}
-
-
-static bool scpHasUser( const wxString& aText, size_t aStart )
-{
-    for( size_t ii = aStart; ii < aText.length(); ++ii )
-    {
-        if( aText[ii] == '@' )
-            return true;
-
-        if( aText[ii] == ':' )
-            return false;
-    }
-
-    return false;
-}
-
-
-// libgit2's git_net_url_parse_scp, state for state, so the host key check binds the host and port it dials
-static bool parseScpAddress( const wxString& aURL, wxString& aUser, wxString& aHost, wxString& aPort )
-{
-    enum
-    {
-        NONE,
-        USER,
-        HOST_START,
-        HOST,
-        HOST_END,
-        IPV6,
-        IPV6_END,
-        PORT_START,
-        PORT,
-        PORT_END,
-        PATH_START
-    } state = NONE;
-
-    size_t user = 0, userLen = 0, host = 0, hostLen = 0, port = 0, portLen = 0;
-    int    bracket = 0;
-    bool   havePath = false;
-
-    for( size_t ii = 0; ii < aURL.length() && !havePath; ++ii )
-    {
-        wxUniChar c = aURL[ii];
-
-        switch( state )
-        {
-        case NONE:
-            if( c == '@' || c == ':' )
-                return false;
-
-            if( c == '[' )
-            {
-                if( isScpIpv6( aURL, ii ) )
-                {
-                    state = IPV6;
-                    host = ii;
-                }
-                else if( bracket++ > 1 )
-                {
-                    return false;
-                }
-            }
-            else if( scpHasUser( aURL, ii ) )
-            {
-                state = USER;
-                user = ii;
-            }
-            else
-            {
-                state = HOST;
-                host = ii;
-            }
-
-            break;
-
-        case USER:
-            if( c == '@' )
-            {
-                userLen = ii - user;
-                state = HOST_START;
-            }
-
-            break;
-
-        case HOST_START:
-            state = c == '[' ? IPV6 : HOST;
-            host = ii;
-            break;
-
-        case HOST:
-            if( c == ':' )
-            {
-                hostLen = ii - host;
-                state = bracket ? PORT_START : PATH_START;
-            }
-            else if( c == ']' )
-            {
-                if( bracket-- == 0 )
-                    return false;
-
-                hostLen = ii - host;
-                state = HOST_END;
-            }
-
-            break;
-
-        case HOST_END:
-            if( c != ':' )
-                return false;
-
-            state = PATH_START;
-            break;
-
-        case IPV6:
-            if( c == ']' )
-                state = IPV6_END;
-
-            break;
-
-        case IPV6_END:
-            if( c != ':' )
-                return false;
-
-            hostLen = ii - host;
-            state = bracket ? PORT_START : PATH_START;
-            break;
-
-        case PORT_START:
-            port = ii;
-            state = PORT;
-            break;
-
-        case PORT:
-            if( c == ']' )
-            {
-                if( bracket-- == 0 )
-                    return false;
-
-                portLen = ii - port;
-                state = PORT_END;
-            }
-
-            break;
-
-        case PORT_END:
-            if( c != ':' )
-                return false;
-
-            state = PATH_START;
-            break;
-
-        case PATH_START: havePath = true; break;
-        }
-    }
-
-    if( !havePath || hostLen == 0 )
-        return false;
-
-    aUser = aURL.Mid( user, userLen );
-    aHost = aURL.Mid( host, hostLen );
-    aPort = aURL.Mid( port, portLen );
-
-    // libgit2 keeps an IPv6 host in its brackets here, but hands it out without them for URLs
-    if( aHost.StartsWith( "[" ) && aHost.EndsWith( "]" ) )
-        aHost = aHost.Mid( 1, aHost.length() - 2 );
-
-    return true;
-}
-
-
-KIGIT_COMMON::REMOTE_URL KIGIT_COMMON::ParseRemoteURL( const wxString& aURL )
-{
-    REMOTE_URL result;
-    result.url = aURL;
-
-    size_t schemeEnd = aURL.find( "://" );
-    size_t hostStart = 0;
-    size_t hostEnd;
-
-    if( schemeEnd != wxString::npos )
-    {
-        wxString scheme = aURL.Left( schemeEnd ).Lower();
-
-        if( scheme == "https" || scheme == "http" )
-            result.connType = GIT_CONN_TYPE::GIT_CONN_HTTPS;
-        else if( scheme == "ssh" || scheme == "ssh+git" || scheme == "git+ssh" )
-            result.connType = GIT_CONN_TYPE::GIT_CONN_SSH;
-        else
-            return result;
-
-        hostStart = schemeEnd + 3;
-        hostEnd = aURL.find_first_of( "/?#", hostStart );
-        size_t at = findUserinfoAt( aURL );
-
-        if( at != wxString::npos )
-        {
-            wxString credentials = aURL.Mid( hostStart, at - hostStart );
-            size_t   colon = credentials.find( ':' );
-            wxString user = credentials.Left( colon );
-            result.username = decodePercent( user );
-
-            if( colon != wxString::npos )
-                result.password = decodePercent( credentials.Mid( colon + 1 ) );
-
-            wxString userPrefix;
-
-            if( result.connType == GIT_CONN_TYPE::GIT_CONN_SSH && !user.IsEmpty() )
-                userPrefix = user + "@";
-
-            result.url = aURL.Left( hostStart ) + userPrefix + aURL.Mid( at + 1 );
-            hostStart = at + 1;
-        }
-    }
-    else
-    {
-        // A colon before the path marks an SCP address, except for Windows drive paths.
-        if( aURL.length() >= 2 && wxIsalpha( aURL[0] ) && aURL[1] == ':' )
-            return result;
-
-        hostEnd = aURL.find( ':' );
-        size_t bracket = aURL.find( '[' );
-
-        if( bracket != wxString::npos && bracket < hostEnd )
-        {
-            size_t endBracket = aURL.find( ']', bracket );
-
-            if( endBracket != wxString::npos )
-                hostEnd = aURL.find( ':', endBracket + 1 );
-        }
-
-        size_t slash = aURL.find_first_of( "/\\" );
-
-        if( hostEnd == wxString::npos || hostEnd == 0 || ( slash != wxString::npos && slash < hostEnd ) )
-        {
-            return result;
-        }
-
-        result.connType = GIT_CONN_TYPE::GIT_CONN_SSH;
-        wxString port;
-
-        // An address libgit2 cannot read leaves no host, which the host key check refuses
-        if( parseScpAddress( aURL, result.username, result.hostname, port ) )
-            result.port = parsePort( port );
-
-        return result;
-    }
-
-    wxString host = aURL.Mid( hostStart, hostEnd == wxString::npos ? wxString::npos : hostEnd - hostStart );
-    wxString port;
-
-    if( host.StartsWith( "[" ) )
-    {
-        result.hostname = host.AfterFirst( '[' ).BeforeFirst( ']' );
-        port = host.AfterFirst( ']' ).AfterFirst( ':' );
-    }
-    else
-    {
-        result.hostname = host.BeforeFirst( ':' );
-        port = host.AfterFirst( ':' );
-    }
-
-    // libgit2 connects to the decoded name, so %67he.example is ghe.example
-    result.hostname = decodePercent( result.hostname );
-    result.port = parsePort( port );
-
-    return result;
 }
 
 
@@ -2540,74 +2487,6 @@ void KIGIT_COMMON::updateConnectionTypeUnlocked()
 }
 
 
-int KIGIT_COMMON::HandleSSHKeyAuthentication( git_cred** aOut, const wxString& aUsername, KIGIT_AUTH_ATTEMPT& aAttempt )
-{
-    if( !( m_testedTypes & KIGIT_CREDENTIAL_SSH_AGENT ) )
-    {
-        if( HandleSSHAgentAuthentication( aOut, aUsername ) == GIT_OK )
-        {
-            aAttempt.agentTried = true;
-            return GIT_OK;
-        }
-
-        // Agent unavailable or has no matching key; fall through to configured key.
-    }
-
-    // SSH key authentication with password
-    wxString sshKey = GetNextPublicKey();
-
-    if( sshKey.IsEmpty() )
-    {
-        wxLogTrace( traceGit, "Finished testing all possible ssh keys" );
-        m_testedTypes |= GIT_CREDENTIAL_SSH_KEY;
-        return GIT_PASSTHROUGH;
-    }
-
-    wxString sshPubKey = sshKey + ".pub";
-    wxString password = GetPassword();
-
-    wxLogTrace( traceGit, "Testing %s\n", sshKey );
-
-    if( git_credential_ssh_key_new( aOut, aUsername.mbc_str(), sshPubKey.mbc_str(), sshKey.mbc_str(),
-                                    password.mbc_str() ) != GIT_OK )
-    {
-        wxLogTrace( traceGit, "Failed to create SSH key credential for %s: %s", sshKey,
-                    KIGIT_COMMON::GetLastGitError() );
-        return GIT_PASSTHROUGH;
-    }
-
-    // libssh2 reads the file only once authentication starts, so a load failure names this key
-    aAttempt.keysTried.push_back( sshKey );
-    aAttempt.passphraseGiven = !password.IsEmpty();
-    return GIT_OK;
-}
-
-
-int KIGIT_COMMON::HandlePlaintextAuthentication( git_cred** aOut, const wxString& aUsername )
-{
-    wxString password = GetPassword();
-
-    int rc = git_credential_userpass_plaintext_new( aOut, aUsername.mbc_str(), password.mbc_str() );
-    m_testedTypes |= GIT_CREDENTIAL_USERPASS_PLAINTEXT;
-
-    return rc;
-}
-
-
-int KIGIT_COMMON::HandleSSHAgentAuthentication( git_cred** aOut, const wxString& aUsername )
-{
-    m_testedTypes |= KIGIT_CREDENTIAL_SSH_AGENT;
-
-    if( git_credential_ssh_key_from_agent( aOut, aUsername.mbc_str() ) != GIT_OK )
-    {
-        wxLogTrace( traceGit, "Failed to create SSH agent credential: %s", KIGIT_COMMON::GetLastGitError() );
-        return GIT_PASSTHROUGH;
-    }
-
-    return GIT_OK;
-}
-
-
 // libgit2 marks at most one entry to merge, the branch the current one tracks, so the name is
 // not needed to tell them apart. FetchHeadMarksAtMostOneBranchToMerge holds that to account.
 extern "C" int fetchhead_foreach_cb( const char*, const char*,
@@ -2620,353 +2499,24 @@ extern "C" int fetchhead_foreach_cb( const char*, const char*,
 }
 
 
-extern "C" void clone_progress_cb( const char* aStr, size_t aLen, size_t aTotal, void* aPayload )
-{
-    KIGIT_REPO_MIXIN* parent = reinterpret_cast<KIGIT_REPO_MIXIN*>( aPayload );
-
-    wxString progressMessage( aStr );
-    parent->UpdateProgress( aLen, aTotal, progressMessage );
-}
-
-
-extern "C" int progress_cb( const char* str, int len, void* aPayload )
-{
-    KIGIT_REPO_MIXIN* parent = reinterpret_cast<KIGIT_REPO_MIXIN*>( aPayload );
-
-    if( parent->IsThisOperationCancelled() )
-    {
-        wxLogTrace( traceGit, "Progress CB cancelled" );
-        return GIT_EUSER;
-    }
-
-    parent->ReceiveSideband( str, len );
-    return 0;
-}
-
-
-extern "C" int transfer_progress_cb( const git_transfer_progress* aStats, void* aPayload )
-{
-    KIGIT_REPO_MIXIN* parent = reinterpret_cast<KIGIT_REPO_MIXIN*>( aPayload );
-
-    wxString progressMessage = wxString::Format( _( "Received %u of %u objects" ),
-                                                 aStats->received_objects,
-                                                 aStats->total_objects );
-    if( parent->IsThisOperationCancelled() )
-    {
-        wxLogTrace( traceGit, "Transfer progress cancelled" );
-        return GIT_EUSER;
-    }
-
-    parent->UpdateProgress( aStats->received_objects, aStats->total_objects, progressMessage );
-
-    return 0;
-}
-
-
-extern "C" int update_cb( const char* aRefname, const git_oid* aFirst, const git_oid* aSecond,
-                          void* aPayload )
-{
-    constexpr int cstring_len = 8;
-    char          a_str[cstring_len + 1];
-    char          b_str[cstring_len + 1];
-
-    KIGIT_REPO_MIXIN* parent = reinterpret_cast<KIGIT_REPO_MIXIN*>( aPayload );
-    wxString          status;
-
-    git_oid_tostr( b_str, cstring_len, aSecond );
-
-#if ( LIBGIT2_VER_MAJOR >= 1 ) || ( LIBGIT2_VER_MINOR >= 99 )
-    if( !git_oid_is_zero( aFirst ) )
-#else
-    if( !git_oid_iszero( aFirst ) )
-#endif
-    {
-        git_oid_tostr( a_str, cstring_len, aFirst );
-        status = wxString::Format( _( "* [updated] %s..%s %s" ), a_str, b_str, aRefname );
-    }
-    else
-    {
-        status = wxString::Format( _( "* [new] %s %s" ), b_str, aRefname );
-    }
-
-    parent->UpdateProgress( 0, 0, status );
-
-    return 0;
-}
-
-
-extern "C" int push_transfer_progress_cb( unsigned int aCurrent, unsigned int aTotal, size_t aBytes,
-                                          void* aPayload )
-{
-    long long         progress = 100;
-    KIGIT_REPO_MIXIN* parent = reinterpret_cast<KIGIT_REPO_MIXIN*>( aPayload );
-
-    if( parent->IsThisOperationCancelled() )
-    {
-        wxLogTrace( traceGit, "Push progress cancelled" );
-        return GIT_EUSER;
-    }
-
-    if( aTotal != 0 )
-    {
-        progress = ( aCurrent * 100ll ) / aTotal;
-    }
-
-    wxString progressMessage = wxString::Format( _( "Writing objects: %lld%% (%u/%u), %zu bytes" ),
-                                                 progress, aCurrent, aTotal, aBytes );
-    parent->UpdateProgress( aCurrent, aTotal, progressMessage );
-
-    return 0;
-}
-
-
-extern "C" int push_update_reference_cb( const char* aRefname, const char* aStatus, void* aPayload )
-{
-    KIGIT_REPO_MIXIN* parent = reinterpret_cast<KIGIT_REPO_MIXIN*>( aPayload );
-
-    if( aStatus && *aStatus )
-    {
-        const wxString status = KIGIT::DecodeServerText( aStatus, strlen( aStatus ) );
-
-        parent->SetPushRefusal( wxString::Format( wxS( "%s: %s" ), aRefname, status ) );
-
-        wxString statusMessage = wxString::Format( _( "* [rejected] %s (%s)" ), aRefname,
-                                                   KIGIT::PrintableServerText( status ) );
-        parent->UpdateProgress( 0, 0, statusMessage );
-
-        // Without this the push reports success even though the remote refused it.
-        git_error_set_str( GIT_ERROR_NET, aStatus );
-        return GIT_ERROR;
-    }
-    else
-    {
-        wxString statusMessage = wxString::Format( _( "[updated] %s" ), aRefname );
-        parent->UpdateProgress( 0, 0, statusMessage );
-    }
-
-    return 0;
-}
-
-
-extern "C" int credentials_cb( git_cred** aOut, const char* aUrl, const char* aUsername,
-                               unsigned int aAllowedTypes, void* aPayload )
-{
-    KIGIT_REPO_MIXIN* parent = reinterpret_cast<KIGIT_REPO_MIXIN*>( aPayload );
-    KIGIT_COMMON* common = parent->GetCommon();
-
-    // The transport's URL outranks a cached remote that may be empty or stale
-    common->SyncRemoteUrl( wxString::FromUTF8( aUrl ) );
-
-    // The configured remote URL may embed a password. Keep it out of the trace log.
-    wxString safeUrl = KIGIT::StripEmbeddedUserinfo( wxString::FromUTF8( aUrl ) );
-
-    wxLogTrace( traceGit, "Credentials callback for %s, testing %d", safeUrl, aAllowedTypes );
-
-    parent->AuthAttempt().connType = parent->GetConnType();
-
-    if( parent->GetConnType() == KIGIT_COMMON::GIT_CONN_TYPE::GIT_CONN_LOCAL )
-    {
-        wxLogTrace( traceGit, "Local repository, no credentials needed" );
-        return GIT_PASSTHROUGH;
-    }
-
-    if( aAllowedTypes & GIT_CREDENTIAL_USERNAME
-        && !( parent->TestedTypes() & GIT_CREDENTIAL_USERNAME ) )
-    {
-        wxString username = parent->GetUsername().Trim().Trim( false );
-        // A token in the URL parses as the username, so no trace names it
-        wxLogTrace( traceGit, "Username credential at %s with allowed type %d", safeUrl, aAllowedTypes );
-
-        // An empty username makes the server answer "unsupported authentication", which tells
-        // the user nothing. Fail authentication instead, so the caller prompts and retries.
-        if( username.IsEmpty() )
-        {
-            git_error_clear();
-            git_error_set_str( GIT_ERROR_NET, _( "Unable to authenticate" ).mbc_str() );
-            parent->SetAuthFailure();
-            return GIT_EAUTH;
-        }
-
-        if( int rc = git_credential_username_new( aOut, username.ToStdString().c_str() ); rc != GIT_OK )
-        {
-            wxLogTrace( traceGit, "Failed to create username credential: %s", KIGIT_COMMON::GetLastGitError() );
-            return rc;
-        }
-        else
-        {
-            wxLogTrace( traceGit, "Created username credential" );
-        }
-
-        parent->TestedTypes() |= GIT_CREDENTIAL_USERNAME;
-    }
-    else if( parent->GetConnType() == KIGIT_COMMON::GIT_CONN_TYPE::GIT_CONN_HTTPS
-                && ( aAllowedTypes & GIT_CREDENTIAL_USERPASS_PLAINTEXT )
-                && !( parent->TestedTypes() & GIT_CREDENTIAL_USERPASS_PLAINTEXT )
-                && !parent->GetUsername().IsEmpty() )
-    {
-        // Plaintext authentication
-        wxLogTrace( traceGit, "Plaintext authentication at %s with allowed type %d", safeUrl, aAllowedTypes );
-        return common->HandlePlaintextAuthentication( aOut, parent->GetUsername() );
-    }
-    else if( parent->GetConnType() == KIGIT_COMMON::GIT_CONN_TYPE::GIT_CONN_SSH
-                && ( aAllowedTypes & GIT_CREDENTIAL_SSH_KEY )
-                && !( parent->TestedTypes() & GIT_CREDENTIAL_SSH_KEY ) )
-    {
-        // libgit2 fails a credential whose user differs from the one the SSH session already uses
-        wxString sshUser = ( aUsername && *aUsername ) ? wxString::FromUTF8( aUsername ) : parent->GetUsername();
-
-        // SSH key authentication
-        int result = common->HandleSSHKeyAuthentication( aOut, sshUser, parent->AuthAttempt() );
-
-        // Translate exhausted-keys PASSTHROUGH into a proper auth error so the
-        // retry loop runs and libgit2 doesn't emit "no callback set".
-        if( result == GIT_PASSTHROUGH )
-        {
-            git_error_clear();
-            git_error_set_str( GIT_ERROR_NET, _( "Unable to authenticate" ).mbc_str() );
-            parent->SetAuthFailure();
-            return GIT_EAUTH;
-        }
-
-        return result;
-    }
-    else
-    {
-        // Signal an auth failure so the caller prompts and retries, rather than letting libgit2 report
-        // "no callback set" as a dead end.
-        git_error_clear();
-        git_error_set_str( GIT_ERROR_NET, _( "Unable to authenticate" ).mbc_str() );
-        parent->SetAuthFailure();
-        return GIT_EAUTH;
-    }
-
-    return GIT_OK;
-};
-
-
-extern "C" int certificate_check_cb( git_cert* aCert, int aValid, const char* aHost, void* aPayload )
-{
-    if( !aCert || !aHost || !aPayload || aCert->cert_type != GIT_CERT_HOSTKEY_LIBSSH2 )
-        return GIT_PASSTHROUGH;
-
-    const git_cert_hostkey* cert = reinterpret_cast<const git_cert_hostkey*>( aCert );
-
-    KIGIT_REPO_MIXIN* handler = reinterpret_cast<KIGIT_REPO_MIXIN*>( aPayload );
-
-    auto refuse = [&]( const wxString& aReason )
-    {
-        // libgit2 v1.9.0 ssh_libssh2.c:758-760 replaces any error the callback sets
-        handler->SetHostKeyRefusal( aReason );
-        return GIT_ECERTIFICATE;
-    };
-
-    // libgit2 1.9 connects on a passthrough even when nothing was verified
-    auto refuseUnreadable = [&]()
-    {
-        wxLogTrace( traceGit, "Host key from %s cannot be read, refusing it", aHost );
-        return refuse( wxString::Format( _( "KiCad could not read the key %s presented, so the connection was not "
-                                            "made. Ask your administrator which host key the server uses." ),
-                                         wxString::FromUTF8( aHost ) ) );
-    };
-
-    if( !( cert->type & GIT_CERT_SSH_RAW ) || !cert->hostkey || cert->hostkey_len == 0 )
-        return refuseUnreadable();
-
-    KIGIT::HOST_KEY_FAILURE key;
-    key.rawKey.assign( cert->hostkey, cert->hostkey_len );
-    key.host = wxString::FromUTF8( aHost );
-
-    // An SCP address hands over an IPv6 host still in its brackets
-    if( key.host.StartsWith( wxS( "[" ) ) && key.host.EndsWith( wxS( "]" ) ) )
-        key.host = key.host.Mid( 1, key.host.length() - 2 );
-
-    key.port = handler->GetCommon()->SSHPortFor( key.host );
-
-    // Checking another port's entries would let a wildcard or plain-host line vouch for this server
-    if( key.port < 0 )
-    {
-        wxLogTrace( traceGit, "Host %s does not match the synced remote, refusing its key", key.host );
-        return refuse( wxString::Format( _( "The address of %s could not be matched to the remote, so its key was "
-                                            "not checked. Check the remote URL." ),
-                                         key.host ) );
-    }
-
-    key.keyType = KIGIT::HostKeyType( key.rawKey );
-    key.fingerprint = KIGIT::HostKeyFingerprint( key.rawKey );
-
-    if( key.keyType.IsEmpty() )
-        return refuseUnreadable();
-
-    key.state = KIGIT::LookupKnownHost( KIGIT::ReadKnownHosts(), key.host, key.port, key.keyType, key.rawKey );
-
-    wxLogTrace( traceGit, "Host key %s SHA256:%s for %s port %d, known_hosts state %d, libgit2 valid %d", key.keyType,
-                key.fingerprint, key.host, key.port, static_cast<int>( key.state ), aValid );
-
-    // libssh2 accepts revoked keys and port-22 lines for other ports, and 1.5.0 reads no known_hosts at all
-    if( key.state == KIGIT::KNOWN_HOST_STATE::MATCH )
-        return 0;
-
-    handler->SetHostKeyFailure( key );
-    return GIT_ECERTIFICATE;
-}
-
-
 namespace KIGIT
 {
 
-bool IsPrivateKeyEncrypted( const wxString& aKeyText )
+wxString ConfiguredSSHCommand( git_repository* aRepo )
 {
-    wxArrayString lines = wxSplit( aKeyText, '\n', '\0' );
+    git_config* config = nullptr;
 
-    if( lines.IsEmpty() || !lines[0].Contains( wxS( "PRIVATE KEY" ) ) )
-        return false;
+    if( ( aRepo ? git_repository_config( &config, aRepo ) : git_config_open_default( &config ) ) != 0 )
+        return wxEmptyString;
 
-    if( lines[0].Contains( wxS( "ENCRYPTED" ) ) )
-        return true;
+    GitConfigPtr      configPtr( config );
+    git_config_entry* entry = nullptr;
 
-    // A PEM key carries Proc-Type in the header block, which ends at the blank line.
-    for( size_t ii = 1; ii < lines.GetCount(); ++ii )
-    {
-        if( lines[ii].Trim().IsEmpty() )
-            break;
+    if( git_config_get_entry( &entry, config, "core.sshCommand" ) != 0 )
+        return wxEmptyString;
 
-        if( lines[ii].StartsWith( wxS( "Proc-Type:" ) ) && lines[ii].Contains( wxS( "ENCRYPTED" ) ) )
-            return true;
-    }
-
-    if( !lines[0].Contains( wxS( "OPENSSH PRIVATE KEY" ) ) )
-        return false;
-
-    // An OpenSSH key carries its cipher name in the body, right after the magic.
-    wxString body;
-
-    for( size_t ii = 1; ii < lines.GetCount(); ++ii )
-    {
-        if( lines[ii].StartsWith( wxS( "-----" ) ) )
-            break;
-
-        body += lines[ii];
-    }
-
-    wxMemoryBuffer raw = wxBase64Decode( body, wxBase64DecodeMode_SkipWS );
-
-    const char           magic[] = "openssh-key-v1";
-    const size_t         magicLen = sizeof( magic );
-    const unsigned char* data = static_cast<const unsigned char*>( raw.GetData() );
-
-    if( raw.GetDataLen() < magicLen + 4 || std::memcmp( data, magic, magicLen ) != 0 )
-        return false;
-
-    uint32_t nameLen =
-            ( static_cast<uint32_t>( data[magicLen] ) << 24 ) | ( static_cast<uint32_t>( data[magicLen + 1] ) << 16 )
-            | ( static_cast<uint32_t>( data[magicLen + 2] ) << 8 ) | static_cast<uint32_t>( data[magicLen + 3] );
-
-    if( nameLen == 0 || raw.GetDataLen() < magicLen + 4 + nameLen )
-        return false;
-
-    std::string cipher( reinterpret_cast<const char*>( data + magicLen + 4 ), nameLen );
-
-    return cipher != "none";
+    GitConfigEntryPtr entryPtr( entry );
+    return wxString::FromUTF8( entry->value );
 }
 
 
@@ -2980,8 +2530,8 @@ git_tree* ResolveRefToTree( git_repository* aRepo, const wxString& aRef )
 
     if( git_revparse_single( &obj, aRepo, refStr.c_str() ) != 0 )
     {
-        wxLogTrace( traceGit, "git_revparse_single failed for ref '%s': %s",
-                    aRef, KIGIT_COMMON::GetLastGitError() );
+        wxLogTrace( KIGIT::traceKigit, "git_revparse_single failed for ref '%s': %s", aRef,
+                    KIGIT_COMMON::GetLastGitError() );
         return nullptr;
     }
 
@@ -2990,8 +2540,8 @@ git_tree* ResolveRefToTree( git_repository* aRepo, const wxString& aRef )
 
     if( git_object_peel( reinterpret_cast<git_object**>( &tree ), obj, GIT_OBJECT_TREE ) != 0 )
     {
-        wxLogTrace( traceGit, "git_object_peel to tree failed for '%s': %s",
-                    aRef, KIGIT_COMMON::GetLastGitError() );
+        wxLogTrace( KIGIT::traceKigit, "git_object_peel to tree failed for '%s': %s", aRef,
+                    KIGIT_COMMON::GetLastGitError() );
         return nullptr;
     }
 
@@ -3102,7 +2652,14 @@ wxString BranchNameError( const wxString& aName )
 
     int valid = 0;
 
-    if( git_branch_name_is_valid( &valid, aName.utf8_string().c_str() ) != GIT_OK || !valid )
+#if LIBGIT2_VER_MAJOR > 1 || ( LIBGIT2_VER_MAJOR == 1 && LIBGIT2_VER_MINOR >= 5 )
+    valid = git_branch_name_is_valid( &valid, aName.utf8_string().c_str() ) == GIT_OK && valid;
+#else
+    std::string refName = "refs/heads/" + aName.utf8_string();
+    valid = aName != wxS( "HEAD" ) && git_reference_is_valid_name( refName.c_str() );
+#endif
+
+    if( !valid )
         return wxString::Format( _( "'%s' is not a valid branch name." ), aName );
 
     return wxEmptyString;
@@ -3171,6 +2728,29 @@ void SplitCommitMessage( const wxString& aMessage, wxString& aSummary, wxString&
     aSummary = message.BeforeFirst( '\n' );
     aDescription = message.AfterFirst( '\n' );
     aDescription.Trim( false );
+}
+
+
+std::vector<std::pair<std::string, std::string>> MessageTrailers( const std::string& aMessage )
+{
+    std::vector<std::pair<std::string, std::string>> trailers;
+    git_message_trailer_array                        parsed = {};
+
+    if( git_message_trailers( &parsed, aMessage.c_str() ) != GIT_OK )
+        return trailers;
+
+    for( size_t ii = 0; ii < parsed.count; ++ii )
+        trailers.emplace_back( parsed.trailers[ii].key, parsed.trailers[ii].value );
+
+    git_message_trailer_array_free( &parsed );
+    return trailers;
+}
+
+
+bool IsKicadRecordRef( const wxString& aName )
+{
+    return aName.StartsWith( wxS( "refs/kicad/" ) ) || aName.StartsWith( wxS( "refs/kicad-remote/" ) )
+           || aName.StartsWith( wxS( "refs/tags/kicad/" ) );
 }
 
 } // namespace KIGIT

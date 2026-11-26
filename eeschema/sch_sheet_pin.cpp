@@ -76,13 +76,16 @@ void SCH_SHEET_PIN::Serialize( kiapi::schematic::types::SheetPin& pin ) const
 
     EDA_TEXT::Serialize( *pin.mutable_text(), schIUScale );
 
+    kiapi::common::PackCustomProperties( pin.mutable_custom_properties(), *this );
 }
 
 void SCH_SHEET_PIN::Serialize( google::protobuf::Any& aContainer ) const
 {
     kiapi::schematic::types::SheetPin pin;
     Serialize( pin );
-    aContainer.PackFrom( pin );
+
+    if( !aContainer.PackFrom( pin ) )
+        wxFAIL_MSG( wxT( "Failed to pack SCH_SHEET_PIN" ) );
 }
 
 
@@ -100,6 +103,7 @@ bool SCH_SHEET_PIN::Deserialize( const kiapi::schematic::types::SheetPin& pin )
     SetSpinStyle( FromProtoEnum<SPIN_STYLE::SPIN, SchematicLabelSpinStyle>( pin.spin_style() ) );
     SetShape( FromProtoEnum<LABEL_FLAG_SHAPE, SchematicLabelShape>( pin.shape() ) );
     SetLocked( pin.locked() == kiapi::common::types::LockedState::LS_LOCKED );
+    kiapi::common::UnpackCustomProperties( pin.custom_properties(), *this );
     return true;
 }
 

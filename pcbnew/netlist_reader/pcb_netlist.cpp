@@ -27,6 +27,7 @@
 #include <footprint.h>
 #include <richio.h>
 #include <string_utils.h>
+#include <template_fieldnames.h>
 
 #include <algorithm>
 
@@ -158,6 +159,76 @@ void COMPONENT::AddVariant( const COMPONENT_VARIANT& aVariant )
     }
 
     m_variants.emplace( aVariant.m_name, aVariant );
+}
+
+
+wxString COMPONENT::GetValue( const wxString& aVariantName ) const
+{
+    if( const COMPONENT_VARIANT* variant = GetVariant( aVariantName ) )
+    {
+        auto it = variant->m_fields.find( GetDefaultFieldName( FIELD_T::VALUE, UNTRANSLATED ) );
+
+        if( it != variant->m_fields.end() )
+            return it->second;
+    }
+
+    return m_value;
+}
+
+
+LIB_ID COMPONENT::GetFPID( const wxString& aVariantName ) const
+{
+    if( const COMPONENT_VARIANT* variant = GetVariant( aVariantName ) )
+    {
+        auto   it = variant->m_fields.find( GetDefaultFieldName( FIELD_T::FOOTPRINT, UNTRANSLATED ) );
+        LIB_ID fpid;
+
+        if( it != variant->m_fields.end() && !it->second.IsEmpty() && fpid.Parse( it->second, true ) < 0 )
+            return fpid;
+    }
+
+    return m_fpid;
+}
+
+
+nlohmann::ordered_map<wxString, wxString> COMPONENT::GetFields( const wxString& aVariantName ) const
+{
+    nlohmann::ordered_map<wxString, wxString> fields = m_fields;
+
+    if( const COMPONENT_VARIANT* variant = GetVariant( aVariantName ) )
+    {
+        for( const auto& [name, value] : variant->m_fields )
+            fields[name] = value;
+    }
+
+    return fields;
+}
+
+
+std::map<wxString, wxString> COMPONENT::GetProperties( const wxString& aVariantName ) const
+{
+    std::map<wxString, wxString> properties = m_properties;
+
+    if( const COMPONENT_VARIANT* variant = GetVariant( aVariantName ) )
+    {
+        auto resolve = [&]( const wxString& aName, bool aHasValue, bool aValue )
+        {
+            if( !aHasValue )
+                return;
+
+            if( aValue )
+                properties[aName] = wxEmptyString;
+            else
+                properties.erase( aName );
+        };
+
+        resolve( wxT( "dnp" ), variant->m_hasDnp, variant->m_dnp );
+        resolve( wxT( "exclude_from_bom" ), variant->m_hasExcludedFromBOM, variant->m_excludedFromBOM );
+        resolve( wxT( "exclude_from_sim" ), variant->m_hasExcludedFromSim, variant->m_excludedFromSim );
+        resolve( wxT( "exclude_from_pos_files" ), variant->m_hasExcludedFromPosFiles, variant->m_excludedFromPosFiles );
+    }
+
+    return properties;
 }
 
 
@@ -331,6 +402,58 @@ NETLIST_GROUP* NETLIST::GetGroupByUuid( const KIID& aUuid )
 }
 
 
+static KIID deriveGroupUuid( const wxString& aUuid )
+{
+    // An instance path collapses to a deterministic uuid so re-reading the same netlist finds
+    // the same board group.
+    if( aUuid.StartsWith( wxT( "/" ) ) )
+        return KIID::FromName( std::string( KIID_PATH( aUuid ).AsString().ToUTF8() ) );
+
+    return KIID( aUuid );
+}
+
+
+NETLIST_GROUP::NETLIST_GROUP( const wxString& aName, const wxString& aUuid, const LIB_ID& aLibId,
+                              std::vector<KIID_PATH> aMembers ) :
+        name( aName ),
+        uuid( deriveGroupUuid( aUuid ) ),
+        libId( aLibId ),
+        path( aUuid ),
+        members( std::move( aMembers ) )
+{
+}
+
+
+NETLIST_GROUP* NETLIST::GetGroupByPath( const KIID_PATH& aPath )
+{
+    if( aPath.empty() )
+        return nullptr;
+
+    for( NETLIST_GROUP& group : m_groups )
+    {
+        if( group.path == aPath )
+            return &group;
+    }
+
+    return nullptr;
+}
+
+
+NETLIST_GROUP* NETLIST::GetParentGroup( const KIID_PATH& aMemberPath )
+{
+    if( aMemberPath.empty() )
+        return nullptr;
+
+    for( NETLIST_GROUP& group : m_groups )
+    {
+        if( std::find( group.members.begin(), group.members.end(), aMemberPath ) != group.members.end() )
+            return &group;
+    }
+
+    return nullptr;
+}
+
+
 COMPONENT* NETLIST::GetComponentByReference( const wxString& aReference )
 {
     COMPONENT* component = nullptr;
@@ -412,7 +535,7 @@ void NETLIST::SortByFPID()
  */
 bool operator < ( const COMPONENT& item1, const COMPONENT& item2 )
 {
-    return StrNumCmp( item1.GetReference(), item2.GetReference(), true ) < 0;
+    return StrNumCmp( item1.GetReference(), item2.GetReference(), CMP_T::IGNORE_CASE ) < 0;
 }
 
 

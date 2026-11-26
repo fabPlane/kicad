@@ -49,6 +49,7 @@
 #include <pcb_textbox.h>
 #include <pcb_drill_chart.h>
 #include <pcb_drill_map.h>
+#include <pcb_stackup_table.h>
 #include <pcb_table.h>
 #include <pcb_dimension.h>
 #include <zone.h>
@@ -80,6 +81,7 @@ std::unique_ptr<BOARD_ITEM> CreateItemForType( KICAD_T aType, BOARD_ITEM_CONTAIN
     case PCB_TABLE_T:           return std::make_unique<PCB_TABLE>( aContainer );
     case PCB_DRILL_CHART_T:     return std::make_unique<PCB_DRILL_CHART>( aContainer );
     case PCB_DRILL_MAP_T:       return std::make_unique<PCB_DRILL_MAP>( aContainer );
+    case PCB_STACKUP_TABLE_T:   return std::make_unique<PCB_STACKUP_TABLE>( aContainer );
     case PCB_TABLECELL_T:
     {
         PCB_TABLE* table = dynamic_cast<PCB_TABLE*>( aContainer );
@@ -97,7 +99,7 @@ std::unique_ptr<BOARD_ITEM> CreateItemForType( KICAD_T aType, BOARD_ITEM_CONTAIN
     case PCB_GENERATOR_T:       return nullptr;  // must be created via CreateGeneratorForType
     case PCB_CONSTRAINT_T:      return std::make_unique<PCB_CONSTRAINT>( aContainer );
     case PCB_REFERENCE_IMAGE_T: return std::make_unique<PCB_REFERENCE_IMAGE>( aContainer );
-    case PCB_GRID_ITEM_T:        return std::make_unique<PCB_GRID_ITEM>( aContainer );
+    case PCB_GRID_ITEM_T:       return std::make_unique<PCB_GRID_ITEM>( aContainer );
 
     case PCB_PAD_T:
     {

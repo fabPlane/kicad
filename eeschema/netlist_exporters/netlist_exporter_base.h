@@ -24,6 +24,7 @@
 
 #include <schematic.h>
 
+#include <functional>
 #include <map>
 #include <set>
 #include <optional>
@@ -92,6 +93,9 @@ struct PIN_INFO
 /**
  * An abstract class used for the netlist exporters that Eeschema supports.
  */
+using EXPORT_EXCLUSION = std::function<bool( const SCH_SYMBOL*, const SCH_SHEET_PATH& )>;
+
+
 class NETLIST_EXPORTER_BASE
 {
 public:
@@ -183,7 +187,8 @@ protected:
      * Power symbols and virtual symbols that have their reference designators starting with
      * '#' are skipped.
      */
-    std::vector<PIN_INFO> CreatePinList( SCH_SYMBOL* aSymbol, const SCH_SHEET_PATH& aSheetPath );
+    std::vector<PIN_INFO> CreatePinList( SCH_SYMBOL* aSymbol, const SCH_SHEET_PATH& aSheetPath,
+                                         const EXPORT_EXCLUSION& aExcluded = nullptr );
 
     /**
      * Check if the given symbol should be processed for netlisting.
@@ -192,9 +197,33 @@ protected:
      *
      * @param aItem is a symbol to check
      * @param aSheetPath is the sheet to check the symbol for
+     * @param aExcluded tells which symbol instances the export leaves out, so they never claim a package
      * @return the symbol if it should be processed, or nullptr
      */
-    SCH_SYMBOL* findNextSymbol( EDA_ITEM* aItem, const SCH_SHEET_PATH& aSheetPath );
+    SCH_SYMBOL* findNextSymbol( EDA_ITEM* aItem, const SCH_SHEET_PATH& aSheetPath,
+                                const EXPORT_EXCLUSION& aExcluded = nullptr );
+
+    /**
+     * @return true if an exported unit on the sheet whose suffix names this package owns its footprint.
+     */
+    bool packageOwnedElsewhere( const SCH_SYMBOL* aSymbol, const SCH_SHEET_PATH& aSheetPath,
+                                const EXPORT_EXCLUSION& aExcluded ) const;
+
+    /**
+     * @return the exclusion of footprint exporters, which leave out symbols excluded from the board.
+     */
+    EXPORT_EXCLUSION boardExclusion() const;
+
+    /**
+     * @return true if the symbol, its rule areas, or a sheet above it excludes it from the board.
+     */
+    bool excludedFromBoard( const SCH_ITEM* aSymbol, const SCH_SHEET_PATH& aSheetPath ) const;
+
+    /**
+     * Drop the board-excluded nodes of a net, then sort the rest by reference and pin number
+     * and remove the duplicates a multi-unit part leaves across subgraphs.
+     */
+    void prepareBoardNetNodes( std::vector<std::pair<SCH_PIN*, SCH_SHEET_PATH>>& aNodes ) const;
 
     /**
      * Erase duplicate pins.
@@ -224,7 +253,7 @@ protected:
      * designator, and for each unit, add all its pins to the sorted pin list.
      */
     void findAllUnitsOfSymbol( SCH_SYMBOL* aSchSymbol, const SCH_SHEET_PATH& aSheetPath,
-                               std::vector<PIN_INFO>& aPins );
+                               std::vector<PIN_INFO>& aPins, const EXPORT_EXCLUSION& aExcluded = nullptr );
 
 protected:
     /// Used for "multiple symbols per package" symbols to avoid processing a lib symbol more than once

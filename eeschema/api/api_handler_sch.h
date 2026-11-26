@@ -29,8 +29,10 @@
 #include <api/common/commands/library_commands.pb.h>
 #include <google/protobuf/empty.pb.h>
 #include <api/common/commands/variant_commands.pb.h>
+#include <api/common/tasks.pb.h>
 #include <api/schematic/schematic_commands.pb.h>
 #include <api/schematic/schematic_jobs.pb.h>
+#include <api/schematic/schematic_tasks.pb.h>
 #include <kiid.h>
 #include <sch_sheet_path.h>
 #include <unordered_set>
@@ -290,6 +292,13 @@ private:
     wxString attachSheetFile( SCH_SHEET* aSheet, const SCH_SHEET_PATH& aParentPath );
     HANDLER_RESULT<kiapi::common::commands::PlaceFromLibraryResponse> handlePlaceSymbolFromLibrary(
             const HANDLER_CONTEXT<kiapi::schematic::commands::PlaceSymbolFromLibrary>& aCtx );
+    HANDLER_RESULT<kiapi::common::tasks::StartTaskResponse> handleStartErcTask(
+            const HANDLER_CONTEXT<kiapi::schematic::tasks::StartErcTask>& aCtx );
+
+    HANDLER_RESULT<kiapi::schematic::tasks::ErcTaskResult> handleGetErcTaskResult(
+            const HANDLER_CONTEXT<kiapi::schematic::tasks::GetErcTaskResult>& aCtx );
+
+    class ERC_TASK;
 
     SCHEMATIC* schematic() const;
 

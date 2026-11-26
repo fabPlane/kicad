@@ -214,7 +214,8 @@ void PCB_BARCODE::Serialize( google::protobuf::Any& aContainer ) const
     TransformShapeToPolySet( shapes, GetLayer(), 0, 0, ERROR_INSIDE );
     kiapi::common::PackPolySet( *barcode.mutable_shapes(), shapes );
 
-    aContainer.PackFrom( barcode );
+    if( !aContainer.PackFrom( barcode ) )
+        wxFAIL_MSG( wxT( "Failed to pack PCB_BARCODE" ) );
 }
 
 
@@ -343,34 +344,15 @@ void PCB_BARCODE::Rotate( const VECTOR2I& aRotCentre, const EDA_ANGLE& aAngle )
 
 void PCB_BARCODE::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
 {
-    if( const FOOTPRINT* fp = GetParentFootprint() )
-    {
-        const VECTOR2I libAxis = fp->GetTransform().InverseApply( aCentre );
+    // The position mirrors in the library or board frame depending on if this in a FP.
+    const FOOTPRINT* fp = GetParentFootprint();
+    const VECTOR2I   libCentre = fp ? fp->GetTransform().InverseApply( aCentre ) : aCentre;
+    const EDA_ANGLE  axis = MIRROR_AXIS( aFlipDirection );
 
-        if( aFlipDirection == FLIP_DIRECTION::LEFT_RIGHT )
-            m_libPos.x = 2 * libAxis.x - m_libPos.x;
-        else
-            m_libPos.y = 2 * libAxis.y - m_libPos.y;
+    MIRROR( m_libPos, libCentre, aFlipDirection );
 
-        // Reflect the library-frame angle (rotation-independent).
-        if( aFlipDirection == FLIP_DIRECTION::TOP_BOTTOM )
-            m_libAngle = ANGLE_180 - m_libAngle;
-        else
-            m_libAngle = -m_libAngle;
-
-        SetLayer( GetFlippedLayer( GetLayer() ) );
-        AssembleBarcode();
-        return;
-    }
-
-    VECTOR2I boardPos = GetPosition();
-    MIRROR( boardPos, aCentre, aFlipDirection );
-    m_libPos = boardPos;
-
-    if( aFlipDirection == FLIP_DIRECTION::TOP_BOTTOM )
-        m_libAngle = ANGLE_180 - m_libAngle;
-    else
-        m_libAngle = -m_libAngle;
+    // A flip changes the side, so that's a half turn on top of the reflection.
+    m_libAngle = m_libAngle.Reflect( axis ) + ANGLE_180;
 
     SetLayer( GetFlippedLayer( GetLayer() ) );
     AssembleBarcode();
@@ -766,6 +748,20 @@ double PCB_BARCODE::ViewGetLOD( int aLayer, const KIGFX::VIEW* aView ) const
     if( aLayer == LAYER_LOCKED_ITEM_SHADOW && !aView->IsLayerVisibleCached( m_layer ) )
         return LOD_HIDE;
 
+    if( FOOTPRINT* parent = GetParentFootprint() )
+    {
+        PCB_LAYER_ID checkLayer = m_layer;
+
+        if( !IsFrontLayer( checkLayer ) && !IsBackLayer( checkLayer ) )
+            checkLayer = parent->GetLayer();
+
+        if( IsFrontLayer( checkLayer ) && !aView->IsLayerVisibleCached( LAYER_FOOTPRINTS_FR ) )
+            return LOD_HIDE;
+
+        if( IsBackLayer( checkLayer ) && !aView->IsLayerVisibleCached( LAYER_FOOTPRINTS_BK ) )
+            return LOD_HIDE;
+    }
+
     return LOD_SHOW;
 }
 
@@ -1063,7 +1059,8 @@ static struct PCB_BARCODE_DESC
 
         propMgr.AddProperty( new PROPERTY<PCB_BARCODE, bool>( _HKI( "Show Text" ),
                     &PCB_BARCODE::SetShowText, &PCB_BARCODE::GetShowText ),
-                    groupBarcode ).SetIsCopyable();
+                    groupBarcode )
+                .SetIsCopyable();
 
         propMgr.AddProperty( new PROPERTY<PCB_BARCODE, int>( _HKI( "Text Size" ),
                     &PCB_BARCODE::SetTextSize, &PCB_BARCODE::GetTextSize, PROPERTY_DISPLAY::PT_COORD ),
@@ -1071,11 +1068,13 @@ static struct PCB_BARCODE_DESC
 
         propMgr.AddProperty( new PROPERTY<PCB_BARCODE, int>( _HKI( "Width" ),
                     &PCB_BARCODE::SetBarcodeWidth, &PCB_BARCODE::GetWidth, PROPERTY_DISPLAY::PT_COORD ),
-                    groupBarcode ).SetIsCopyable();
+                    groupBarcode )
+                .SetIsCopyable();
 
         propMgr.AddProperty( new PROPERTY<PCB_BARCODE, int>( _HKI( "Height" ),
                     &PCB_BARCODE::SetBarcodeHeight, &PCB_BARCODE::GetHeight, PROPERTY_DISPLAY::PT_COORD ),
-                    groupBarcode ).SetIsCopyable();
+                    groupBarcode )
+                .SetIsCopyable();
 
         propMgr.AddProperty( new PROPERTY<PCB_BARCODE, double>( _HKI( "Orientation" ),
                     &PCB_BARCODE::SetOrientation, &PCB_BARCODE::GetOrientation ),
@@ -1116,7 +1115,8 @@ static struct PCB_BARCODE_DESC
 
         propMgr.AddProperty( new PROPERTY<PCB_BARCODE, bool>( _HKI( "Knockout" ),
                     &PCB_BARCODE::SetIsKnockout, &PCB_BARCODE::IsKnockout ),
-                    groupBarcode ).SetIsCopyable();
+                    groupBarcode )
+                .SetIsCopyable();
 
         propMgr.AddProperty( new PROPERTY<PCB_BARCODE, int>( _HKI( "Margin X" ),
                     &PCB_BARCODE::SetMarginX, &PCB_BARCODE::GetMarginX, PROPERTY_DISPLAY::PT_COORD ),

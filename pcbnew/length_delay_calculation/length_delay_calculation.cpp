@@ -702,13 +702,8 @@ void LENGTH_DELAY_CALCULATION::optimiseVias(
             }
         }
 
-        const PAD* coincidentPad = nullptr;
-
-        for( PAD* pad : m_board->GetConnectivity()->GetConnectedPads( pcbVia ) )
-        {
-            coincidentPad = pad;
-            break;
-        }
+        const std::vector<PAD*> connectedPads = m_board->GetConnectivity()->GetConnectedPads( pcbVia );
+        const PAD*              coincidentPad = connectedPads.empty() ? nullptr : connectedPads.front();
 
         LSET spanLayers;
 
@@ -719,7 +714,9 @@ void LENGTH_DELAY_CALCULATION::optimiseVias(
         {
             PCB_LAYER_ID padSideLayer;
 
-            if( coincidentPad->GetAttribute() == PAD_ATTRIB::SMD || coincidentPad->GetAttribute() == PAD_ATTRIB::CONN )
+            if( coincidentPad->GetAttribute() == PAD_ATTRIB::SMD
+                || coincidentPad->GetAttribute() == PAD_ATTRIB::CONN
+                || coincidentPad->GetAttribute() == PAD_ATTRIB::NON_COMPONENT )
             {
                 padSideLayer = *coincidentPad->Padstack().LayerSet().CuStack().begin();
             }

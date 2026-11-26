@@ -92,7 +92,7 @@ bool DRC_CONSTRAINT::IsUnary() const
     {
     case HOLE_SIZE_CONSTRAINT:
     case TEXT_HEIGHT_CONSTRAINT:
-    case TEXT_THICKNESS_CONSTRAINT:
+    case LINE_WIDTH_CONSTRAINT:
     case TRACK_SEGMENT_LENGTH_CONSTRAINT:
     case ANNULAR_WIDTH_CONSTRAINT:
     case SOLDER_MASK_EXPANSION_CONSTRAINT:
@@ -114,6 +114,30 @@ bool DRC_CONSTRAINT::IsUnary() const
 
     default:
         return false;
+    }
+}
+
+
+void DRC_CONSTRAINT::Merge( const DRC_CONSTRAINT& aOther )
+{
+    if( aOther.GetValue().HasMin()
+            && ( !GetValue().HasMin() || (aOther.GetValue().Min() > GetValue().Min() ) ) )
+    {
+        Value().SetMin( aOther.GetValue().Min() );
+        m_minRule = aOther.GetMinRule() ? aOther.GetMinRule() : aOther.GetParentRule();
+    }
+
+    if( aOther.GetValue().HasMax()
+            && ( !GetValue().HasMax() || aOther.GetValue().Max() < GetValue().Max() ) )
+    {
+        Value().SetMax( aOther.GetValue().Max() );
+        m_maxRule = aOther.GetMaxRule() ? aOther.GetMaxRule() : aOther.GetParentRule();
+    }
+
+    if( aOther.GetValue().HasOpt() && !GetValue().HasOpt() )
+    {
+        Value().SetOpt( aOther.GetValue().Opt() );
+        m_parentRule = aOther.GetParentRule();
     }
 }
 
@@ -172,7 +196,7 @@ wxString DRC_RULE::FormatRuleFromProto( const kiapi::board::CustomRule& aRule, w
                 case kiapi::board::CRCT_COURTYARD_CLEARANCE:     return wxS( "courtyard_clearance" );
                 case kiapi::board::CRCT_SILK_CLEARANCE:          return wxS( "silk_clearance" );
                 case kiapi::board::CRCT_TEXT_HEIGHT:             return wxS( "text_height" );
-                case kiapi::board::CRCT_TEXT_THICKNESS:          return wxS( "text_thickness" );
+                case kiapi::board::CRCT_LINE_WIDTH:              return wxS( "line_width" );
                 case kiapi::board::CRCT_TRACK_WIDTH:             return wxS( "track_width" );
                 case kiapi::board::CRCT_TRACK_SEGMENT_LENGTH:    return wxS( "track_segment_length" );
                 case kiapi::board::CRCT_ANNULAR_WIDTH:           return wxS( "annular_width" );

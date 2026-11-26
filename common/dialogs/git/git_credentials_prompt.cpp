@@ -21,8 +21,10 @@
 #include <dialogs/git/dialog_git_credentials.h>
 #include <dialogs/git/dialog_git_identity.h>
 #include <dialogs/git/git_ui_utils.h>
+#include <wx/msgdlg.h>
 #include <confirm.h>
 #include <eda_base_frame.h>
+#include <wx/app.h>
 #include <wx/utils.h>
 #include <wx/weakref.h>
 #include <mutex>
@@ -46,7 +48,7 @@ static void resolveMissingRemote( KIGIT_COMMON* aCommon )
 
     // A status read holds the lock for moments at a time, so a short wait usually gets it
     wxBusyCursor                 busy;
-    std::unique_lock<std::mutex> lock = aCommon->TryLockActionFor( KIGIT_COMMON::ACTION_LOCK_WAIT );
+    KIGIT::ACTION_LOCK lock = aCommon->TryLockActionFor( KIGIT_COMMON::ACTION_LOCK_WAIT );
 
     if( !lock.owns_lock() )
     {
@@ -68,9 +70,40 @@ static void resolveMissingRemote( KIGIT_COMMON* aCommon )
 }
 
 
+// The window that asked can close while a prompt waits, freeing it and its project with it
+static bool askerGone( const wxWeakRef<wxWindow>& aParent, bool aHadParent )
+{
+    if( !aHadParent )
+        return false;
+
+    if( !aParent )
+        return true;
+
+    // Destroy() on a top level window only queues the delete, so its weak ref still answers
+    for( wxWindow* window = aParent.get(); window; window = window->GetParent() )
+    {
+        if( window->IsBeingDeleted() || wxTheApp->IsScheduledForDestruction( window ) )
+            return true;
+    }
+
+    return false;
+}
+
+
+// Any modal here can outlast its parent, so every answer short of acceptance says whether it did
+static KIGIT::PROMPT_ANSWER refusal( const wxWeakRef<wxWindow>& aParent, bool aHadParent )
+{
+    return askerGone( aParent, aHadParent ) ? KIGIT::PROMPT_ANSWER::ABANDONED : KIGIT::PROMPT_ANSWER::DECLINED;
+}
+
+
 // The project's key outlives the session's list, which a host change regathers, but a deleted one is never offered
 static wxString initialSSHKey( KIGIT_COMMON* aCommon, PROJECT* aProject )
 {
+    // The server named this key as the one it takes, so its passphrase is the one to ask for
+    if( wxString accepted = aCommon->GetAcceptedSSHKey(); KIGIT::IsOfferableSSHKey( accepted ) )
+        return accepted;
+
     if( aProject && KIGIT::IsOfferableSSHKey( aProject->GetLocalSettings().m_GitSSHKey ) )
         return aProject->GetLocalSettings().m_GitSSHKey;
 
@@ -78,8 +111,8 @@ static wxString initialSSHKey( KIGIT_COMMON* aCommon, PROJECT* aProject )
 }
 
 
-bool KIGIT::PromptForCredentials( wxWindow* aParent, KIGIT_COMMON* aCommon, PROJECT* aProject,
-                                  const wxString& aExplanation )
+KIGIT::PROMPT_ANSWER KIGIT::PromptForCredentials( wxWindow* aParent, KIGIT_COMMON* aCommon, PROJECT* aProject,
+                                                  const wxString& aExplanation )
 {
     resolveMissingRemote( aCommon );
 
@@ -89,11 +122,12 @@ bool KIGIT::PromptForCredentials( wxWindow* aParent, KIGIT_COMMON* aCommon, PROJ
     if( shownUsername.IsEmpty() && aProject )
         shownUsername = aProject->GetLocalSettings().m_GitRepoUsername;
 
+    wxWeakRef<wxWindow>    parent( aParent );
     DIALOG_GIT_CREDENTIALS dlg( aParent, identity.remote, aExplanation, identity.connType, shownUsername,
                                 initialSSHKey( aCommon, aProject ) );
 
-    if( dlg.ShowModal() != wxID_OK )
-        return false;
+    if( dlg.ShowModal() != wxID_OK || askerGone( parent, aParent != nullptr ) )
+        return refusal( parent, aParent != nullptr );
 
     bool ssh = dlg.GetConnType() == KIGIT_COMMON::GIT_CONN_TYPE::GIT_CONN_SSH;
 
@@ -115,15 +149,28 @@ bool KIGIT::PromptForCredentials( wxWindow* aParent, KIGIT_COMMON* aCommon, PROJ
     {
         wxLogTrace( traceGit, "Credential prompt discarded, the remote changed while it was open" );
         DisplayInfoMessage( aParent, _( "The remote changed while this window was open. Try the operation again." ) );
-        return false;
+        return refusal( parent, aParent != nullptr );
     }
 
     wxString username = entered.username ? *entered.username : identity.username;
 
-    if( dlg.SaveCredentials() && !KIPLATFORM::SECRETS::StoreSecret( identity.remote, username, entered.password ) )
+    if( dlg.SaveCredentials() )
     {
-        DisplayInfoMessage( aParent, _( "The credentials could not be saved to the system keychain, so they "
-                                        "are kept for this session only." ) );
+        // A locked keyring prompts to unlock, which must not hold the event loop
+        KIPLATFORM::SECRETS::StoreSecretAsync(
+                identity.remote, username, entered.password,
+                [parent]( bool aStored )
+                {
+                    if( !aStored && parent )
+                    {
+                        DisplayInfoMessage( parent, _( "The credentials could not be saved to the system keychain, "
+                                                       "so they are kept for this session only." ) );
+                    }
+                } );
+
+        // Windows answers inline, so a failed save has already shown its message
+        if( askerGone( parent, aParent != nullptr ) )
+            return PROMPT_ANSWER::ABANDONED;
     }
 
     // A correction only in the session would be reverted by the next attach.
@@ -139,13 +186,15 @@ bool KIGIT::PromptForCredentials( wxWindow* aParent, KIGIT_COMMON* aCommon, PROJ
             aProject->GetLocalSettings().m_GitRepoType = ssh ? wxS( "ssh" ) : wxS( "https" );
     }
 
-    return true;
+    return PROMPT_ANSWER::ACCEPTED;
 }
 
 
-bool KIGIT::PromptToTrustHost( wxWindow* aParent, const HOST_KEY_FAILURE& aFailure, bool aRetriedAfterTrust )
+KIGIT::PROMPT_ANSWER KIGIT::PromptToTrustHost( wxWindow* aParent, const HOST_KEY_FAILURE& aFailure,
+                                               bool aRetriedAfterTrust )
 {
-    wxString host = aFailure.host;
+    wxWeakRef<wxWindow> parent( aParent );
+    wxString            host = aFailure.host;
 
     if( aFailure.port != 22 )
         host << wxS( ":" ) << aFailure.port;
@@ -153,7 +202,7 @@ bool KIGIT::PromptToTrustHost( wxWindow* aParent, const HOST_KEY_FAILURE& aFailu
     if( !MayOfferTrust( aFailure, aRetriedAfterTrust ) )
     {
         DisplayErrorMessage( aParent, HostKeyRefusalMessage( aFailure ) );
-        return false;
+        return refusal( parent, aParent != nullptr );
     }
 
     wxString question;
@@ -174,8 +223,8 @@ bool KIGIT::PromptToTrustHost( wxWindow* aParent, const HOST_KEY_FAILURE& aFailu
                                      _( "Verify Server" ), wxYES_NO | wxNO_DEFAULT | wxICON_WARNING | wxCENTER );
     dlg.SetYesNoLabels( _( "&Connect" ), _( "Cancel" ) );
 
-    if( dlg.ShowModal() != wxID_YES )
-        return false;
+    if( dlg.ShowModal() != wxID_YES || askerGone( parent, aParent != nullptr ) )
+        return refusal( parent, aParent != nullptr );
 
     if( !AddKnownHost( aFailure ) )
     {
@@ -184,10 +233,66 @@ bool KIGIT::PromptToTrustHost( wxWindow* aParent, const HOST_KEY_FAILURE& aFailu
                                                   "made. Check that your .ssh folder can be written to." ),
                                                host ),
                              KnownHostsPath() );
-        return false;
+        return refusal( parent, aParent != nullptr );
     }
 
-    return true;
+    return PROMPT_ANSWER::ACCEPTED;
+}
+
+
+KIGIT::TRANSFER_RETRY KIGIT::AnswerTransferFailure( wxWindow* aParent, const std::weak_ptr<bool>& aAlive,
+                                                    KIGIT_COMMON* aCommon, PROJECT* aProject,
+                                                    const TRANSFER_FAILURE& aFailure, bool aRetriedAfterTrust,
+                                                    int& aPrompts )
+{
+    if( aFailure.cancelled )
+    {
+        aPrompts = 0;
+        return TRANSFER_RETRY::CANCELLED;
+    }
+
+    // A prompt runs an event loop in which the window can close
+    if( aFailure.hostKey )
+    {
+        PROMPT_ANSWER answer = PromptToTrustHost( aParent, *aFailure.hostKey, aRetriedAfterTrust );
+
+        if( aAlive.expired() || answer == PROMPT_ANSWER::ABANDONED )
+            return TRANSFER_RETRY::GONE;
+
+        if( answer == PROMPT_ANSWER::DECLINED )
+        {
+            aPrompts = 0;
+            return TRANSFER_RETRY::HOST_DECLINED;
+        }
+
+        return TRANSFER_RETRY::RETRY_TRUSTED;
+    }
+
+    // A remote that keeps changing could otherwise send the request back to the keyring forever
+    if( !aFailure.authFailure || aPrompts >= MAX_CREDENTIAL_PROMPTS )
+    {
+        aPrompts = 0;
+        return TRANSFER_RETRY::REPORT;
+    }
+
+    ++aPrompts;
+
+    // A stored secret answers before anyone is asked to type one
+    if( !aCommon->SecretRead() )
+        return TRANSFER_RETRY::RETRY;
+
+    PROMPT_ANSWER answer = PromptForCredentials( aParent, aCommon, aProject, aFailure.error );
+
+    if( aAlive.expired() || answer == PROMPT_ANSWER::ABANDONED )
+        return TRANSFER_RETRY::GONE;
+
+    if( answer == PROMPT_ANSWER::DECLINED )
+    {
+        aPrompts = 0;
+        return TRANSFER_RETRY::CANCELLED;
+    }
+
+    return TRANSFER_RETRY::RETRY;
 }
 
 
@@ -223,38 +328,19 @@ KIGIT::GIT_IDENTITY KIGIT::ReadGitIdentity( KIGIT_COMMON& aCommon )
 {
     GIT_IDENTITY identity;
 
-    if( !aCommon.GetRepo() )
-        return identity;
-
-    GIT_CONFIG_HANDLER handler( &aCommon );
-    identity.config.hasName = GetGitBackend()->GetConfigString( &handler, "user.name", identity.config.authorName );
-    identity.config.hasEmail = GetGitBackend()->GetConfigString( &handler, "user.email", identity.config.authorEmail );
-
-    git_signature* signature = nullptr;
-    identity.configured = git_signature_default( &signature, aCommon.GetRepo() ) == GIT_OK;
-    GitSignaturePtr signaturePtr( signature );
+    ReadAuthorConfig( aCommon.GetRepo(), identity.local, identity.global );
     return identity;
 }
 
 
-GitUserConfig KIGIT::ResolveGitIdentity( const GIT_IDENTITY& aIdentity, const COMMON_SETTINGS::GIT& aPreferences,
-                                         const wxString& aUserName )
+GitUserConfig KIGIT::PrefillAuthor( const GIT_IDENTITY& aIdentity )
 {
-    GitUserConfig config = aIdentity.config;
+    GitUserConfig author = ResolveAuthor( Pgm().GetCommonSettings()->m_Git, aIdentity.local, aIdentity.global );
 
-    if( !aPreferences.useDefaultAuthor )
-    {
-        if( config.authorName.IsEmpty() )
-            config.authorName = aPreferences.authorName;
+    if( author.authorName.IsEmpty() )
+        author.authorName = wxGetUserName();
 
-        if( config.authorEmail.IsEmpty() )
-            config.authorEmail = aPreferences.authorEmail;
-    }
-
-    if( config.authorName.IsEmpty() )
-        config.authorName = aUserName;
-
-    return config;
+    return author;
 }
 
 
@@ -279,7 +365,7 @@ bool KIGIT::EditGitIdentity( wxWindow* aParent, EDA_BASE_FRAME* aFrame, const st
 
     wxWeakRef<EDA_BASE_FRAME> frame( aFrame );
     wxWeakRef<wxWindow>       parent( aParent );
-    GitUserConfig config = ResolveGitIdentity( aIdentity, Pgm().GetCommonSettings()->m_Git, wxGetUserName() );
+    GitUserConfig config = PrefillAuthor( aIdentity );
 
     {
         DIALOG_GIT_IDENTITY dlg( aParent, _( "Set Author" ), config.authorName, config.authorEmail );
@@ -297,7 +383,7 @@ bool KIGIT::EditGitIdentity( wxWindow* aParent, EDA_BASE_FRAME* aFrame, const st
     bool saved = false;
 
     {
-        std::unique_lock<std::mutex> lock = KIGIT::WaitForActionLock( *aCommon, aParent );
+        KIGIT::ACTION_LOCK lock = KIGIT::WaitForActionLock( *aCommon, aParent );
 
         if( !lock.owns_lock() )
             return false;
@@ -325,5 +411,7 @@ bool KIGIT::EnsureGitIdentity( wxWindow* aParent, EDA_BASE_FRAME* aFrame, const 
     if( !identitySessionCurrent( aFrame, aCommon ) )
         return false;
 
-    return aIdentity.configured || EditGitIdentity( aParent, aFrame, aCommon, aIdentity );
+    GitUserConfig author = ResolveAuthor( Pgm().GetCommonSettings()->m_Git, aIdentity.local, aIdentity.global );
+
+    return ( author.hasName && author.hasEmail ) || EditGitIdentity( aParent, aFrame, aCommon, aIdentity );
 }

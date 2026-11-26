@@ -1293,7 +1293,7 @@ bool PNS_KICAD_IFACE_BASE::ImportSizes( PNS::SIZES_SETTINGS& aSizes, PNS::ITEM* 
     // First try to pick up diff pair width from starting track, if enabled
     if( bds.m_UseConnectedTrackWidth && aStartItem )
         found = inheritTrackWidthAndDpGap( aStartItem, aStartPosition, &diffPairWidth, &diffPairGap );
- 
+
     // Next, pick up gap from netclass, and width also if we didn't get a starting width above
     if( bds.UseNetClassDiffPair() && aStartItem )
     {
@@ -1709,6 +1709,7 @@ std::vector<std::unique_ptr<PNS::SOLID>> PNS_KICAD_IFACE_BASE::syncPad( PAD* aPa
 
     case PAD_ATTRIB::CONN:
     case PAD_ATTRIB::SMD:
+    case PAD_ATTRIB::NON_COMPONENT:
     {
         bool is_copper = false;
 
@@ -2402,6 +2403,7 @@ void PNS_KICAD_IFACE_BASE::SyncWorld( PNS::NODE *aWorld )
 
         case PCB_TABLE_T:
         case PCB_DRILL_CHART_T:
+        case PCB_STACKUP_TABLE_T:
             syncTextItem( aWorld, static_cast<PCB_TABLE*>( gitem ), gitem->GetLayer() );
             break;
 
@@ -3300,12 +3302,16 @@ bool PNS_KICAD_IFACE_BASE::TouchesCopperZone( const PNS::ITEM* aItem ) const
     const BOX2I bbox = shape->BBox();
 
     // Teardrops hug existing joints and carry no connectivity of their own
-    auto touches = [&]( const ZONE* aZone )
-    {
-        return !aZone->GetIsRuleArea() && !aZone->IsTeardropArea() && aZone->GetNet() == aItem->Net()
-               && aZone->IsOnLayer( layer ) && aZone->GetBoundingBox().Intersects( bbox )
-               && aZone->Outline()->Collide( shape );
-    };
+    auto touches =
+            [&]( const ZONE* aZone )
+            {
+                return !aZone->GetIsRuleArea()
+                        && !aZone->IsTeardropArea()
+                        && aZone->GetNet() == aItem->Net()
+                        && aZone->IsOnLayer( layer )
+                        && aZone->GetBoundingBox().Intersects( bbox )
+                        && aZone->GetBoardOutline().Collide( shape );
+            };
 
     for( const ZONE* zone : m_board->Zones() )
     {

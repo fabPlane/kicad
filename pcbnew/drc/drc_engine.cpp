@@ -213,12 +213,12 @@ void DRC_ENGINE::loadImplicitRules()
     silkTextHeightConstraint.Value().SetMin( bds.m_MinSilkTextHeight );
     rule->AddConstraint( silkTextHeightConstraint );
 
-    rule = createImplicitRule( _( "board setup constraints silk text thickness" ),
+    rule = createImplicitRule( _( "board setup constraints silk line width" ),
                                DRC_IMPLICIT_SOURCE::BOARD_SETUP_CONSTRAINT );
     rule->m_LayerCondition = LSET( { F_SilkS, B_SilkS } );
-    DRC_CONSTRAINT silkTextThicknessConstraint( TEXT_THICKNESS_CONSTRAINT );
-    silkTextThicknessConstraint.Value().SetMin( bds.m_MinSilkTextThickness );
-    rule->AddConstraint( silkTextThicknessConstraint );
+    DRC_CONSTRAINT lineWidthConstraint( LINE_WIDTH_CONSTRAINT );
+    lineWidthConstraint.Value().SetMin( bds.m_MinSilkLineWidth );
+    rule->AddConstraint( lineWidthConstraint );
 
     rule = createImplicitRule( _( "board setup constraints hole" ), DRC_IMPLICIT_SOURCE::BOARD_SETUP_CONSTRAINT );
     DRC_CONSTRAINT holeClearanceConstraint( HOLE_CLEARANCE_CONSTRAINT );
@@ -973,6 +973,10 @@ void DRC_ENGINE::RunTests( EDA_UNITS aUnits, bool aReportAllTrackErrors, bool aT
     // Recompute component classes
     m_board->GetComponentClassManager().ForceComponentClassRecalculation();
 
+    // fromTo() conditions are evaluated by every provider, not only the length ones
+    if( std::shared_ptr<CONNECTIVITY_DATA> connectivity = m_board->GetConnectivity() )
+        connectivity->GetFromToCache()->Rebuild( m_board );
+
     int timestamp = m_board->GetTimeStamp();
 
     for( DRC_TEST_PROVIDER* provider : m_testProviders )
@@ -1254,10 +1258,10 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
     }
     else if( aConstraintType == ZONE_CONNECTION_CONSTRAINT )
     {
-        if( pad && pad->GetLocalZoneConnection() != ZONE_CONNECTION::INHERITED )
+        if( pad && pad->GetLocalZoneConnection( aLayer ) != ZONE_CONNECTION::INHERITED )
         {
             wxString msg;
-            ZONE_CONNECTION override = pad->GetZoneConnectionOverrides( &msg );
+            ZONE_CONNECTION override = pad->GetZoneConnectionOverrides( aLayer, &msg );
 
             REPORT( "" )
             REPORT( wxString::Format( _( "Local override on %s; zone connection: %s." ),
@@ -1271,10 +1275,10 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
     }
     else if( aConstraintType == THERMAL_RELIEF_GAP_CONSTRAINT )
     {
-        if( pad && pad->GetLocalThermalGapOverride( nullptr ) > 0 )
+        if( pad && pad->GetLocalThermalGapOverride( aLayer, nullptr ) > 0 )
         {
             wxString msg;
-            int gap_override = pad->GetLocalThermalGapOverride( &msg );
+            int gap_override = pad->GetLocalThermalGapOverride( aLayer, &msg );
 
             REPORT( "" )
             REPORT( wxString::Format( _( "Local override on %s; thermal relief gap: %s." ),
@@ -1288,10 +1292,10 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
     }
     else if( aConstraintType == THERMAL_SPOKE_WIDTH_CONSTRAINT )
     {
-        if( pad && pad->GetLocalSpokeWidthOverride( nullptr ) > 0 )
+        if( pad && pad->GetLocalSpokeWidthOverride( aLayer, nullptr ) > 0 )
         {
             wxString msg;
-            int spoke_override = pad->GetLocalSpokeWidthOverride( &msg );
+            int spoke_override = pad->GetLocalSpokeWidthOverride( aLayer, &msg );
 
             REPORT( "" )
             REPORT( wxString::Format( _( "Local override on %s; thermal spoke width: %s." ),
@@ -1517,12 +1521,12 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
                 case VIA_DIAMETER_CONSTRAINT:
                 case HOLE_SIZE_CONSTRAINT:
                 case TEXT_HEIGHT_CONSTRAINT:
-                case TEXT_THICKNESS_CONSTRAINT:
                 case DIFF_PAIR_GAP_CONSTRAINT:
                 case LENGTH_CONSTRAINT:
                 case NET_CHAIN_LENGTH_CONSTRAINT:
                 case NET_CHAIN_STUB_LENGTH_CONSTRAINT:
                 case NET_CHAIN_RETURN_PATH_CONSTRAINT:
+                case LINE_WIDTH_CONSTRAINT:
                 case CONNECTION_WIDTH_CONSTRAINT:
                 case HOLE_TO_HOLE_CONSTRAINT:
                 {
@@ -1584,7 +1588,7 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
                             break;
 
                         case TEXT_HEIGHT_CONSTRAINT:
-                        case TEXT_THICKNESS_CONSTRAINT:
+                        case LINE_WIDTH_CONSTRAINT:
                         case CONNECTION_WIDTH_CONSTRAINT:
                             REPORT( wxString::Format( _( "Checking %s: min %s." ),
                                                       EscapeHTML( c->constraint.GetName() ),
@@ -1750,17 +1754,18 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
                     {
                         switch( a->Type() )
                         {
-                        case PCB_TRACE_T:     mask = DRC_DISALLOW_TRACKS;     break;
-                        case PCB_ARC_T:       mask = DRC_DISALLOW_TRACKS;     break;
-                        case PCB_PAD_T:       mask = DRC_DISALLOW_PADS;       break;
-                        case PCB_FOOTPRINT_T: mask = DRC_DISALLOW_FOOTPRINTS; break;
-                        case PCB_SHAPE_T:     mask = DRC_DISALLOW_GRAPHICS;   break;
-                        case PCB_BARCODE_T:   mask = DRC_DISALLOW_GRAPHICS;   break;
-                        case PCB_FIELD_T:     mask = DRC_DISALLOW_TEXTS;      break;
-                        case PCB_TEXT_T:      mask = DRC_DISALLOW_TEXTS;      break;
-                        case PCB_TEXTBOX_T:   mask = DRC_DISALLOW_TEXTS;      break;
+                        case PCB_TRACE_T:         mask = DRC_DISALLOW_TRACKS;     break;
+                        case PCB_ARC_T:           mask = DRC_DISALLOW_TRACKS;     break;
+                        case PCB_PAD_T:           mask = DRC_DISALLOW_PADS;       break;
+                        case PCB_FOOTPRINT_T:     mask = DRC_DISALLOW_FOOTPRINTS; break;
+                        case PCB_SHAPE_T:         mask = DRC_DISALLOW_GRAPHICS;   break;
+                        case PCB_BARCODE_T:       mask = DRC_DISALLOW_GRAPHICS;   break;
+                        case PCB_FIELD_T:         mask = DRC_DISALLOW_TEXTS;      break;
+                        case PCB_TEXT_T:          mask = DRC_DISALLOW_TEXTS;      break;
+                        case PCB_TEXTBOX_T:       mask = DRC_DISALLOW_TEXTS;      break;
                         case PCB_TABLE_T:
-                        case PCB_DRILL_CHART_T: mask = DRC_DISALLOW_TEXTS;    break;
+                        case PCB_DRILL_CHART_T:
+                        case PCB_STACKUP_TABLE_T: mask = DRC_DISALLOW_TEXTS;      break;
 
                         case PCB_ZONE_T:
                             // Treat teardrop areas as tracks for DRC purposes
@@ -1771,8 +1776,13 @@ DRC_CONSTRAINT DRC_ENGINE::EvalRules( DRC_CONSTRAINT_T aConstraintType, const BO
 
                             break;
 
-                        case PCB_LOCATE_HOLE_T: mask = DRC_DISALLOW_HOLES; break;
-                        default: mask = 0; break;
+                        case PCB_LOCATE_HOLE_T:
+                            mask = DRC_DISALLOW_HOLES;
+                            break;
+
+                        default:
+                            mask = 0;
+                            break;
                         }
                     }
 
@@ -2403,8 +2413,6 @@ void DRC_ENGINE::ReportViolation( const std::shared_ptr<DRC_ITEM>& aItem, const 
 
         m_logReporter->Report( msg );
 
-        wxString violatingItemsStr = wxT( "Violating items: " );
-
         m_logReporter->Report( wxString::Format( wxT( "  |- violating position (%d, %d)" ),
                                               aPos.x,
                                               aPos.y ) );
@@ -2668,6 +2676,7 @@ enum class SHOWMATCH_DOMAIN
     EDGE_ITEMS,
     FOOTPRINTS,
     HOLE_ITEMS,
+    LINE_WIDTH_ITEMS,
     MASK_EXPANSION_ITEMS,
     MASK_ITEMS,
     PADS,
@@ -2735,6 +2744,12 @@ bool matchesShowMatchDomain( const BOARD_ITEM* aItem, SHOWMATCH_DOMAIN aDomain )
 
     case SHOWMATCH_DOMAIN::HOLE_ITEMS:
         return aItem->HasHole();
+
+    case SHOWMATCH_DOMAIN::LINE_WIDTH_ITEMS:
+        if( aItem->Type() == PCB_SHAPE_T )
+            return !static_cast<const PCB_SHAPE*>( aItem )->IsSolidFill();
+
+        return matchesShowMatchDomain( aItem, SHOWMATCH_DOMAIN::TEXT_ITEMS );
 
     case SHOWMATCH_DOMAIN::MASK_EXPANSION_ITEMS:
         switch( aItem->Type() )
@@ -2854,8 +2869,10 @@ SHOWMATCH_DOMAIN_SPEC getShowMatchDomainSpec( DRC_CONSTRAINT_T aConstraint )
         return { SHOWMATCH_DOMAIN::PADS };
 
     case TEXT_HEIGHT_CONSTRAINT:
-    case TEXT_THICKNESS_CONSTRAINT:
         return { SHOWMATCH_DOMAIN::TEXT_ITEMS };
+
+    case LINE_WIDTH_CONSTRAINT:
+        return { SHOWMATCH_DOMAIN::LINE_WIDTH_ITEMS };
 
     case SOLDER_MASK_EXPANSION_CONSTRAINT:
         return { SHOWMATCH_DOMAIN::MASK_EXPANSION_ITEMS };

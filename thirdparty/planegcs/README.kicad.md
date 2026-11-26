@@ -11,8 +11,9 @@ geometric drafting constraints). See the design doc for how it is used.
 - **License:** LGPL-2.1-or-later (unchanged; see file headers). Compatible with
   KiCad's GPL-3.0+. Kept out of permissive `libs/kimath`; the KiCad adapter that
   consumes it lives in `pcbnew/constraints/`.
-- **Files (11, upstream-faithful):** `Constraints.{cpp,h}`, `GCS.{cpp,h}`,
-  `Geo.{cpp,h}`, `SubSystem.{cpp,h}`, `Util.h`, `qp_eq.{cpp,h}`.
+- **Files (11, upstream apart from the edits under KiCad modifications):**
+  `Constraints.{cpp,h}`, `GCS.{cpp,h}`, `Geo.{cpp,h}`, `SubSystem.{cpp,h}`, `Util.h`,
+  `qp_eq.{cpp,h}`.
 
 ## Dependencies
 
@@ -37,6 +38,33 @@ patch (re-apply on upstream re-sync):
 | `GCS.cpp` | `#include <FCConfig.h>` | *(deleted — no FCConfig symbol used)* |
 | `GCS.cpp` | `#include <boost_graph_adjacency_list.hpp>` | `#include <boost/graph/adjacency_list.hpp>` |
 | `GCS.h`, `Constraints.h`, `Geo.h` | `#include "../../SketcherGlobal.h"` | `#include "planegcs_shim.h"` |
+
+`SubSystem::initialize()` and the two-subsystem `System::solve()` order their unknowns
+as the caller declared them instead of by address. Upstream intersects or sorts sets of
+`double*`, so the variable order, and with it the rounding of every solve, follows heap
+layout. MSVC's `std::deque<double>` allocates two doubles per block, so the same edit
+landed a few nanometres apart from one session to the next. Re-apply on upstream re-sync.
+
+The two-subsystem `System::solve()` seeds its BFGS matrix with the soft subsystem's
+Gauss-Newton curvature `JB^T JB`, plus `1e-10` of its largest diagonal so directions no
+soft constraint sees stay bounded. Upstream starts from the identity. KiCad's stay-put pins
+weigh `1e-4`, so their curvature is `1e-8` and the identity overstates it so far that the
+`1e-10` step test ends the solve short of the optimum, at a point the unknown order picks.
+Re-apply on upstream re-sync.
+
+The same solve returns `Failed` as soon as the soft gradient or the hard Jacobian is no
+longer finite, at the start or after any step, and hands back the parameters it started
+from. A contradiction can be met by collapsing a segment, where a distance constraint's
+derivative is 0/0. Upstream then lets the NaN through the `yTh != 0` test into the BFGS
+matrix and every later step. Stopping at the collapsed iterate instead is no better, because
+it can satisfy every hard constraint and be written back as a solution. Re-apply on upstream
+re-sync.
+
+The penalty weight `mu` (Eq. 18.36) is left unchanged on an iterate that already meets
+every hard constraint. Upstream divides by that zero violation, so `mu` becomes infinite,
+the merit becomes `inf * 0`, and every line-search test passes. The perpendicular(2 seg)
+Sweep solve then runs to the iteration limit instead of converging in 29 iterations.
+Re-apply on upstream re-sync.
 
 No other source edits. For production the shim's `Console`/`TimeElapsed` should
 route to `wxLogTrace` / a `std::chrono` timer; the spike keeps them trivial.

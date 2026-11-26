@@ -831,6 +831,9 @@ SNAP_RESULT SNAP_RESOLVER::Resolve( const SNAP_SOURCE_CONTEXT& aContext ) const
         }
     }
 
+    bool lateGridX = false;
+    bool lateGridY = false;
+
     for( size_t i = 0; i < ranked.size(); ++i )
     {
         const SNAP_CANDIDATE& candidate = *ranked[i].candidate;
@@ -843,8 +846,21 @@ SNAP_RESULT SNAP_RESOLVER::Resolve( const SNAP_SOURCE_CONTEXT& aContext ) const
 
         if( m_clock() - start >= m_deadline )
         {
-            budgetExhausted = true;
-            break;
+            // Every caller relies on grid snap, so one grid candidate per axis still runs late
+            bool* lateSlot = nullptr;
+
+            if( candidate.relation == SNAP_RELATION::GRID_X )
+                lateSlot = &lateGridX;
+            else if( candidate.relation == SNAP_RELATION::GRID_Y )
+                lateSlot = &lateGridY;
+
+            if( !lateSlot || *lateSlot )
+            {
+                budgetExhausted = true;
+                continue;
+            }
+
+            *lateSlot = true;
         }
 
         const std::optional<bool> axis = layoutAxis( candidate );
@@ -861,12 +877,6 @@ SNAP_RESULT SNAP_RESOLVER::Resolve( const SNAP_SOURCE_CONTEXT& aContext ) const
         }
 
         acceptCandidate( i );
-
-        if( m_clock() - start >= m_deadline && i + 1 != ranked.size() )
-        {
-            budgetExhausted = true;
-            break;
-        }
     }
 
     for( const SNAP_CANDIDATE& candidate : acceptedCandidates )

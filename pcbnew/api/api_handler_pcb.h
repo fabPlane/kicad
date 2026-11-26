@@ -25,6 +25,8 @@
 #include <api/pcb_context.h>
 #include <undo_redo_container.h>
 #include <api/board/board_jobs.pb.h>
+#include <api/board/board_tasks.pb.h>
+#include <api/common/tasks.pb.h>
 #include <api/common/commands/cross_probe_commands.pb.h>
 #include <api/common/commands/project_commands.pb.h>
 #include <api/common/commands/variant_commands.pb.h>
@@ -39,6 +41,7 @@ class PCB_EDIT_FRAME;
 class PROGRESS_REPORTER;
 class PCB_TRACK;
 class PROPERTY_BASE;
+class ZONE;
 class JOB_EXPORT_PCB_FAB;
 class JOB_EXPORT_PCB_ODB;
 
@@ -141,6 +144,18 @@ private:
 
     HANDLER_RESULT<ImportNetlistResponse> handleImportNetlist(
             const HANDLER_CONTEXT<ImportNetlist>& aCtx );
+
+    HANDLER_RESULT<kiapi::common::tasks::StartTaskResponse> handleStartRefillZonesTask(
+            const HANDLER_CONTEXT<kiapi::board::tasks::StartRefillZonesTask>& aCtx );
+
+    HANDLER_RESULT<kiapi::common::tasks::StartTaskResponse> handleStartDrcTask(
+            const HANDLER_CONTEXT<kiapi::board::tasks::StartDrcTask>& aCtx );
+
+    HANDLER_RESULT<kiapi::board::tasks::DrcTaskResult> handleGetDrcTaskResult(
+            const HANDLER_CONTEXT<kiapi::board::tasks::GetDrcTaskResult>& aCtx );
+
+    class REFILL_ZONES_TASK;
+    class DRC_TASK;
 
     HANDLER_RESULT<BoardEditorAppearanceSettings> handleGetBoardEditorAppearanceSettings(
             const HANDLER_CONTEXT<GetBoardEditorAppearanceSettings>& aCtx );
@@ -331,6 +346,9 @@ private:
     PCB_CONTEXT* pcbContext() const { return static_cast<PCB_CONTEXT*>( context() ); }
 
     PCB_EDIT_FRAME* frame() const;
+
+    HANDLER_RESULT<std::vector<ZONE*>>
+    resolveZonesToFill( const google::protobuf::RepeatedPtrField<kiapi::common::types::KIID>& aZoneIds ) const;
 };
 
 #endif //KICAD_API_HANDLER_PCB_H

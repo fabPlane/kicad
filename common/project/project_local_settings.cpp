@@ -29,7 +29,8 @@
 const int projectLocalSettingsVersion = 7;
 
 
-PROJECT_LOCAL_SETTINGS::PROJECT_LOCAL_SETTINGS( PROJECT* aProject, const wxString& aFilename ) :
+PROJECT_LOCAL_SETTINGS::PROJECT_LOCAL_SETTINGS( PROJECT* aProject, const wxString& aFilename,
+                                                const BOARD_OPACITY_DEFAULTS& aOpacityDefaults ) :
         JSON_SETTINGS( aFilename, SETTINGS_LOC::PROJECT, projectLocalSettingsVersion,
                        /* aCreateIfMissing = */ true, /* aCreateIfDefault = */ false,
                        /* aWriteFile = */ true ),
@@ -39,13 +40,13 @@ PROJECT_LOCAL_SETTINGS::PROJECT_LOCAL_SETTINGS( PROJECT* aProject, const wxStrin
         m_AutoTrackWidth( true ),
         m_ZoneDisplayMode( ZONE_DISPLAY_MODE::SHOW_FILLED ),
         m_PrototypeZoneFill( false ),
-        m_TrackOpacity( 1.0 ),
-        m_ViaOpacity( 1.0 ),
-        m_PadOpacity( 1.0 ),
-        m_ZoneOpacity( 0.6 ),
-        m_ShapeOpacity( 1.0 ),
-        m_ImageOpacity( 0.6 ),
-        m_OutsideGroupOpacity( 1.0 ),
+        m_TrackOpacity( aOpacityDefaults.m_TrackOpacity ),
+        m_ViaOpacity( aOpacityDefaults.m_ViaOpacity ),
+        m_PadOpacity( aOpacityDefaults.m_PadOpacity ),
+        m_ZoneOpacity( aOpacityDefaults.m_ZoneOpacity ),
+        m_ShapeOpacity( aOpacityDefaults.m_ShapeOpacity ),
+        m_ImageOpacity( aOpacityDefaults.m_ImageOpacity ),
+        m_OutsideGroupOpacity( aOpacityDefaults.m_OutsideGroupOpacity ),
         m_PcbSelectionFilter(),
         m_GitIntegrationDisabled( false ),
         m_project( aProject ),
@@ -183,13 +184,20 @@ PROJECT_LOCAL_SETTINGS::PROJECT_LOCAL_SETTINGS( PROJECT* aProject, const wxStrin
                            &m_ContrastModeDisplay, HIGH_CONTRAST_MODE::NORMAL,
                            HIGH_CONTRAST_MODE::NORMAL, HIGH_CONTRAST_MODE::HIDDEN ) );
 
-    m_params.emplace_back( new PARAM<double>( "board.opacity.tracks", &m_TrackOpacity, 1.0 ) );
-    m_params.emplace_back( new PARAM<double>( "board.opacity.vias", &m_ViaOpacity, 1.0 ) );
-    m_params.emplace_back( new PARAM<double>( "board.opacity.pads", &m_PadOpacity, 1.0 ) );
-    m_params.emplace_back( new PARAM<double>( "board.opacity.zones", &m_ZoneOpacity, 0.6 ) );
-    m_params.emplace_back( new PARAM<double>( "board.opacity.images", &m_ImageOpacity, 0.6 ) );
-    m_params.emplace_back( new PARAM<double>( "board.opacity.shapes", &m_ShapeOpacity, 1.0 ) );
-    m_params.emplace_back( new PARAM<double>( "board.opacity.outside_group", &m_OutsideGroupOpacity, 1.0 ) );
+    m_params.emplace_back( new PARAM<double>( "board.opacity.tracks", &m_TrackOpacity,
+                                              aOpacityDefaults.m_TrackOpacity ) );
+    m_params.emplace_back( new PARAM<double>( "board.opacity.vias", &m_ViaOpacity,
+                                              aOpacityDefaults.m_ViaOpacity ) );
+    m_params.emplace_back( new PARAM<double>( "board.opacity.pads", &m_PadOpacity,
+                                              aOpacityDefaults.m_PadOpacity ) );
+    m_params.emplace_back( new PARAM<double>( "board.opacity.zones", &m_ZoneOpacity,
+                                              aOpacityDefaults.m_ZoneOpacity ) );
+    m_params.emplace_back( new PARAM<double>( "board.opacity.images", &m_ImageOpacity,
+                                              aOpacityDefaults.m_ImageOpacity ) );
+    m_params.emplace_back( new PARAM<double>( "board.opacity.shapes", &m_ShapeOpacity,
+                                              aOpacityDefaults.m_ShapeOpacity ) );
+    m_params.emplace_back( new PARAM<double>( "board.opacity.outside_group", &m_OutsideGroupOpacity,
+                                              aOpacityDefaults.m_OutsideGroupOpacity ) );
 
     m_params.emplace_back( new PARAM_LIST<wxString>( "board.hidden_nets", &m_HiddenNets, {} ) );
 
@@ -581,7 +589,7 @@ bool PROJECT_LOCAL_SETTINGS::MigrateFromLegacy( wxConfigBase* aLegacyConfig )
 
 bool PROJECT_LOCAL_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
 {
-    wxASSERT( m_project );
+    wxCHECK( m_project, false );
 
     Set( "meta.filename", m_project->GetProjectName() + "." + FILEEXT::ProjectLocalSettingsFileExtension );
 

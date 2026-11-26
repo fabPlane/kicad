@@ -227,27 +227,14 @@ void mpInfoLegend::Plot( wxDC& dc, mpWindow& w )
 {
     if( m_visible )
     {
-        // Adjust relative position inside the window
         int scrx    = w.GetScrX();
         int scry    = w.GetScrY();
 
-        if( m_winX != scrx || m_winY != scry )
-        {
-            if( m_winX > 1 )
-                m_dim.x = (int) floor( (double) ( m_dim.x * scrx / m_winX ) );
+        // Opaque, so the traces and the grid it overlaps cannot show through and make the
+        // labels hard to read.  It follows the plot's own background, dark mode included.
+        wxBrush background( w.GetBackgroundColour() );
 
-            if( m_winY > 1 )
-            {
-                m_dim.y = (int) floor( (double) ( m_dim.y * scry / m_winY ) );
-                UpdateReference();
-            }
-
-            // Finally update window size
-            m_winX  = scrx;
-            m_winY  = scry;
-        }
-
-        dc.SetBrush( m_brush );
+        dc.SetBrush( background );
         dc.SetFont( GetPlotFont() );
 
         const int baseWidth = mpLEGEND_MARGIN * 2 + mpLEGEND_LINEWIDTH;
@@ -274,13 +261,22 @@ void mpInfoLegend::Plot( wxDC& dc, mpWindow& w )
         }
 
         dc.SetPen( m_pen );
-        dc.SetBrush( m_brush );
+        dc.SetBrush( background );
         m_dim.width = textX;
 
         if( textY != mpLEGEND_MARGIN )    // Don't draw any thing if there are no visible layers
         {
             textY += mpLEGEND_MARGIN;
             m_dim.height = textY;
+
+            // Clamped rather than scaled with the window, since a pre-layout paint threw it out of the frame
+            // Only m_dim moves, because a drag in progress offsets from m_reference
+            int maxX = std::max( w.GetMarginLeft(), scrx - w.GetMarginRight() - m_dim.width );
+            int maxY = std::max( w.GetMarginTop(), scry - w.GetMarginBottom() - m_dim.height );
+
+            m_dim.x = std::clamp( m_dim.x, w.GetMarginLeft(), maxX );
+            m_dim.y = std::clamp( m_dim.y, w.GetMarginTop(), maxY );
+
             dc.DrawRectangle( m_dim.x, m_dim.y, m_dim.width, m_dim.height );
 
             // Set explicitly: other layers (e.g. plot cursors) leave their own text colour on
@@ -970,8 +966,22 @@ void mpScaleY::recalculateTicks( wxDC& dc, mpWindow& w )
     {
         minVvis = m_axisMin;
         maxVvis = m_axisMax;
-        m_offset = -m_axisMin;
-        m_scale = 1.0 / ( m_axisMax - m_axisMin );
+
+        double plotTop = w.p2y( w.GetMarginTop() );
+        double plotBottom = w.p2y( w.GetScrY() - w.GetMarginBottom() );
+        double plotSpan = plotTop - plotBottom;
+        double axisSpan = m_axisMax - m_axisMin;
+
+        if( axisSpan > 0.0 && plotSpan > 0.0 )
+        {
+            m_scale = plotSpan / axisSpan;
+            m_offset = plotBottom / m_scale - m_axisMin;
+        }
+        else
+        {
+            m_offset = -m_axisMin;
+            m_scale = 1.0 / axisSpan;
+        }
     }
     else if( m_masterScale )
     {
@@ -1147,12 +1157,15 @@ void mpScaleXBase::Plot( wxDC& dc, mpWindow& w )
     m_offset    = -m_minV;
     m_scale     = 1.0 / ( m_maxV - m_minV );
 
+    // Ticks are measured against whatever font the DC currently has set, so set ours first;
+    // otherwise recalculateTicks() sizes m_maxLabelHeight from a leftover font, throwing off
+    // where the axis name is placed relative to the bottom margin.
+    dc.SetFont( GetPlotFont() );
     recalculateTicks( dc, w );
 
     if( m_visible )
     {
         dc.SetPen( m_pen );
-        dc.SetFont( GetPlotFont() );
         int orgy = 0;
 
         const int extend = w.GetScrX();    ///2;
@@ -1307,15 +1320,24 @@ mpScaleY::mpScaleY( const wxString& name, int flags, bool ticks )
 
 void mpScaleY::Plot( wxDC& dc, mpWindow& w )
 {
-    m_offset    = -m_minV;
-    m_scale     = 1.0 / ( m_maxV - m_minV );
+    double minV = m_minV;
+    double maxV = m_maxV;
 
+    // An axis that was never ranged has m_minV == m_maxV
+    if( mpIsDegenerateRange( minV, maxV ) )
+        mpPadDegenerateRange( minV, maxV );
+
+    m_offset    = -minV;
+    m_scale     = 1.0 / ( maxV - minV );
+
+    // See mpScaleXBase::Plot(): set the font before measuring so label extents match what is
+    // actually drawn.
+    dc.SetFont( GetPlotFont() );
     recalculateTicks( dc, w );
 
     if( m_visible )
     {
         dc.SetPen( m_pen );
-        dc.SetFont( GetPlotFont() );
 
         int orgx = 0;
 
@@ -1410,6 +1432,11 @@ void mpScaleY::Plot( wxDC& dc, mpWindow& w )
         // Draw axis name
         dc.GetTextExtent( m_name, &tx, &ty );
 
+        // Keep long names inside the window.
+        int nameX = orgx - ( tx / 2 );
+        nameX = std::min( nameX, w.GetScrX() - tx );
+        nameX = std::max( nameX, 0 );
+
         switch( m_nameFlags )
         {
         case mpALIGN_BORDER_LEFT:
@@ -1417,7 +1444,7 @@ void mpScaleY::Plot( wxDC& dc, mpWindow& w )
             break;
 
         case mpALIGN_LEFT:
-            dc.DrawText( m_name, orgx - ( tx / 2 ), minYpx - ty - 4 );
+            dc.DrawText( m_name, nameX, minYpx - ty - 4 );
             break;
 
         case mpALIGN_CENTER:
@@ -1426,7 +1453,7 @@ void mpScaleY::Plot( wxDC& dc, mpWindow& w )
 
         case mpALIGN_RIGHT:
         case mpALIGN_FAR_RIGHT:
-            dc.DrawText( m_name, orgx - ( tx / 2 ), minYpx - ty - 4 );
+            dc.DrawText( m_name, nameX, minYpx - ty - 4 );
             break;
 
         case mpALIGN_BORDER_RIGHT:
@@ -1760,6 +1787,14 @@ void mpWindow::Fit( double xMin, double xMax, double yMin, double yMax, const wx
     double newDesiredYmin = yMin;
     double newDesiredYmax = yMax;
 
+    // Near-constant data gives a range too narrow to label.
+    if( mpIsDegenerateRange( yMin, yMax ) )
+    {
+        mpPadDegenerateRange( yMin, yMax );
+        newDesiredYmin = yMin;
+        newDesiredYmax = yMax;
+    }
+
     // Provide a gap between the extrema of the curve and the top/bottom edges of the
     // plot area. Not to be confused with the left/right/top/bottom margins outside the plot area.
     const double xGap = fabs( xMax - xMin ) * m_leftRightPlotGapFactor;
@@ -1973,12 +2008,6 @@ void mpWindow::ZoomRect( wxPoint p0, wxPoint p1 )
     double  zoom_x_max = p0x>p1x ? p0x : p1x;
     double  zoom_y_min = p0y<p1y ? p0y : p1y;
     double  zoom_y_max = p0y>p1y ? p0y : p1y;
-
-    if( m_yLocked )
-    {
-        zoom_y_min = m_desiredYmin;
-        zoom_y_max = m_desiredYmax;
-    }
 
     Fit( zoom_x_min, zoom_x_max, zoom_y_min, zoom_y_max );
 
@@ -2214,9 +2243,21 @@ void mpWindow::OnPaint( wxPaintEvent& WXUNUSED( event ) )
     targetDC->SetTextForeground( m_fgColour );
     targetDC->DrawRectangle( 0, 0, m_scrX, m_scrY );
 
-    // Draw all the layers:
-    for( mpLayer* layer : m_layers )
-        layer->Plot( *targetDC, *this );
+    // Info layers (legend, cursors) paint over the traces.
+    for( int pass = 0; pass < 2; ++pass )
+    {
+        const bool infoPass = ( pass == 1 );
+
+        for( mpLayer* layer : m_layers )
+        {
+            if( layer->IsInfo() != infoPass )
+                continue;
+
+            // Undo any text colour the previous layer set.
+            targetDC->SetTextForeground( m_fgColour );
+            layer->Plot( *targetDC, *this );
+        }
+    }
 
     if( m_zooming )
     {
@@ -2229,19 +2270,13 @@ void mpWindow::OnPaint( wxPaintEvent& WXUNUSED( event ) )
     // If doublebuffer, draw now to the window:
     if( m_enableDoubleBuffer )
         paintDC.Blit( 0, 0, m_scrX, m_scrY, targetDC, 0, 0 );
+
+    onPaintFinished();
 }
 
 
 void mpWindow::DoZoom( const wxPoint& centerPoint, double zoomFactor, wxOrientation directions )
 {
-    if( m_yLocked )
-    {
-        if( directions == wxVERTICAL )
-            return;
-
-        directions = wxHORIZONTAL;
-    }
-
     const bool horizontally = ( directions & wxHORIZONTAL ) != 0;
     const bool vertically   = ( directions & wxVERTICAL )   != 0;
 
@@ -2393,13 +2428,8 @@ void mpWindow::PerformMouseWheelAction( wxMouseEvent& event, MouseWheelAction ac
         break;
 
     case MouseWheelAction::PAN_UP_DOWN:
-        if( !m_yLocked )
-        {
-            SetYView( m_posY + changeUnitsY, m_desiredYmax + changeUnitsY,
-                      m_desiredYmin + changeUnitsY );
-            UpdateAll();
-        }
-
+        SetYView( m_posY + changeUnitsY, m_desiredYmax + changeUnitsY, m_desiredYmin + changeUnitsY );
+        UpdateAll();
         break;
 
     case MouseWheelAction::ZOOM:
@@ -2652,7 +2682,6 @@ mpWindow::mpWindow( DelegatingContructorTag, Ts&&... windowArgs ) :
         m_scrY( 64 ),
         m_clickedX( 0 ),
         m_clickedY( 0 ),
-        m_yLocked( false ),
         m_desiredXmin( 0.0 ),
         m_desiredXmax( 1.0 ),
         m_desiredYmin( 0.0 ),

@@ -248,13 +248,31 @@ static bool outlinesOverlap( const SHAPE_POLY_SET& aA, const SHAPE_POLY_SET& aB 
 }
 
 
+// The matched pair whose reference part sorts first, so the choice does not follow heap addresses
+static const std::pair<FOOTPRINT* const, FOOTPRINT*>& firstPair( const TMATCH::COMPONENT_MATCHES& aMatches )
+{
+    return *std::ranges::min_element( aMatches,
+                                      []( const auto& aA, const auto& aB )
+                                      {
+                                          FOOTPRINT* a = aA.first;
+                                          FOOTPRINT* b = aB.first;
+
+                                          if( int cmp = StrNumCmp( a->GetReference(), b->GetReference() ) )
+                                              return cmp < 0;
+
+                                          return std::tuple( a->GetPosition().x, a->GetPosition().y, a->m_Uuid )
+                                                 < std::tuple( b->GetPosition().x, b->GetPosition().y, b->m_Uuid );
+                                      } );
+}
+
+
 // The matched pair holding the anchor footprint. An anchor outside the reference area falls back to the
 // first pair, so the group is not shifted to center alignment
 static const std::pair<FOOTPRINT* const, FOOTPRINT*>& anchorPair( const TMATCH::COMPONENT_MATCHES& aMatches,
                                                                   const KIID&                      aAnchor )
 {
     auto it = std::ranges::find_if( aMatches, [&]( const auto& aPair ) { return aPair.first->m_Uuid == aAnchor; } );
-    return it != aMatches.end() ? *it : *aMatches.begin();
+    return it != aMatches.end() ? *it : firstPair( aMatches );
 }
 
 
@@ -2512,7 +2530,7 @@ int MULTICHANNEL_TOOL::RepeatLayout( const TOOL_EVENT& aEvent, RULE_AREA& aRefAr
         && aTargetArea.m_sourceType == PLACEMENT_SOURCE_T::GROUP_PLACEMENT && aOptions.m_anchor == niluuid )
     {
         if( !compat.m_matchingComponents.empty() )
-            aOptions.m_anchor = compat.m_matchingComponents.begin()->first->m_Uuid;
+            aOptions.m_anchor = firstPair( compat.m_matchingComponents ).first->m_Uuid;
     }
 
     copyRuleAreaContents( &aRefArea, &aTargetArea, &commit, aOptions, compat );
@@ -3127,7 +3145,6 @@ void MULTICHANNEL_TOOL::copyRuleAreaContents( RULE_AREA* aRefArea, RULE_AREA* aT
             repeatedOutline( aRefArea, aTargetArea, aOpts.m_anchor, aCompatData.m_matchingComponents, disp, rot );
 
     // Reference net to the net of the first matching target pad, built once for all copied items
-    const bool         hasMatches = !aCompatData.m_matchingComponents.empty();
     std::map<int, int> netMap;
 
     for( const auto& [refFP, targetFP] : aCompatData.m_matchingComponents )
@@ -3143,6 +3160,16 @@ void MULTICHANNEL_TOOL::copyRuleAreaContents( RULE_AREA* aRefArea, RULE_AREA* aT
                 netMap.emplace( refPad->GetNetCode(), targetPads[0]->GetNetCode() );
         }
     }
+
+    auto assignCopiedNet = [&]( BOARD_CONNECTED_ITEM* aRef, BOARD_CONNECTED_ITEM* aCopy )
+    {
+        auto it = netMap.find( aRef->GetNetCode() );
+
+        if( it != netMap.end() )
+            aCopy->SetNetCode( it->second );
+        else if( aCompatData.m_matchingComponents.empty() || aRefArea->m_temporaryNets.contains( aRef->GetNet() ) )
+            aCopy->SetNetCode( 0 );
+    };
 
     SHAPE_POLY_SET refPoly;
     refPoly.AddOutline( aRefArea->m_zone->Outline()->COutline( 0 ) );
@@ -3334,6 +3361,60 @@ void MULTICHANNEL_TOOL::copyRuleAreaContents( RULE_AREA* aRefArea, RULE_AREA* aT
             aCommit->Remove( item );
         }
 
+        // Every target shares the commit, so copies staged for another target count as copper too
+        std::vector<std::pair<BOX2I, BOARD_CONNECTED_ITEM*>> copper;
+
+        auto touchesOtherNet =
+                [&]( BOARD_CONNECTED_ITEM* aCopy )
+                {
+                    if( copper.empty() )
+                    {
+                        std::set<EDA_ITEM*> removed;
+
+                        for( const auto& [staged, change] : aCommit->StagedItems() )
+                        {
+                            BOARD_CONNECTED_ITEM* bci = dynamic_cast<BOARD_CONNECTED_ITEM*>( staged );
+
+                            if( ( change & CHT_TYPE ) == CHT_REMOVE )
+                                removed.insert( staged );
+                            else if( bci && ( change & CHT_TYPE ) == CHT_ADD )
+                                copper.emplace_back( bci->GetBoundingBox(), bci );
+                        }
+
+                        for( PCB_TRACK* track : board()->Tracks() )
+                        {
+                            if( !removed.contains( track ) )
+                                copper.emplace_back( track->GetBoundingBox(), track );
+                        }
+
+                        for( FOOTPRINT* fp : board()->Footprints() )
+                        {
+                            for( PAD* pad : fp->Pads() )
+                                copper.emplace_back( pad->GetBoundingBox(), pad );
+                        }
+                    }
+
+                    const BOX2I box = aCopy->GetBoundingBox();
+
+                    for( const auto& [otherBox, other] : copper )
+                    {
+                        if( other->GetNetCode() == aCopy->GetNetCode() || !box.Intersects( otherBox ) )
+                            continue;
+
+                        for( PCB_LAYER_ID layer : aCopy->GetLayerSet().CuStack() )
+                        {
+                            if( other->IsOnLayer( layer )
+                                && aCopy->GetEffectiveShape( layer )->Collide(
+                                        other->GetEffectiveShape( layer ).get() ) )
+                            {
+                                return true;
+                            }
+                        }
+                    }
+
+                    return false;
+                };
+
         for( BOARD_CONNECTED_ITEM* item : refRouting )
         {
             // Never copy pads as part of routing copy.
@@ -3354,11 +3435,19 @@ void MULTICHANNEL_TOOL::copyRuleAreaContents( RULE_AREA* aRefArea, RULE_AREA* aT
 
             BOARD_CONNECTED_ITEM* copied = static_cast<BOARD_CONNECTED_ITEM*>( item->Duplicate( false ) );
 
-            fixupNet( item, copied, hasMatches, netMap );
-            fixupParentGroup( item, copied );
-
+            assignCopiedNet( item, copied );
             copied->Rotate( VECTOR2( 0, 0 ), rot );
             copied->Move( disp );
+
+            // Routing reaching past the area must not short the channel to a neighbour's copper
+            if( !copied->HitTest( newTargetOutline, true ) && touchesOtherNet( copied ) )
+            {
+                delete copied;
+                continue;
+            }
+
+            fixupParentGroup( item, copied );
+
             aCompatData.m_groupableItems.insert( copied );
             aCommit->Add( copied );
         }
@@ -3470,7 +3559,7 @@ void MULTICHANNEL_TOOL::copyRuleAreaContents( RULE_AREA* aRefArea, RULE_AREA* aT
                         child->ClearFlags();
 
                         if( BOARD_CONNECTED_ITEM* bci = dynamic_cast<BOARD_CONNECTED_ITEM*>( child ) )
-                            fixupNet( bci, bci, hasMatches, netMap );
+                            assignCopiedNet( bci, bci );
 
                         aCommit->Add( child );
                     },
@@ -3564,7 +3653,7 @@ void MULTICHANNEL_TOOL::copyRuleAreaContents( RULE_AREA* aRefArea, RULE_AREA* aT
                 }
 
                 ZONE* targetZone = static_cast<ZONE*>( item->Duplicate( false ) );
-                fixupNet( zone, targetZone, hasMatches, netMap );
+                assignCopiedNet( zone, targetZone );
 
                 copied = targetZone;
             }
@@ -3803,28 +3892,6 @@ void MULTICHANNEL_TOOL::copyRuleAreaContents( RULE_AREA* aRefArea, RULE_AREA* aT
     aTargetArea->m_zone->UnHatchBorder();
     aTargetArea->m_zone->HatchBorder();
 }
-
-/**
- * @brief Attempts to make sure copied items are assigned the right net
- *
- */
-void MULTICHANNEL_TOOL::fixupNet( BOARD_CONNECTED_ITEM* aRef, BOARD_CONNECTED_ITEM* aTarget,
-                                  bool aHasMatches,
-                                  const std::map<int, int>& aNetMap )
-{
-    // Copy as no-net.
-    if( !aHasMatches )
-    {
-        aTarget->SetNetCode( 0 );
-        return;
-    }
-
-    auto it = aNetMap.find( aRef->GetNetCode() );
-
-    if( it != aNetMap.end() )
-        aTarget->SetNetCode( it->second );
-}
-
 
 std::vector<NETINFO_ITEM*> MULTICHANNEL_TOOL::IsolateDesignBlockAutoNets( BOARD*                      aBoard,
                                                                           const std::set<FOOTPRINT*>& aFootprints,

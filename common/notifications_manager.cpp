@@ -19,7 +19,6 @@
  */
 
 #include <wx/filename.h>
-#include <wx/frame.h>
 #include <wx/hyperlink.h>
 #include <wx/panel.h>
 #include <wx/scrolwin.h>
@@ -27,12 +26,12 @@
 #include <wx/settings.h>
 #include <wx/stattext.h>
 #include <wx/string.h>
-#include <wx/time.h>
 
 #include <paths.h>
 
 #include <notifications_manager.h>
 #include <widgets/kistatusbar.h>
+#include <widgets/kistatusbar_popup.h>
 #include <widgets/ui_common.h>
 
 #include <algorithm>
@@ -45,13 +44,12 @@
 
 #include <algorithm>
 #include <fstream>
+#include <list>
 #include <map>
 #include <optional>
 #include <tuple>
 #include <vector>
 
-
-static long long g_last_closed_timer = 0;
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE( NOTIFICATION, title, description, href, key, date )
 
@@ -80,7 +78,11 @@ public:
         mainSizer->Add( m_stTitle, 0, wxALL | wxEXPAND, 1 );
 
         m_stDescription = new wxStaticText( this, wxID_ANY, aNoti->description );
-        m_stDescription->Wrap( -1 );
+
+        // Leave room for the borders and a scrollbar that may appear later
+        int margin = FromDIP( 8 ) + wxSystemSettings::GetMetric( wxSYS_VSCROLL_X, aParent );
+
+        m_stDescription->Wrap( std::max( FromDIP( 100 ), aParent->GetClientSize().x - margin ) );
         mainSizer->Add( m_stDescription, 0, wxALL | wxEXPAND, 1 );
 
         wxBoxSizer* tailSizer;
@@ -103,6 +105,9 @@ public:
         m_hlDismiss->Bind( wxEVT_HYPERLINK, &NOTIFICATION_PANEL::onDismiss, this );
 
         SetSizer( mainSizer );
+
+        // Grow past the default height when the description wraps
+        SetMinSize( wxSize( -1, std::max( GetMinSize().y, mainSizer->GetMinSize().y ) ) );
         Layout();
     }
 
@@ -146,16 +151,13 @@ private:
 };
 
 
-class NOTIFICATIONS_LIST : public wxFrame
+class NOTIFICATIONS_LIST : public KISTATUSBAR_POPUP
 {
 public:
-    NOTIFICATIONS_LIST( NOTIFICATIONS_MANAGER* aManager, wxWindow* parent, const wxPoint& pos ) :
-            wxFrame( parent, wxID_ANY, _( "Notifications" ), pos, wxSize( 300, 150 ),
-                     wxFRAME_NO_TASKBAR | wxBORDER_SIMPLE ),
+    NOTIFICATIONS_LIST( NOTIFICATIONS_MANAGER* aManager, wxWindow* parent ) :
+            KISTATUSBAR_POPUP( parent ),
             m_manager( aManager )
     {
-        SetSizeHints( wxDefaultSize, wxDefaultSize );
-
         wxBoxSizer* bSizer1;
         bSizer1 = new wxBoxSizer( wxVERTICAL );
 
@@ -181,39 +183,8 @@ public:
         m_noNotificationsText->Wrap( -1 );
         m_contentSizer->Add( m_noNotificationsText, 1, wxALL | wxEXPAND, 5 );
 
-        Bind( wxEVT_KILL_FOCUS, &NOTIFICATIONS_LIST::onFocusLoss, this );
-        m_scrolledWindow->Bind( wxEVT_KILL_FOCUS, &NOTIFICATIONS_LIST::onFocusLoss, this );
-
         SetSizer( bSizer1 );
         Layout();
-
-        SetFocus();
-    }
-
-
-    ~NOTIFICATIONS_LIST()
-    {
-        // Unbind focus handlers before base class destructors run. GTK fires focus-out signals
-        // during window teardown, which would invoke onFocusLoss through a partially-destroyed
-        // object and crash in the wxWidgets event handler chain.
-        Unbind( wxEVT_KILL_FOCUS, &NOTIFICATIONS_LIST::onFocusLoss, this );
-        m_scrolledWindow->Unbind( wxEVT_KILL_FOCUS, &NOTIFICATIONS_LIST::onFocusLoss, this );
-    }
-
-
-    void onFocusLoss( wxFocusEvent& aEvent )
-    {
-        if( IsDescendant( aEvent.GetWindow() ) )
-        {
-            // Child (such as the hyperlink texts) got focus
-        }
-        else
-        {
-            Close( true );
-            g_last_closed_timer = wxGetLocalTimeMillis().GetValue();
-        }
-
-        aEvent.Skip();
     }
 
 
@@ -286,7 +257,7 @@ void NOTIFICATIONS_MANAGER::Load()
     {
         saved_json_stream >> saved_json;
 
-        m_notifications = saved_json.get<std::vector<NOTIFICATION>>();
+        m_notifications = saved_json.get<std::list<NOTIFICATION>>();
     }
     catch( std::exception& )
     {
@@ -325,25 +296,26 @@ void NOTIFICATIONS_MANAGER::CreateOrUpdate( const wxString& aKey,
                                 return noti.key == aKey;
                             } );
 
+    NOTIFICATION* noti = nullptr;
+
     if( it != m_notifications.end() )
     {
-        NOTIFICATION& noti = *it;
-
-        noti.title = aTitle;
-        noti.description = aDescription;
-        noti.href = aHref;
+        noti = &*it;
+        noti->title = aTitle;
+        noti->description = aDescription;
+        noti->href = aHref;
     }
     else
     {
-        m_notifications.emplace_back( NOTIFICATION{ aTitle, aDescription, aHref,
-                                                    aKey, wxEmptyString } );
+        noti = &m_notifications.emplace_back( NOTIFICATION{ aTitle, aDescription, aHref,
+                                                            aKey, wxEmptyString } );
     }
 
-    if( m_shownDialogs.size() > 0 )
+    // Replace an updated notification's panel rather than add a second one
+    for( NOTIFICATIONS_LIST* list : m_shownDialogs )
     {
-        // update dialogs
-        for( NOTIFICATIONS_LIST* list : m_shownDialogs )
-            list->Add( &m_notifications.back() );
+        list->Remove( noti );
+        list->Add( noti );
     }
 
     for( KISTATUSBAR* statusBar : m_statusBars )
@@ -381,13 +353,12 @@ void NOTIFICATIONS_MANAGER::Remove( const wxString& aKey )
 }
 
 
-void NOTIFICATIONS_MANAGER::onListWindowClosed( wxCloseEvent& aEvent )
+void NOTIFICATIONS_MANAGER::onListWindowDestroyed( wxWindowDestroyEvent& aEvent )
 {
-    NOTIFICATIONS_LIST* evtWindow = dynamic_cast<NOTIFICATIONS_LIST*>( aEvent.GetEventObject() );
-
+    // dynamic_cast fails during base destruction so compare the upcast address
     std::erase_if( m_shownDialogs, [&]( NOTIFICATIONS_LIST* dialog )
                                     {
-                                        return dialog == evtWindow;
+                                        return static_cast<wxObject*>( dialog ) == aEvent.GetEventObject();
                                     } );
 
     aEvent.Skip();
@@ -396,30 +367,19 @@ void NOTIFICATIONS_MANAGER::onListWindowClosed( wxCloseEvent& aEvent )
 
 void NOTIFICATIONS_MANAGER::ShowList( wxWindow* aParent, wxPoint aPos )
 {
-    // Debounce clicking on the icon with a list already showing.  The button will get focus
-    // first, which will cause a focus-loss on the list (thereby closing it), and then we'd open
-    // it again without this guard.
-    if( wxGetLocalTimeMillis().GetValue() - g_last_closed_timer < 300 )
-    {
-        g_last_closed_timer = 0;
+    if( KISTATUSBAR_POPUP::IsDismissingClick( typeid( NOTIFICATIONS_LIST ) ) )
         return;
-    }
 
-    NOTIFICATIONS_LIST* list = new NOTIFICATIONS_LIST( this, aParent, aPos );
+    NOTIFICATIONS_LIST* list = new NOTIFICATIONS_LIST( this, aParent );
 
     for( NOTIFICATION& job : m_notifications )
         list->Add( &job );
 
     m_shownDialogs.push_back( list );
 
-    list->Bind( wxEVT_CLOSE_WINDOW, &NOTIFICATIONS_MANAGER::onListWindowClosed, this );
+    list->Bind( wxEVT_DESTROY, &NOTIFICATIONS_MANAGER::onListWindowDestroyed, this );
 
-    // correct the position
-    wxSize windowSize = list->GetSize();
-    list->SetPosition( aPos - windowSize );
-
-    list->Show();
-    KIPLATFORM::UI::ForceFocus( list );
+    list->PopupAt( aPos );
 }
 
 

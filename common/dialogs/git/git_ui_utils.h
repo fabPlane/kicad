@@ -21,10 +21,12 @@
 #define GIT_UI_UTILS_H
 
 #include <mutex>
+#include <git/kigit_action_lock.h>
 #include <vector>
 
 class KIGIT_COMMON;
 struct KIGIT_BRANCH_INFO;
+class WX_SPLITTER_WINDOW;
 class wxButton;
 class wxDateTime;
 class wxListCtrl;
@@ -40,11 +42,11 @@ void ShowBusyMessage( wxWindow* aParent );
 
 /// Try the action lock and show a busy message if it is unavailable.
 /// UI thread only. Check owns_lock() before using the repository.
-[[nodiscard]] std::unique_lock<std::mutex> TryLockAction( KIGIT_COMMON& aCommon, wxWindow* aParent );
+[[nodiscard]] KIGIT::ACTION_LOCK TryLockAction( KIGIT_COMMON& aCommon, wxWindow* aParent );
 
 /// TryLockAction that first waits a moment for a status read or fetch to let go. For applying
 /// what the user has already typed, which the busy message would throw away.
-[[nodiscard]] std::unique_lock<std::mutex> WaitForActionLock( KIGIT_COMMON& aCommon, wxWindow* aParent );
+[[nodiscard]] KIGIT::ACTION_LOCK WaitForActionLock( KIGIT_COMMON& aCommon, wxWindow* aParent );
 
 /// Put the current branch first, then local and remote branches with the newest tips first.
 /// Use the name to break ties. Callers can choose a different order.
@@ -56,6 +58,10 @@ wxString RelativeDate( const wxDateTime& aWhen, const wxDateTime& aNow );
 
 /// Close a splitter's second pane, keeping the sash where the user left it for next time.
 void UnsplitKeepingSash( wxSplitterWindow* aSplitter, wxWindow* aPane, int& aSashPos );
+
+/// Keep a split detail pane at the width its controls need, against both a narrow window and a
+/// dragged sash. Call while the pane is split and every control in it is shown.
+void KeepDetailWidth( WX_SPLITTER_WINDOW* aSplitter );
 
 /// Paint a button's text the diff's red, for one that throws something away.
 void MarkDestructive( wxButton* aButton );

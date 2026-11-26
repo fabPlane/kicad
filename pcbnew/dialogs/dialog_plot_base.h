@@ -1,5 +1,5 @@
 ///////////////////////////////////////////////////////////////////////////
-// C++ code generated with wxFormBuilder (version 4.2.1-0-g80c4cb6a-dirty)
+// C++ code generated with wxFormBuilder (version 4.2.1-0-g80c4cb6)
 // http://www.wxformbuilder.org/
 //
 // PLEASE DO *NOT* EDIT THIS FILE!
@@ -30,8 +30,8 @@ class WX_HTML_REPORT_PANEL;
 #include <wx/icon.h>
 #include <wx/button.h>
 #include <wx/checklst.h>
-#include <wx/statbox.h>
 #include <wx/checkbox.h>
+#include <wx/statbox.h>
 #include <wx/radiobut.h>
 #include <wx/gbsizer.h>
 #include <wx/statbmp.h>
@@ -65,6 +65,7 @@ class DIALOG_PLOT_BASE : public DIALOG_SHIM
 		wxBoxSizer* bmiddleSizer;
 		wxStaticBoxSizer* m_LayersSizer;
 		wxCheckListBox* m_layerCheckListBox;
+		wxCheckBox* m_allCopperLayers;
 		wxBoxSizer* m_PlotOptionsSizer;
 		wxCheckBox* m_plotSheetRef;
 		wxCheckBox* m_subtractMaskFromSilk;
@@ -74,10 +75,14 @@ class DIALOG_PLOT_BASE : public DIALOG_SHIM
 		wxCheckBox* m_sketchPadsOnFabLayers;
 		wxCheckBox* m_plotPadNumbers;
 		wxCheckBox* m_zoneFillCheck;
+		wxCheckBox* m_plotFootprintValues;
+		wxCheckBox* m_plotRefDes;
 		wxStaticText* drillMarksLabel;
 		wxChoice* m_drillShapeOpt;
 		wxStaticText* scalingLabel;
 		wxChoice* m_scaleOpt;
+		wxStaticText* m_colorThemeLabel;
+		wxChoice* m_colorTheme;
 		wxCheckBox* m_useAuxOriginCheckBox;
 		wxCheckBox* m_plotMirrorOpt;
 		wxCheckBox* m_plotPSNegativeOpt;
@@ -142,11 +147,14 @@ class DIALOG_PLOT_BASE : public DIALOG_SHIM
 		virtual void SetPlotFormat( wxCommandEvent& event ) { event.Skip(); }
 		virtual void onOutputDirectoryBrowseClicked( wxCommandEvent& event ) { event.Skip(); }
 		virtual void onOpenOutputDirectory( wxCommandEvent& event ) { event.Skip(); }
+		virtual void onLayerToggled( wxCommandEvent& event ) { event.Skip(); }
+		virtual void onAllCopperLayers( wxCommandEvent& event ) { event.Skip(); }
 		virtual void onDNPCheckbox( wxCommandEvent& event ) { event.Skip(); }
 		virtual void onSketchPads( wxCommandEvent& event ) { event.Skip(); }
 		virtual void onBoardSetup( wxHyperlinkEvent& event ) { event.Skip(); }
 		virtual void OnGerberX2Checked( wxCommandEvent& event ) { event.Skip(); }
 		virtual void OnChangeDXFPlotMode( wxCommandEvent& event ) { event.Skip(); }
+		virtual void onSVGColorChoice( wxCommandEvent& event ) { event.Skip(); }
 		virtual void onPDFColorChoice( wxCommandEvent& event ) { event.Skip(); }
 		virtual void onRunDRC( wxCommandEvent& event ) { event.Skip(); }
 		virtual void CreateDrillFile( wxCommandEvent& event ) { event.Skip(); }

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <vector>
 
 #include <qa_utils/wx_utils/unit_test_utils.h>
@@ -277,6 +278,63 @@ BOOST_AUTO_TEST_CASE( RotateRestoresParallel )
     // constraint stays satisfiable.
     BOOST_CHECK_LE( parallelErr(), 0.05 );
     BOOST_CHECK( DiagnoseBoardConstraints( &b ).conflicting.empty() );
+}
+
+// A reference constraint leaves no driving residual to catch a diverged solve, so the state itself must
+BOOST_AUTO_TEST_CASE( NonFiniteStateIsNeverSatisfied )
+{
+    BOARD b;
+    auto* s = addSegment( b, { 0, 0 }, { 10 * MM, 2 * MM } );
+    PCB_CONSTRAINT* reference = addConstraint( b, PCB_CONSTRAINT_TYPE::HORIZONTAL, { whole( s ) } );
+    reference->SetDriving( false );
+
+    BOARD_CONSTRAINT_ADAPTER adapter;
+    BOOST_REQUIRE( adapter.Build( { s }, { reference } ) );
+
+    BOARD_CONSTRAINT_ADAPTER::SNAPSHOT state = adapter.Snapshot();
+    std::ranges::fill( state, std::numeric_limits<double>::quiet_NaN() );
+    BOOST_REQUIRE( adapter.Restore( state ) );
+
+    BOOST_CHECK( !adapter.CurrentRelationsSatisfied() );
+}
+
+// A contradiction satisfied by collapsing a segment loses the length derivative, and the solve must stop there
+BOOST_AUTO_TEST_CASE( ContradictionLeavesFiniteGeometry )
+{
+    BOARD b;
+    auto* locked = addSegment( b, { 0, 0 }, { 10 * MM, 0 } );
+    auto* free = addSegment( b, { 0, 5 * MM }, { 8 * MM, 3 * MM } );
+    locked->SetLocked( true );
+    author( b, PCB_CONSTRAINT_TYPE::PARALLEL, { whole( locked ), whole( free ) } );
+    addConstraint( b, PCB_CONSTRAINT_TYPE::PERPENDICULAR, { whole( locked ), whole( free ) } );
+
+    // Authoring the second relation solves with the first member's start pinned where it is
+    std::vector<PCB_CONSTRAINT*> constraints( b.Constraints().begin(), b.Constraints().end() );
+    BOARD_CONSTRAINT_ADAPTER     adapter;
+    BOOST_REQUIRE( adapter.Build( { locked, free }, constraints ) );
+    adapter.Solve( { locked->m_Uuid, CONSTRAINT_ANCHOR::START }, locked->GetStart(), true );
+
+    for( double param : adapter.Snapshot() )
+        BOOST_CHECK( std::isfinite( param ) );
+}
+
+// The perpendicular contradicts the parallel, and the solve that meets a collapse must not move either segment
+BOOST_AUTO_TEST_CASE( ContradictoryAuthoringLeavesTheBoard )
+{
+    BOARD b;
+    auto* s1 = addSegment( b, { 0, 0 }, { 10 * MM, 0 } );
+    auto* s2 = addSegment( b, { 0, 5 * MM }, { 8 * MM, 3 * MM } );
+    author( b, PCB_CONSTRAINT_TYPE::PARALLEL, { whole( s1 ), whole( s2 ) } );
+
+    const VECTOR2I s1End = s1->GetEnd();
+    const VECTOR2I s2Start = s2->GetStart();
+    const VECTOR2I s2End = s2->GetEnd();
+
+    author( b, PCB_CONSTRAINT_TYPE::PERPENDICULAR, { whole( s1 ), whole( s2 ) } );
+
+    BOOST_CHECK_EQUAL( s1->GetEnd(), s1End );
+    BOOST_CHECK_EQUAL( s2->GetStart(), s2Start );
+    BOOST_CHECK_EQUAL( s2->GetEnd(), s2End );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

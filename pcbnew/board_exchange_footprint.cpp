@@ -279,6 +279,23 @@ void BOARD::ExchangeFootprint( FOOTPRINT* aExisting, FOOTPRINT* aNew, BOARD_COMM
         newPad->SetPinFunction( oldPad->GetPinFunction() );
         newPad->SetPinType( oldPad->GetPinType() );
 
+        if( !aResetClearanceOverrides )
+        {
+            newPad->SetLocalClearance( oldPad->GetLocalClearance() );
+            newPad->SetLocalSolderMaskMargin( oldPad->GetLocalSolderMaskMargin() );
+            newPad->SetLocalSolderPasteMargin( oldPad->GetLocalSolderPasteMargin() );
+            newPad->SetLocalSolderPasteMarginRatio( oldPad->GetLocalSolderPasteMarginRatio() );
+
+            newPad->Padstack().ForEachUniqueLayer(
+                    [&]( PCB_LAYER_ID layer )
+                    {
+                        newPad->Padstack().ZoneConnection( layer ) = oldPad->Padstack().ZoneConnection( layer );
+                        newPad->Padstack().ThermalSpokeAngle( layer ) = oldPad->Padstack().ThermalSpokeAngle( layer );
+                        newPad->Padstack().ThermalSpokeWidth( layer ) = oldPad->Padstack().ThermalSpokeWidth( layer );
+                        newPad->Padstack().ThermalGap( layer ) = oldPad->Padstack().ThermalGap( layer );
+                    } );
+        }
+
         if( newPad->IsOnCopperLayer() )
             newPad->SetNetCode( oldPad->GetNetCode() );
         else
@@ -572,7 +589,9 @@ void BOARD::ExchangeFootprint( FOOTPRINT* aExisting, FOOTPRINT* aNew, BOARD_COMM
         }
         else
         {
+            // The old footprint is still on the board, so its field's uuid is not reused
             newField = new PCB_FIELD( *oldField );
+            newField->ResetUuidDirect();
             handledFields.insert( newField );
             aNew->Add( newField );
         }
@@ -675,6 +694,8 @@ void BOARD::ExchangeFootprint( FOOTPRINT* aExisting, FOOTPRINT* aNew, BOARD_COMM
     aNew->SetSheetname( aExisting->GetSheetname() );
     aNew->SetFilters( aExisting->GetFilters() );
     aNew->SetStaticComponentClass( aExisting->GetStaticComponentClass() );
+    aNew->SetVariants( aExisting->GetVariants() );
+    aNew->SetUnitInfo( aExisting->GetUnitInfo() );
 
     if( *aUpdated == false )
     {

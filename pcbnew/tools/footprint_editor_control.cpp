@@ -19,6 +19,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <dialogs/dialog_export_older_version.h>
+#include <jobs/job_fp_downgrade.h>
 #include "footprint_editor_control.h"
 
 #include <memory>
@@ -63,6 +65,8 @@
 #include <widgets/appearance_controls.h>
 #include <dialogs/dialog_kicad_diff.h>
 #include <diff_merge/fp_lib_differ.h>
+#include <diff_merge/pcb_diff_canvas_context.h>
+#include <diff_merge/pcb_geometry_extractor.h>
 #include <libraries/library_manager.h>
 #include <wx/dirdlg.h>
 
@@ -623,6 +627,52 @@ int FOOTPRINT_EDITOR_CONTROL::ImportFootprint( const TOOL_EVENT& aEvent )
 }
 
 
+int FOOTPRINT_EDITOR_CONTROL::ExportForOlderVersion( const TOOL_EVENT& aEvent )
+{
+    const wxString title = _( "Export for Older KiCad Version" );
+    wxString       libName = m_frame->GetTargetFPID().GetLibNickname();
+
+    LIBRARY_MANAGER&        manager = Pgm().GetLibraryManager();
+    std::optional<wxString> optUri = manager.GetFullURI( LIBRARY_TABLE_TYPE::FOOTPRINT, libName, true );
+
+    if( !optUri )
+    {
+        wxMessageBox( _( "Select a library first." ), title, wxOK | wxICON_ERROR, m_frame );
+        return 0;
+    }
+
+    const wxString library = *optUri;
+
+    // The export reads the files on disk, which the editor has not written yet.
+    if( m_frame->IsContentModified()
+        && wxMessageBox( _( "A library editor has unsaved changes. The export uses the last saved "
+                            "library files. Continue?" ),
+                         title, wxYES_NO | wxICON_WARNING, m_frame )
+                   != wxYES )
+    {
+        return 0;
+    }
+
+    RunExportForOlderVersion( m_frame,
+                              [&]( const DOWNGRADE_EXPORT_PASS& aPass, DOWNGRADE_EXPORT_RESULT& aResult ) -> bool
+                              {
+                                  JOB_FP_DOWNGRADE job;
+                                  job.m_libraryPath = library;
+
+                                  if( !aPass.m_dryRun )
+                                  {
+                                      wxFileName out( aPass.m_folder, wxEmptyString );
+                                      out.AppendDir( wxFileName( library ).GetFullName() );
+                                      job.m_outputLibraryPath = out.GetPath();
+                                  }
+
+                                  return RunDowngradeJob( m_frame->Kiway(), KIWAY::FACE_PCB, job, aPass, aResult );
+                              } );
+
+    return 0;
+}
+
+
 int FOOTPRINT_EDITOR_CONTROL::ExportFootprint( const TOOL_EVENT& aEvent )
 {
     if( FOOTPRINT* fp = m_frame->GetBoard()->GetFirstFootprint() )
@@ -767,7 +817,18 @@ int FOOTPRINT_EDITOR_CONTROL::CompareLibraryWithFile( const TOOL_EVENT& aEvent )
     KICAD_DIFF::FP_LIB_DIFFER  differ( beforeMap, afterMap, otherPath );
     KICAD_DIFF::DOCUMENT_DIFF  result = differ.Diff();
 
-    DIALOG_KICAD_DIFF dlgDiff( m_frame, currentPath, otherPath, result );
+    const KICAD_DIFF::DIFF_COLOR_THEME theme;
+
+    DIALOG_KICAD_DIFF dlgDiff( m_frame, currentPath, otherPath, result,
+                               KICAD_DIFF::ExtractFootprintGeometry( beforeMap, theme.reference ),
+                               KICAD_DIFF::ExtractFootprintGeometry( afterMap, theme.comparison ) );
+
+    dlgDiff.DrawChosenLibraryItem(
+            [&]( WIDGET_DIFF_CANVAS& aCanvas, const wxString& aName )
+            {
+                KICAD_DIFF::ShowFootprintPair( aCanvas, beforeMap, afterMap, aName );
+            } );
+
     dlgDiff.ShowModal();
 
     return 0;
@@ -1236,6 +1297,7 @@ void FOOTPRINT_EDITOR_CONTROL::setTransitions()
     Go( &FOOTPRINT_EDITOR_CONTROL::PasteFootprint,       PCB_ACTIONS::pasteFootprint.MakeEvent() );
 
     Go( &FOOTPRINT_EDITOR_CONTROL::ImportFootprint,      PCB_ACTIONS::importFootprint.MakeEvent() );
+    Go( &FOOTPRINT_EDITOR_CONTROL::ExportForOlderVersion, ACTIONS::exportForOlderVersion.MakeEvent() );
     Go( &FOOTPRINT_EDITOR_CONTROL::ExportFootprint,      PCB_ACTIONS::exportFootprint.MakeEvent() );
     Go( &FOOTPRINT_EDITOR_CONTROL::ExportFootprintAsSVG, PCB_ACTIONS::exportFootprintAsSVG.MakeEvent() );
     Go( &FOOTPRINT_EDITOR_CONTROL::CompareLibraryWithFile,

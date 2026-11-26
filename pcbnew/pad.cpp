@@ -49,6 +49,7 @@
 #include <convert_basic_shapes_to_polygon.h>
 #include <widgets/msgpanel.h>
 #include <pcb_painter.h>
+#include <pcbnew_settings.h>
 #include <properties/property_validators.h>
 #include <properties/property.h>
 #include <properties/property_mgr.h>
@@ -62,7 +63,6 @@
 #include <macros.h>
 #include <magic_enum.hpp>
 #include "kiface_base.h"
-#include "pcbnew_settings.h"
 
 #include <pcb_group.h>
 #include <gal/graphics_abstraction_layer.h>
@@ -441,7 +441,9 @@ void PAD::Serialize( google::protobuf::Any &aContainer ) const
     }
 
     kiapi::common::PackCustomProperties( pad.mutable_custom_properties(), *this );
-    aContainer.PackFrom( pad );
+
+    if( !aContainer.PackFrom( pad ) )
+        wxFAIL_MSG( wxT( "Failed to pack PAD" ) );
 }
 
 
@@ -458,13 +460,16 @@ bool PAD::Deserialize( const google::protobuf::Any &aContainer )
     SetLocked( pad.locked() == kiapi::common::types::LockedState::LS_LOCKED );
     SetAttribute( FromProtoEnum<PAD_ATTRIB>( pad.type() ) );
     SetNumber( wxString::FromUTF8( pad.number() ) );
-    SetPadToDieLength( pad.pad_to_die_length().value_nm() );
-    SetPadToDieDelay( pad.pad_to_die_delay().value_as() );
+    SetPadToDieLength( (int) pad.pad_to_die_length().value_nm() );
+    SetPadToDieDelay( (int) pad.pad_to_die_delay().value_as() );
     SetSimElectricalType( FromProtoEnum<PAD_SIM_ELECTRICAL_TYPE>( pad.sim_electrical_type() ) );
     SetProperty( FromProtoEnum<PAD_PROP>( pad.fab_property() ) );
 
     google::protobuf::Any padStackWrapper;
-    padStackWrapper.PackFrom( pad.pad_stack() );
+
+    if( !padStackWrapper.PackFrom( pad.pad_stack() ) )
+        wxFAIL_MSG( wxT( "Failed to pack PADSTACK" ) );
+
     m_padStack.Deserialize( padStackWrapper );
     SetOrientation( m_padStack.GetOrientation() );
 
@@ -663,11 +668,17 @@ PCB_LAYER_ID PAD::GetLayer() const
 
 PCB_LAYER_ID PAD::GetPrincipalLayer() const
 {
-    if( m_attribute == PAD_ATTRIB::SMD || m_attribute == PAD_ATTRIB::CONN || GetLayerSet().none() )
+    if( m_attribute == PAD_ATTRIB::SMD
+         || m_attribute == PAD_ATTRIB::CONN
+         || m_attribute == PAD_ATTRIB::NON_COMPONENT
+         || GetLayerSet().none() )
+    {
         return m_layer;
+    }
     else
+    {
         return GetLayerSet().Seq().front();
-
+    }
 }
 
 
@@ -871,176 +882,37 @@ void PAD::SetPrimaryDrillEndLayer( PCB_LAYER_ID aLayer )
 
 bool PAD::IsBackdrilledOrPostMachined( PCB_LAYER_ID aLayer ) const
 {
-    if( !IsCopperLayer( aLayer ) )
-        return false;
+    return GetBackdrillOrPostMachiningKnockout( aLayer ) > 0;
+}
 
+
+bool PAD::HasCopperRemoved( PCB_LAYER_ID aLayer ) const
+{
+    int knockout = GetBackdrillOrPostMachiningKnockout( aLayer );
+
+    return knockout > 0 && knockout >= 2LL * GetBoundingRadius();
+}
+
+
+int PAD::GetBackdrillOrPostMachiningKnockout( PCB_LAYER_ID aLayer ) const
+{
     const BOARD* board = GetBoard();
 
-    if( !board )
-        return false;
+    if( !IsCopperLayer( aLayer ) || !board )
+        return 0;
 
-    // Check secondary drill (backdrill from top)
-    const PADSTACK::DRILL_PROPS& secondaryDrill = m_padStack.SecondaryDrill();
-
-    if( secondaryDrill.size.x > 0 && secondaryDrill.start != UNDEFINED_LAYER && secondaryDrill.end != UNDEFINED_LAYER )
-    {
-        // Secondary drill goes from start to end layer, removing copper on those layers
-        int startOrdinal = board->IsLayerEnabled( secondaryDrill.start )
-                ? board->IsLayerEnabled( F_Cu ) ? ( secondaryDrill.start == F_Cu ? 0
-                                                                                 : secondaryDrill.start / 2 + 1 )
-                                                 : secondaryDrill.start / 2
-                : -1;
-        int endOrdinal = board->IsLayerEnabled( secondaryDrill.end )
-                ? board->IsLayerEnabled( F_Cu ) ? ( secondaryDrill.end == B_Cu ? board->GetCopperLayerCount() - 1
-                                                                               : secondaryDrill.end / 2 + 1 )
-                                                : secondaryDrill.end / 2
-                : -1;
-        int layerOrdinal = board->IsLayerEnabled( aLayer )
-                ? board->IsLayerEnabled( F_Cu ) ? ( aLayer == F_Cu ? 0
-                                                                   : aLayer == B_Cu ? board->GetCopperLayerCount() - 1
-                                                                                    : aLayer / 2 + 1 )
-                                                : aLayer / 2
-                : -1;
-
-        if( layerOrdinal >= 0 && startOrdinal >= 0 && endOrdinal >= 0 )
-        {
-            if( startOrdinal > endOrdinal )
-                std::swap( startOrdinal, endOrdinal );
-
-            if( layerOrdinal >= startOrdinal && layerOrdinal <= endOrdinal )
-                return true;
-        }
-    }
-
-    // Check tertiary drill (backdrill from bottom)
-    const PADSTACK::DRILL_PROPS& tertiaryDrill = m_padStack.TertiaryDrill();
-
-    if( tertiaryDrill.size.x > 0 && tertiaryDrill.start != UNDEFINED_LAYER && tertiaryDrill.end != UNDEFINED_LAYER )
-    {
-        int startOrdinal = board->IsLayerEnabled( tertiaryDrill.start )
-                ? board->IsLayerEnabled( F_Cu ) ? ( tertiaryDrill.start == F_Cu ? 0
-                                                                                : tertiaryDrill.start / 2 + 1 )
-                                                : tertiaryDrill.start / 2
-                : -1;
-        int endOrdinal = board->IsLayerEnabled( tertiaryDrill.end )
-                ? board->IsLayerEnabled( F_Cu ) ? ( tertiaryDrill.end == B_Cu ? board->GetCopperLayerCount() - 1
-                                                                              : tertiaryDrill.end / 2 + 1 )
-                                                : tertiaryDrill.end / 2
-                : -1;
-        int layerOrdinal = board->IsLayerEnabled( aLayer )
-                ? board->IsLayerEnabled( F_Cu ) ? ( aLayer == F_Cu ? 0
-                                                                   : aLayer == B_Cu ? board->GetCopperLayerCount() - 1
-                                                                                    : aLayer / 2 + 1 )
-                                                : aLayer / 2
-                : -1;
-
-        if( layerOrdinal >= 0 && startOrdinal >= 0 && endOrdinal >= 0 )
-        {
-            if( startOrdinal > endOrdinal )
-                std::swap( startOrdinal, endOrdinal );
-
-            if( layerOrdinal >= startOrdinal && layerOrdinal <= endOrdinal )
-                return true;
-        }
-    }
-
-    // Check if the layer is affected by post-machining
-    if( GetPostMachiningKnockout( aLayer ) > 0 )
-        return true;
-
-    return false;
+    return m_padStack.MachiningKnockout( *board, aLayer );
 }
 
 
 int PAD::GetPostMachiningKnockout( PCB_LAYER_ID aLayer ) const
 {
-    if( !IsCopperLayer( aLayer ) )
-        return 0;
-
     const BOARD* board = GetBoard();
 
-    if( !board )
+    if( !IsCopperLayer( aLayer ) || !board )
         return 0;
 
-    const BOARD_STACKUP& stackup = board->GetDesignSettings().GetStackupDescriptor();
-
-    // Check front post-machining (counterbore/countersink from top)
-    const PADSTACK::POST_MACHINING_PROPS& frontPM = m_padStack.FrontPostMachining();
-
-    if( frontPM.mode.has_value() && *frontPM.mode != PAD_DRILL_POST_MACHINING_MODE::NOT_POST_MACHINED
-            && *frontPM.mode != PAD_DRILL_POST_MACHINING_MODE::UNKNOWN && frontPM.size > 0 )
-    {
-        int pmDepth = frontPM.depth;
-
-        // For countersink without explicit depth, calculate from diameter and angle
-        if( pmDepth <= 0 && *frontPM.mode == PAD_DRILL_POST_MACHINING_MODE::COUNTERSINK && frontPM.angle > 0 )
-        {
-            double halfAngleRad = ( frontPM.angle / 10.0 ) * M_PI / 180.0 / 2.0;
-            pmDepth = static_cast<int>( ( frontPM.size / 2.0 ) / tan( halfAngleRad ) );
-        }
-
-        if( pmDepth > 0 )
-        {
-            // Calculate distance from F_Cu to aLayer
-            int layerDist = stackup.GetLayerDistance( F_Cu, aLayer );
-
-            if( layerDist < pmDepth )
-            {
-                // For countersink, diameter decreases with depth
-                if( *frontPM.mode == PAD_DRILL_POST_MACHINING_MODE::COUNTERSINK && frontPM.angle > 0 )
-                {
-                    double halfAngleRad = ( frontPM.angle / 10.0 ) * M_PI / 180.0 / 2.0;
-                    int diameterAtLayer = frontPM.size - static_cast<int>( 2.0 * layerDist * tan( halfAngleRad ) );
-                    return std::max( 0, diameterAtLayer );
-                }
-                else
-                {
-                    // Counterbore - constant diameter
-                    return frontPM.size;
-                }
-            }
-        }
-    }
-
-    // Check back post-machining (counterbore/countersink from bottom)
-    const PADSTACK::POST_MACHINING_PROPS& backPM = m_padStack.BackPostMachining();
-
-    if( backPM.mode.has_value() && *backPM.mode != PAD_DRILL_POST_MACHINING_MODE::NOT_POST_MACHINED
-            && *backPM.mode != PAD_DRILL_POST_MACHINING_MODE::UNKNOWN && backPM.size > 0 )
-    {
-        int pmDepth = backPM.depth;
-
-        // For countersink without explicit depth, calculate from diameter and angle
-        if( pmDepth <= 0 && *backPM.mode == PAD_DRILL_POST_MACHINING_MODE::COUNTERSINK && backPM.angle > 0 )
-        {
-            double halfAngleRad = ( backPM.angle / 10.0 ) * M_PI / 180.0 / 2.0;
-            pmDepth = static_cast<int>( ( backPM.size / 2.0 ) / tan( halfAngleRad ) );
-        }
-
-        if( pmDepth > 0 )
-        {
-            // Calculate distance from B_Cu to aLayer
-            int layerDist = stackup.GetLayerDistance( B_Cu, aLayer );
-
-            if( layerDist < pmDepth )
-            {
-                // For countersink, diameter decreases with depth
-                if( *backPM.mode == PAD_DRILL_POST_MACHINING_MODE::COUNTERSINK && backPM.angle > 0 )
-                {
-                    double halfAngleRad = ( backPM.angle / 10.0 ) * M_PI / 180.0 / 2.0;
-                    int diameterAtLayer = backPM.size - static_cast<int>( 2.0 * layerDist * tan( halfAngleRad ) );
-                    return std::max( 0, diameterAtLayer );
-                }
-                else
-                {
-                    // Counterbore - constant diameter
-                    return backPM.size;
-                }
-            }
-        }
-    }
-
-    return 0;
+    return m_padStack.PostMachiningKnockout( board->GetDesignSettings().GetStackupDescriptor(), aLayer );
 }
 
 
@@ -1705,18 +1577,21 @@ void PAD::SetAttribute( PAD_ATTRIB aAttribute )
 
         case PAD_ATTRIB::SMD:
         case PAD_ATTRIB::CONN:
+        case PAD_ATTRIB::NON_COMPONENT:
         {
             // Trim down to no more than one copper layer
-            LSET copperLayers = layerMask & LSET::AllCuMask();
+            const LSET copperLayers = layerMask & LSET::AllCuMask();
 
             if( copperLayers.count() > 1 )
             {
                 layerMask &= ~LSET::AllCuMask();
 
                 if( copperLayers.test( B_Cu ) )
-                    layerMask.set( B_Cu );
+                    m_layer = B_Cu;
                 else
-                    layerMask.set( copperLayers.Seq().front() );
+                    m_layer = copperLayers.Seq().front();
+
+                layerMask.set( m_layer );
             }
 
             // No hole, so no drilling of any kind
@@ -1836,39 +1711,7 @@ void PAD::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
 
     SetFPRelativeOrientation( -GetFPRelativeOrientation() );
 
-    auto mirrorBitFlags = []( int& aBitfield, int a, int b )
-                          {
-                              bool temp = aBitfield & a;
-
-                              if( aBitfield & b )
-                                  aBitfield |= a;
-                              else
-                                  aBitfield &= ~a;
-
-                              if( temp )
-                                  aBitfield |= b;
-                              else
-                                  aBitfield &= ~b;
-                          };
-
-    Padstack().ForEachUniqueLayer(
-            [&]( PCB_LAYER_ID aLayer )
-            {
-                if( aFlipDirection == FLIP_DIRECTION::LEFT_RIGHT )
-                {
-                    mirrorBitFlags( m_padStack.ChamferPositions( aLayer ), RECT_CHAMFER_TOP_LEFT,
-                                    RECT_CHAMFER_TOP_RIGHT );
-                    mirrorBitFlags( m_padStack.ChamferPositions( aLayer ), RECT_CHAMFER_BOTTOM_LEFT,
-                                    RECT_CHAMFER_BOTTOM_RIGHT );
-                }
-                else
-                {
-                    mirrorBitFlags( m_padStack.ChamferPositions( aLayer ), RECT_CHAMFER_TOP_LEFT,
-                                    RECT_CHAMFER_BOTTOM_LEFT );
-                    mirrorBitFlags( m_padStack.ChamferPositions( aLayer ), RECT_CHAMFER_TOP_RIGHT,
-                                    RECT_CHAMFER_BOTTOM_RIGHT );
-                }
-            } );
+    mirrorChamferPositions( aFlipDirection );
 
     m_padStack.FlipLayers( GetBoard() );
 
@@ -1902,6 +1745,80 @@ void PAD::FlipPrimitives( FLIP_DIRECTION aFlipDirection )
             } );
 
     SetDirty();
+}
+
+
+void PAD::Mirror( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
+{
+    Mirror( MIRROR_AXIS( aCentre, aFlipDirection ) );
+}
+
+
+void PAD::Mirror( const SEG& aAxis )
+{
+    // Unlike Flip(), a mirror keeps the pad on its side, so only the geometry moves, which
+    // is relative to the pad's own origin.
+    const SEG       padXAxis( VECTOR2I( 0, 0 ), VECTOR2I( 1, 0 ) );
+    const EDA_ANGLE axisAngle = -EDA_ANGLE( aAxis.B - aAxis.A );
+
+    SetPosition( aAxis.ReflectPoint( GetPosition() ) );
+    SetOrientation( GetOrientation().Reflect( axisAngle ) );
+
+    mirrorChamferPositions( FLIP_DIRECTION::TOP_BOTTOM );
+
+    m_padStack.ForEachUniqueLayer(
+            [&]( PCB_LAYER_ID aLayer )
+            {
+                MIRROR( m_padStack.Offset( aLayer ), VECTOR2I{ 0, 0 }, FLIP_DIRECTION::TOP_BOTTOM );
+                MIRROR( m_padStack.TrapezoidDeltaSize( aLayer ), VECTOR2I{ 0, 0 }, FLIP_DIRECTION::TOP_BOTTOM );
+
+                for( const std::shared_ptr<PCB_SHAPE>& primitive : m_padStack.Primitives( aLayer ) )
+                {
+                    primitive->SetParent( this );
+                    primitive->Mirror( padXAxis );
+                }
+            } );
+
+    SetDirty();
+}
+
+
+void PAD::mirrorChamferPositions( FLIP_DIRECTION aFlipDirection )
+{
+    const auto mirrorBitFlags =
+            []( int& aBitfield, int a, int b )
+            {
+                bool temp = aBitfield & a;
+
+                if( aBitfield & b )
+                    aBitfield |= a;
+                else
+                    aBitfield &= ~a;
+
+                if( temp )
+                    aBitfield |= b;
+                else
+                    aBitfield &= ~b;
+            };
+
+    m_padStack.ForEachUniqueLayer(
+            [&]( PCB_LAYER_ID aLayer )
+            {
+                if( aFlipDirection == FLIP_DIRECTION::LEFT_RIGHT )
+                {
+                    mirrorBitFlags( m_padStack.ChamferPositions( aLayer ), RECT_CHAMFER_TOP_LEFT,
+                                    RECT_CHAMFER_TOP_RIGHT );
+                    mirrorBitFlags( m_padStack.ChamferPositions( aLayer ), RECT_CHAMFER_BOTTOM_LEFT,
+                                    RECT_CHAMFER_BOTTOM_RIGHT );
+                }
+                else
+                {
+                    mirrorBitFlags( m_padStack.ChamferPositions( aLayer ), RECT_CHAMFER_TOP_LEFT,
+                                    RECT_CHAMFER_BOTTOM_LEFT );
+                    mirrorBitFlags( m_padStack.ChamferPositions( aLayer ), RECT_CHAMFER_TOP_RIGHT,
+                                    RECT_CHAMFER_BOTTOM_RIGHT );
+                }
+            } );
 }
 
 
@@ -2208,9 +2125,9 @@ VECTOR2I PAD::GetSolderPasteMargin( PCB_LAYER_ID aLayer ) const
 }
 
 
-ZONE_CONNECTION PAD::GetZoneConnectionOverrides( wxString* aSource ) const
+ZONE_CONNECTION PAD::GetZoneConnectionOverrides( PCB_LAYER_ID aLayer, wxString* aSource ) const
 {
-    ZONE_CONNECTION connection = m_padStack.ZoneConnection().value_or( ZONE_CONNECTION::INHERITED );
+    ZONE_CONNECTION connection = m_padStack.ZoneConnection( aLayer ).value_or( ZONE_CONNECTION::INHERITED );
 
     if( connection != ZONE_CONNECTION::INHERITED )
     {
@@ -2228,21 +2145,21 @@ ZONE_CONNECTION PAD::GetZoneConnectionOverrides( wxString* aSource ) const
 }
 
 
-int PAD::GetLocalSpokeWidthOverride( wxString* aSource ) const
+int PAD::GetLocalSpokeWidthOverride( PCB_LAYER_ID aLayer, wxString* aSource ) const
 {
-    if( m_padStack.ThermalSpokeWidth().has_value() && aSource )
+    if( m_padStack.ThermalSpokeWidth( aLayer ).has_value() && aSource )
         *aSource = _( "pad" );
 
-    return m_padStack.ThermalSpokeWidth().value_or( 0 );
+    return m_padStack.ThermalSpokeWidth( aLayer ).value_or( 0 );
 }
 
 
-int PAD::GetLocalThermalGapOverride( wxString* aSource ) const
+int PAD::GetLocalThermalGapOverride( PCB_LAYER_ID aLayer, wxString* aSource ) const
 {
-    if( m_padStack.ThermalGap().has_value() && aSource )
+    if( m_padStack.ThermalGap( aLayer ).has_value() && aSource )
         *aSource = _( "pad" );
 
-    return GetLocalThermalGapOverride().value_or( 0 );
+    return GetLocalThermalGapOverride( aLayer ).value_or( 0 );
 }
 
 
@@ -2284,8 +2201,12 @@ void PAD::GetMsgPanelInfo( EDA_DRAW_FRAME* aFrame, std::vector<MSG_PANEL_ITEM>& 
             aList.emplace_back( _( "Status" ), _( "Locked" ) );
     }
 
-    if( GetAttribute() == PAD_ATTRIB::SMD || GetAttribute() == PAD_ATTRIB::CONN )
+    if( GetAttribute() == PAD_ATTRIB::SMD
+        || GetAttribute() == PAD_ATTRIB::CONN
+        || GetAttribute() == PAD_ATTRIB::NON_COMPONENT )
+    {
         aList.emplace_back( _( "Layer" ), LayerMaskDescribe() );
+    }
 
     if( aFrame->GetName() == FOOTPRINT_EDIT_FRAME_NAME )
     {
@@ -2642,11 +2563,12 @@ wxString PAD::ShowPadAttr() const
 {
     switch( GetAttribute() )
     {
-    case PAD_ATTRIB::PTH:    return _( "PTH" );
-    case PAD_ATTRIB::SMD:    return _( "SMD" );
-    case PAD_ATTRIB::CONN:   return _( "Conn" );
-    case PAD_ATTRIB::NPTH:   return _( "NPTH" );
-    default:                 return wxT( "???" );
+    case PAD_ATTRIB::PTH:           return _( "PTH" );
+    case PAD_ATTRIB::SMD:           return _( "SMD" );
+    case PAD_ATTRIB::CONN:          return _( "Conn" );
+    case PAD_ATTRIB::NPTH:          return _( "NPTH" );
+    case PAD_ATTRIB::NON_COMPONENT: return _( "Non-component" );
+    default:                        return wxT( "???" );
     }
 }
 
@@ -2668,7 +2590,9 @@ wxString PAD::GetItemDescription( UNITS_PROVIDER* aUnitsProvider, bool aFull ) c
     }
     else if( GetNumber().IsEmpty() )
     {
-        if( GetAttribute() == PAD_ATTRIB::SMD || GetAttribute() == PAD_ATTRIB::CONN )
+        if( GetAttribute() == PAD_ATTRIB::SMD
+            || GetAttribute() == PAD_ATTRIB::CONN
+            || GetAttribute() == PAD_ATTRIB::NON_COMPONENT )
         {
             if( parentFP )
             {
@@ -2699,7 +2623,9 @@ wxString PAD::GetItemDescription( UNITS_PROVIDER* aUnitsProvider, bool aFull ) c
     }
     else
     {
-        if( GetAttribute() == PAD_ATTRIB::SMD || GetAttribute() == PAD_ATTRIB::CONN )
+        if( GetAttribute() == PAD_ATTRIB::SMD
+            || GetAttribute() == PAD_ATTRIB::CONN
+            || GetAttribute() == PAD_ATTRIB::NON_COMPONENT )
         {
             if( parentFP )
             {
@@ -2931,11 +2857,8 @@ double PAD::ViewGetLOD( int aLayer, const KIGFX::VIEW* aView ) const
         }
         else
         {
-            LSET visible = board->GetVisibleLayers();
-            visible &= board->GetEnabledLayers();
-
             // Hide netnames unless pad is flashed to a visible layer
-            if( !FlashLayer( visible ) )
+            if( !FlashLayer( viewVisibleLayers( aView ) ) )
                 return LOD_HIDE;
         }
 
@@ -3041,6 +2964,7 @@ void PAD::ImportSettingsFrom( const PAD& aMasterPad )
     {
     case PAD_ATTRIB::SMD:
     case PAD_ATTRIB::CONN:
+    case PAD_ATTRIB::NON_COMPONENT:
         // These pads have no hole, or any kind of drilling.
         PAD_UTILS::RemoveAllDrillsFromPadstack( m_padStack );
         break;
@@ -3055,10 +2979,15 @@ void PAD::ImportSettingsFrom( const PAD& aMasterPad )
     SetLocalSolderPasteMargin( aMasterPad.GetLocalSolderPasteMargin() );
     SetLocalSolderPasteMarginRatio( aMasterPad.GetLocalSolderPasteMarginRatio() );
 
-    SetLocalZoneConnection( aMasterPad.GetLocalZoneConnection() );
-    SetLocalThermalSpokeWidthOverride( aMasterPad.GetLocalThermalSpokeWidthOverride() );
-    SetThermalSpokeAngle( aMasterPad.GetThermalSpokeAngle() );
-    SetLocalThermalGapOverride( aMasterPad.GetLocalThermalGapOverride() );
+    Padstack().ForEachUniqueLayer(
+            [&]( PCB_LAYER_ID layer )
+            {
+                Padstack().ZoneConnection( layer ) = aMasterPad.GetLocalZoneConnection( layer );
+
+                Padstack().ThermalSpokeWidth( layer ) = aMasterPad.Padstack().ThermalSpokeWidth( layer );
+                Padstack().ThermalSpokeAngle( layer ) = aMasterPad.Padstack().ThermalSpokeAngle( layer );
+                Padstack().ThermalGap( layer ) = aMasterPad.Padstack().ThermalGap( layer );
+            } );
 
     SetCustomShapeInZoneOpt( aMasterPad.GetCustomShapeInZoneOpt() );
 
@@ -3076,8 +3005,7 @@ void PAD::swapData( BOARD_ITEM* aImage )
 }
 
 
-bool PAD::TransformHoleToPolygon( SHAPE_POLY_SET& aBuffer, int aClearance, int aError,
-                                  ERROR_LOC aErrorLoc ) const
+bool PAD::TransformHoleToPolygon( SHAPE_POLY_SET& aBuffer, int aClearance, int aError, ERROR_LOC aErrorLoc ) const
 {
     VECTOR2I drillsize = GetDrillSize();
 
@@ -3266,8 +3194,9 @@ std::vector<PCB_SHAPE*> PAD::Recombine( bool aIsDryRun, int maxError )
 
                     if( Padstack().Mode() == PADSTACK::MODE::NORMAL )
                     {
-                        // A signle layer (F_Cu) in NORMAL mode represents _all_ layers,
-                        // so disable the layer test entirely
+                        // A single layer (F_Cu) in NORMAL mode represents _all_ copper layers
+                        if( !IsCopperLayer( other->GetLayer() ) )
+                            continue;
                     }
                     else
                     {
@@ -3401,6 +3330,9 @@ bool PAD::operator==( const BOARD_ITEM& aBoardItem ) const
 
 bool PAD::operator==( const PAD& aOther ) const
 {
+    if( GetNumber() != aOther.GetNumber() )
+        return false;
+
     if( Padstack() != aOther.Padstack() )
         return false;
 
@@ -3492,9 +3424,14 @@ void PAD::ReplacePrimitives( PCB_LAYER_ID aLayer, const std::vector<std::shared_
 
 void PAD::AppendPrimitives( PCB_LAYER_ID aLayer, const std::vector<std::shared_ptr<PCB_SHAPE>>& aPrimitivesList )
 {
-    // Add duplicates of aPrimitivesList to the pad primitives list:
     for( const std::shared_ptr<PCB_SHAPE>& prim : aPrimitivesList )
-        AddPrimitive( aLayer, new PCB_SHAPE( *prim ) );
+    {
+        PCB_SHAPE* copy = new PCB_SHAPE( *prim );
+
+        copy->SetParent( this );
+        rebakePrimitiveToFootprint( copy );
+        m_padStack.AddPrimitive( copy, aLayer );
+    }
 
     SetDirty();
 }
@@ -3504,8 +3441,8 @@ void PAD::AddPrimitive( PCB_LAYER_ID aLayer, PCB_SHAPE* aPrimitive )
 {
     aPrimitive->SetParent( this );
 
-    // Seed lib state from the primitive's current values, then rebake so the
-    // runtime cache reflects the parent FP transform reachable via the pad.
+    // The primitive arrives in library coordinates. Seed lib state from its current values,
+    // then rebake so the runtime cache reflects the parent FP transform reachable via the pad.
     aPrimitive->OverrideLibCoords( aPrimitive->GetStart(), aPrimitive->GetEnd(),
                                    aPrimitive->GetShape() == SHAPE_T::ARC ? aPrimitive->GetArcMid()
                                                                           : VECTOR2I( 0, 0 ) );
@@ -3595,7 +3532,8 @@ static struct PAD_DESC
                 .Map( PAD_ATTRIB::PTH,             _HKI( "Through-hole" ) )
                 .Map( PAD_ATTRIB::SMD,             _HKI( "SMD" ) )
                 .Map( PAD_ATTRIB::CONN,            _HKI( "Edge connector" ) )
-                .Map( PAD_ATTRIB::NPTH,            _HKI( "NPTH, mechanical" ) );
+                .Map( PAD_ATTRIB::NPTH,            _HKI( "NPTH, mechanical" ) )
+                .Map( PAD_ATTRIB::NON_COMPONENT,   _HKI( "Non-component" ) );
 
         ENUM_MAP<PAD_SHAPE>::Instance()
                 .Map( PAD_SHAPE::CIRCLE,           _HKI( "Circle" ) )
@@ -4073,43 +4011,51 @@ static struct PAD_DESC
 
         propMgr.AddProperty( new PROPERTY<PAD, std::optional<int>>( _HKI( "Clearance Override" ),
                     &PAD::SetLocalClearance, &PAD::GetLocalClearance, PROPERTY_DISPLAY::PT_SIZE ),
-                    groupOverrides ).SetIsCopyable();
+                    groupOverrides )
+                .SetIsCopyable();
 
         propMgr.AddProperty( new PROPERTY<PAD, std::optional<int>>( _HKI( "Soldermask Margin Override" ),
                     &PAD::SetLocalSolderMaskMargin, &PAD::GetLocalSolderMaskMargin, PROPERTY_DISPLAY::PT_SIZE ),
-                    groupOverrides ).SetIsCopyable();
+                    groupOverrides )
+                .SetIsCopyable();
 
         propMgr.AddProperty( new PROPERTY<PAD, std::optional<int>>( _HKI( "Solderpaste Margin Override" ),
                     &PAD::SetLocalSolderPasteMargin, &PAD::GetLocalSolderPasteMargin, PROPERTY_DISPLAY::PT_SIZE ),
-                    groupOverrides ).SetIsCopyable();
+                    groupOverrides )
+                .SetIsCopyable();
 
         propMgr.AddProperty( new PROPERTY<PAD, std::optional<double>>( _HKI( "Solderpaste Margin Ratio Override" ),
                     &PAD::SetLocalSolderPasteMarginRatio, &PAD::GetLocalSolderPasteMarginRatio,
                     PROPERTY_DISPLAY::PT_RATIO ),
-                    groupOverrides ).SetIsCopyable();
+                    groupOverrides )
+                .SetIsCopyable();
 
         propMgr.AddProperty( new PROPERTY_ENUM<PAD, ZONE_CONNECTION>( _HKI( "Zone Connection Style" ),
-                    &PAD::SetLocalZoneConnection, &PAD::GetLocalZoneConnection ),
-                    groupOverrides ).SetIsCopyable();
+                    &PAD::setZoneConnectionProperty, &PAD::getZoneConnectionProperty ),
+                    groupOverrides )
+                .SetIsCopyable();
 
         constexpr int minZoneWidth = pcbIUScale.mmToIU( ZONE_THICKNESS_MIN_VALUE_MM );
 
         propMgr.AddProperty( new PROPERTY<PAD, std::optional<int>>( _HKI( "Thermal Relief Spoke Width" ),
-                    &PAD::SetLocalThermalSpokeWidthOverride, &PAD::GetLocalThermalSpokeWidthOverride,
+                    &PAD::setLocalThermalSpokeWidthProperty, &PAD::getLocalThermalSpokeWidthProperty,
                     PROPERTY_DISPLAY::PT_SIZE ),
                     groupOverrides )
-                .SetValidator( PROPERTY_VALIDATORS::RangeIntValidator<minZoneWidth, INT_MAX> ).SetIsCopyable();
+                .SetValidator( PROPERTY_VALIDATORS::RangeIntValidator<minZoneWidth, INT_MAX> )
+                .SetIsCopyable();
 
         propMgr.AddProperty( new PROPERTY<PAD, double>( _HKI( "Thermal Relief Spoke Angle" ),
-                    &PAD::SetThermalSpokeAngleDegrees, &PAD::GetThermalSpokeAngleDegrees,
+                    &PAD::setThermalSpokeAngleProperty, &PAD::getThermalSpokeAngleProperty,
                     PROPERTY_DISPLAY::PT_DEGREE ),
-                    groupOverrides ).SetIsCopyable();
+                    groupOverrides )
+                .SetIsCopyable();
 
         propMgr.AddProperty( new PROPERTY<PAD, std::optional<int>>( _HKI( "Thermal Relief Gap" ),
-                    &PAD::SetLocalThermalGapOverride, &PAD::GetLocalThermalGapOverride,
+                    &PAD::setLocalThermalGapProperty, &PAD::getLocalThermalGapProperty,
                     PROPERTY_DISPLAY::PT_SIZE ),
                     groupOverrides )
-                .SetValidator( PROPERTY_VALIDATORS::PositiveIntValidator ).SetIsCopyable();
+                .SetValidator( PROPERTY_VALIDATORS::PositiveIntValidator )
+                .SetIsCopyable();
 
         // TODO delta, drill shape offset, layer set
     }

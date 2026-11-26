@@ -22,6 +22,7 @@
 
 #import <Cocoa/Cocoa.h>
 
+#include <wx/dataview.h>
 #include <wx/dialog.h>
 #include <wx/display.h>
 #include <wx/nonownedwnd.h>
@@ -96,24 +97,33 @@ bool KIPLATFORM::UI::IsWindowActive( wxWindow* aWindow )
 }
 
 
-void KIPLATFORM::UI::EnsureVisible( wxWindow* aWindow )
+void KIPLATFORM::UI::RunWhenActive( wxWindow* aWindow, std::function<void()> aFunction )
 {
-    NSView* view = (NSView*)aWindow->GetHandle();
-    if( view )
-    {
-        NSWindow* nsWindow = [view window];
-        if( nsWindow )
-        {
-            [nsWindow setCollectionBehavior:
-                NSWindowCollectionBehaviorCanJoinAllSpaces];
-        }
-    }
+    aFunction();
+}
+
+
+void KIPLATFORM::UI::SetFocusWhenActive( wxWindow* aWindow )
+{
+    aWindow->SetFocus();
+}
+
+
+bool KIPLATFORM::UI::ActivateWithoutPresenting( wxWindow* aWindow )
+{
+    return false;
 }
 
 
 void KIPLATFORM::UI::StabilizeWindowPosition( wxWindow* aWindow )
 {
     // Not needed on this platform
+}
+
+
+wxPoint KIPLATFORM::UI::GetRestorablePosition( wxWindow* aWindow )
+{
+    return aWindow->GetPosition();
 }
 
 
@@ -233,6 +243,18 @@ bool KIPLATFORM::UI::SupportsKeyState()
 }
 
 
+wxKeyEvent KIPLATFORM::UI::GetNativePopupDismissalEvent()
+{
+    return wxKeyEvent();
+}
+
+
+bool KIPLATFORM::UI::PrepareChoicePopup( wxWindow* )
+{
+    return true;
+}
+
+
 wxPoint KIPLATFORM::UI::GetMousePosition()
 {
     // wxOSX flips the pointer against screen 0, which raises NSRangeException with no window
@@ -281,17 +303,13 @@ void KIPLATFORM::UI::SetFloatLevel( wxWindow* aWindow )
 
 void KIPLATFORM::UI::ReleaseChildWindow( wxNonOwnedWindow* aWindow )
 {
-    if( wxTopLevelWindow* parent = static_cast<wxTopLevelWindow*>(
-            wxGetTopLevelParent( aWindow->GetParent() ) ) )
-    {
-        NSWindow* parentWindow = parent->GetWXWindow();
-        NSWindow* theWindow = aWindow->GetWXWindow();
+    NSWindow* theWindow = aWindow->GetWXWindow();
 
-        if( parentWindow && theWindow )
-        {
-            [parentWindow removeChildWindow:theWindow];
-            [theWindow setLevel:NSFloatingWindowLevel];
-        }
+    // ReparentWindow can attach to a window other than the wx parent, e.g. a report onto the DRC dialog
+    if( NSWindow* parentWindow = [theWindow parentWindow] )
+    {
+        [parentWindow removeChildWindow:theWindow];
+        [theWindow setLevel:NSFloatingWindowLevel];
     }
 }
 
@@ -299,6 +317,12 @@ void KIPLATFORM::UI::ReleaseChildWindow( wxNonOwnedWindow* aWindow )
 void KIPLATFORM::UI::AllowNetworkFileSystems( wxDialog* aDialog )
 {
     // Not needed on macOS - file dialogs show network filesystems by default
+}
+
+
+int KIPLATFORM::UI::GetColumnWidth( const wxDataViewColumn* aColumn )
+{
+    return aColumn->WXGetSpecifiedWidth();
 }
 
 
@@ -337,4 +361,10 @@ void KIPLATFORM::UI::PrepareForExternalRendering( wxWindow* aWindow )
 void KIPLATFORM::UI::KeepAboveExternalRendering( wxWindow* aChild )
 {
     // Child views are composited above the Metal layer of their parent
+}
+
+
+void KIPLATFORM::UI::RebindOnRealize( wxWindow* aWindow )
+{
+    // An NSView keeps its identity when reparented
 }

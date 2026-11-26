@@ -36,12 +36,6 @@
 #include <io/idf/vrml_layer.h>
 #include <trigo.h>
 
-#ifndef CALLBACK
-#define CALLBACK
-#endif
-
-#define GLCALLBACK(x) (( void (CALLBACK*)() )&(x))
-
 // minimum sides to a circle
 #define MIN_NSIDES 6
 
@@ -186,15 +180,15 @@ VRML_LAYER::VRML_LAYER()
         return;
 
     // set up the tesselator callbacks
-    gluTessCallback( tess, GLU_TESS_BEGIN_DATA, GLCALLBACK( vrml_tess_begin ) );
+    gluTessCallback( tess, GLU_TESS_BEGIN_DATA, ToGluCallback( vrml_tess_begin ) );
 
-    gluTessCallback( tess, GLU_TESS_VERTEX_DATA, GLCALLBACK( vrml_tess_vertex ) );
+    gluTessCallback( tess, GLU_TESS_VERTEX_DATA, ToGluCallback( vrml_tess_vertex ) );
 
-    gluTessCallback( tess, GLU_TESS_END_DATA, GLCALLBACK( vrml_tess_end ) );
+    gluTessCallback( tess, GLU_TESS_END_DATA, ToGluCallback( vrml_tess_end ) );
 
-    gluTessCallback( tess, GLU_TESS_ERROR_DATA, GLCALLBACK( vrml_tess_err ) );
+    gluTessCallback( tess, GLU_TESS_ERROR_DATA, ToGluCallback( vrml_tess_err ) );
 
-    gluTessCallback( tess, GLU_TESS_COMBINE_DATA, GLCALLBACK( vrml_tess_combine ) );
+    gluTessCallback( tess, GLU_TESS_COMBINE_DATA, ToGluCallback( vrml_tess_combine ) );
 
     gluTessProperty( tess, GLU_TESS_WINDING_RULE, GLU_TESS_WINDING_POSITIVE );
 

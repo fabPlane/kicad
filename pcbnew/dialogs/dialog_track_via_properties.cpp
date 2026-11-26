@@ -23,6 +23,7 @@
 #include <core/kicad_algo.h>
 #include <dialogs/dialog_track_via_properties.h>
 #include <pcb_layer_box_selector.h>
+#include <widgets/via_cross_section_preview.h>
 #include <tools/pcb_selection_tool.h>
 #include <board_design_settings.h>
 #include <footprint.h>
@@ -35,7 +36,33 @@
 #include <board_commit.h>
 #include <magic_enum.hpp>
 #include <macros.h>
+#include <cmath>
 #include <optional>
+
+
+// Item order of the choice controls in the form
+enum VIA_TYPE_CHOICE
+{
+    VIA_TYPE_THROUGH = 0,
+    VIA_TYPE_MICRO,
+    VIA_TYPE_BLIND,
+    VIA_TYPE_BURIED
+};
+
+enum ANNULAR_RING_CHOICE
+{
+    ANNULAR_RINGS_ALL = 0,
+    ANNULAR_RINGS_START_END_CONNECTED,
+    ANNULAR_RINGS_CONNECTED,
+    ANNULAR_RINGS_START_END
+};
+
+enum POST_MACHINE_CHOICE
+{
+    POST_MACHINE_NONE = 0,
+    POST_MACHINE_COUNTERSINK,
+    POST_MACHINE_COUNTERBORE
+};
 
 
 bool DIALOG_TRACK_VIA_PROPERTIES::IPC4761_CONFIGURATION::operator==( const IPC4761_CONFIGURATION& aOther ) const
@@ -170,13 +197,11 @@ void DIALOG_TRACK_VIA_PROPERTIES::commonInit( PCB_BASE_EDIT_FRAME* aParent )
     m_backdrillFrontLayer->SetLayersHotkeys( false );
     m_backdrillFrontLayer->SetNotAllowedLayerSet( LSET::AllNonCuMask() );
     m_backdrillFrontLayer->SetBoardFrame( aParent );
-    m_backdrillFrontLayer->SetUndefinedLayerName( _( "None" ) );
     m_backdrillFrontLayer->Resync();
 
     m_backdrillBackLayer->SetLayersHotkeys( false );
     m_backdrillBackLayer->SetNotAllowedLayerSet( LSET::AllNonCuMask() );
     m_backdrillBackLayer->SetBoardFrame( aParent );
-    m_backdrillBackLayer->SetUndefinedLayerName( _( "None" ) );
     m_backdrillBackLayer->Resync();
 
     wxFont infoFont = KIUI::GetSmallInfoFont( this );
@@ -185,6 +210,11 @@ void DIALOG_TRACK_VIA_PROPERTIES::commonInit( PCB_BASE_EDIT_FRAME* aParent )
 
     m_frame->Bind( EDA_EVT_UNITS_CHANGED, &DIALOG_TRACK_VIA_PROPERTIES::onUnitsChanged, this );
     m_netSelector->Bind( FILTERED_ITEM_SELECTED, &DIALOG_TRACK_VIA_PROPERTIES::onNetSelector, this );
+    m_annularRingsCtrl->Bind( wxEVT_CHOICE,
+                              [this]( wxCommandEvent& )
+                              {
+                                  updateViaPreview();
+                              } );
 
     for( auto& preset : magic_enum::enum_values<IPC4761_PRESET>() )
     {
@@ -580,9 +610,9 @@ bool DIALOG_TRACK_VIA_PROPERTIES::TransferDataToWindow()
         // Set the track layer selection state:
         if( track_selection_layer_mixed )
         {
-            m_TrackLayerCtrl->SetUndefinedLayerName( INDETERMINATE_STATE );
+            m_TrackLayerCtrl->SetAllowsIndeterminateState( INDETERMINATE_STATE );
             m_TrackLayerCtrl->Resync();
-            m_TrackLayerCtrl->SetSelection( UNDEFINED_LAYER );
+            m_TrackLayerCtrl->SetLayerSelection( UNDEFINED_LAYER );
         }
         else
         {
@@ -595,9 +625,9 @@ bool DIALOG_TRACK_VIA_PROPERTIES::TransferDataToWindow()
     {
         if( selection_first_layer_mixed )
         {
-            m_ViaStartLayer->SetUndefinedLayerName( INDETERMINATE_STATE );
+            m_ViaStartLayer->SetAllowsIndeterminateState( INDETERMINATE_STATE );
             m_ViaStartLayer->Resync();
-            m_ViaStartLayer->SetSelection( UNDEFINED_LAYER );
+            m_ViaStartLayer->SetLayerSelection( UNDEFINED_LAYER );
         }
         else
         {
@@ -606,9 +636,9 @@ bool DIALOG_TRACK_VIA_PROPERTIES::TransferDataToWindow()
 
         if( selection_last_layer_mixed )
         {
-            m_ViaEndLayer->SetUndefinedLayerName( INDETERMINATE_STATE );
+            m_ViaEndLayer->SetAllowsIndeterminateState( INDETERMINATE_STATE );
             m_ViaEndLayer->Resync();
-            m_ViaEndLayer->SetSelection( UNDEFINED_LAYER );
+            m_ViaEndLayer->SetLayerSelection( UNDEFINED_LAYER );
         }
         else
         {
@@ -665,13 +695,12 @@ bool DIALOG_TRACK_VIA_PROPERTIES::TransferDataToWindow()
         // Top backdrill control
         if( secondary_drill_end_layer_mixed )
         {
-            m_backdrillFrontLayer->SetUndefinedLayerName( INDETERMINATE_STATE );
+            m_backdrillFrontLayer->SetAllowsIndeterminateState( INDETERMINATE_STATE );
             m_backdrillFrontLayer->Resync();
             m_backdrillFrontLayer->SetLayerSelection( UNDEFINED_LAYER );
         }
         else
         {
-            m_backdrillFrontLayer->SetUndefinedLayerName( _( "None" ) );
             m_backdrillFrontLayer->Resync();
             m_backdrillFrontLayer->SetLayerSelection( secondary_drill_end_layer );
         }
@@ -679,13 +708,12 @@ bool DIALOG_TRACK_VIA_PROPERTIES::TransferDataToWindow()
         // Bottom backdrill control
         if( tertiary_drill_end_layer_mixed )
         {
-            m_backdrillBackLayer->SetUndefinedLayerName( INDETERMINATE_STATE );
+            m_backdrillBackLayer->SetAllowsIndeterminateState( INDETERMINATE_STATE );
             m_backdrillBackLayer->Resync();
             m_backdrillBackLayer->SetLayerSelection( UNDEFINED_LAYER );
         }
         else
         {
-            m_backdrillBackLayer->SetUndefinedLayerName( _( "None" ) );
             m_backdrillBackLayer->Resync();
             m_backdrillBackLayer->SetLayerSelection( tertiary_drill_end_layer );
         }
@@ -927,10 +955,7 @@ bool DIALOG_TRACK_VIA_PROPERTIES::TransferDataToWindow()
     else
         SetInitialFocus( m_ViaDiameterCtrl );
 
-    wxCommandEvent dummyEvent;
-    onBackdrillChange( dummyEvent );
-    onTopPostMachineChange( dummyEvent );
-    onBottomPostMachineChange( dummyEvent );
+    updateViaMachiningControls();
 
     // Now all widgets have the size fixed, call FinishDialogSettings
     finishDialogSettings();
@@ -1090,13 +1115,13 @@ bool DIALOG_TRACK_VIA_PROPERTIES::TransferDataFromWindow()
 
         std::optional<PCB_LAYER_ID> startLayer;
 
-        if( m_ViaStartLayer->GetLayerSelection() != UNDEFINED_LAYER )
-            startLayer = static_cast<PCB_LAYER_ID>( m_ViaStartLayer->GetLayerSelection() );
+        if( !m_ViaStartLayer->IsIndeterminate() )
+            startLayer = m_ViaStartLayer->GetLayerIDSelection();
 
         std::optional<PCB_LAYER_ID> endLayer;
 
-        if( m_ViaEndLayer->GetLayerSelection() != UNDEFINED_LAYER )
-            endLayer = static_cast<PCB_LAYER_ID>( m_ViaEndLayer->GetLayerSelection() );
+        if( !m_ViaEndLayer->IsIndeterminate() )
+            endLayer = m_ViaEndLayer->GetLayerIDSelection();
 
         std::optional<int> secondaryDrill;
         std::optional<int> tertiaryDrill;
@@ -1115,8 +1140,8 @@ bool DIALOG_TRACK_VIA_PROPERTIES::TransferDataFromWindow()
             case BACKDRILL_MODE::BACKDRILL_BOTTOM:
                 tertiaryStartLayer = B_Cu;
 
-                if( m_backdrillBackLayer->GetLayerSelection() != UNDEFINED_LAYER )
-                    tertiaryEndLayer = ToLAYER_ID( m_backdrillBackLayer->GetLayerSelection() );
+                if( !m_backdrillBackLayer->IsIndeterminate() )
+                    tertiaryEndLayer = m_backdrillBackLayer->GetLayerIDSelection();
 
                 if( !m_backdrillBackSize.IsIndeterminate() && !m_backdrillBackSize.IsNull() )
                     tertiaryDrill = m_backdrillBackSize.GetIntValue();
@@ -1126,8 +1151,8 @@ bool DIALOG_TRACK_VIA_PROPERTIES::TransferDataFromWindow()
             case BACKDRILL_MODE::BACKDRILL_TOP:
                 secondaryStartLayer = F_Cu;
 
-                if( m_backdrillFrontLayer->GetLayerSelection() != UNDEFINED_LAYER )
-                    secondaryEndLayer = ToLAYER_ID( m_backdrillFrontLayer->GetLayerSelection() );
+                if( !m_backdrillFrontLayer->IsIndeterminate() )
+                    secondaryEndLayer = m_backdrillFrontLayer->GetLayerIDSelection();
 
                 if( !m_backdrillFrontSize.IsIndeterminate() && !m_backdrillFrontSize.IsNull() )
                     secondaryDrill = m_backdrillFrontSize.GetIntValue();
@@ -1137,16 +1162,16 @@ bool DIALOG_TRACK_VIA_PROPERTIES::TransferDataFromWindow()
             case BACKDRILL_MODE::BACKDRILL_BOTH:
                 secondaryStartLayer = F_Cu;
 
-                if( m_backdrillFrontLayer->GetLayerSelection() != UNDEFINED_LAYER )
-                    secondaryEndLayer = ToLAYER_ID( m_backdrillFrontLayer->GetLayerSelection() );
+                if( !m_backdrillFrontLayer->IsIndeterminate() )
+                    secondaryEndLayer = m_backdrillFrontLayer->GetLayerIDSelection();
 
                 if( !m_backdrillFrontSize.IsIndeterminate() && !m_backdrillFrontSize.IsNull() )
                     secondaryDrill = m_backdrillFrontSize.GetIntValue();
 
                 tertiaryStartLayer = B_Cu;
 
-                if( m_backdrillBackLayer->GetLayerSelection() != UNDEFINED_LAYER )
-                    tertiaryEndLayer = ToLAYER_ID( m_backdrillBackLayer->GetLayerSelection() );
+                if( !m_backdrillBackLayer->IsIndeterminate() )
+                    tertiaryEndLayer = m_backdrillBackLayer->GetLayerIDSelection();
 
                 if( !m_backdrillBackSize.IsIndeterminate() && !m_backdrillBackSize.IsNull() )
                     tertiaryDrill = m_backdrillBackSize.GetIntValue();
@@ -1279,8 +1304,8 @@ bool DIALOG_TRACK_VIA_PROPERTIES::TransferDataFromWindow()
                 if( !m_trackWidth.IsIndeterminate() )
                     track->SetWidth( m_trackWidth.GetIntValue() );
 
-                if( m_TrackLayerCtrl->GetLayerSelection() != UNDEFINED_LAYER )
-                    track->SetLayer( ToLAYER_ID( m_TrackLayerCtrl->GetLayerSelection() ) );
+                if( !m_TrackLayerCtrl->IsIndeterminate() )
+                    track->SetLayer( m_TrackLayerCtrl->GetLayerIDSelection() );
 
                 if ( m_trackHasSolderMask->Get3StateValue() != wxCHK_UNDETERMINED )
                     track->SetHasSolderMask( m_trackHasSolderMask->GetValue() );
@@ -1338,11 +1363,14 @@ bool DIALOG_TRACK_VIA_PROPERTIES::TransferDataFromWindow()
                     switch( static_cast<BACKDRILL_MODE>( m_backdrillChoice->GetSelection() ) )
                     {
                     case BACKDRILL_MODE::NO_BACKDRILL:
+                        secondaryDrill.size = VECTOR2I( 0, 0 );
                         secondaryDrill.start = UNDEFINED_LAYER;
+                        tertiaryDrill.size = VECTOR2I( 0, 0 );
                         tertiaryDrill.start = UNDEFINED_LAYER;
                         break;
 
                     case BACKDRILL_MODE::BACKDRILL_BOTTOM:
+                        secondaryDrill.size = VECTOR2I( 0, 0 );
                         secondaryDrill.start = UNDEFINED_LAYER;
                         tertiaryDrill.start = B_Cu;
                         tertiaryDrill.shape = PAD_DRILL_SHAPE::CIRCLE;
@@ -1353,14 +1381,15 @@ bool DIALOG_TRACK_VIA_PROPERTIES::TransferDataFromWindow()
                                                            m_backdrillBackSize.GetIntValue() );
                         }
 
-                        if( m_backdrillBackLayer->GetLayerSelection() != UNDEFINED_LAYER )
-                            tertiaryDrill.end = ToLAYER_ID( m_backdrillBackLayer->GetLayerSelection() );
+                        if( !m_backdrillBackLayer->IsIndeterminate() )
+                            tertiaryDrill.end = m_backdrillBackLayer->GetLayerIDSelection();
 
                         break;
 
                     case BACKDRILL_MODE::BACKDRILL_TOP:
                         secondaryDrill.start = F_Cu;
                         secondaryDrill.shape = PAD_DRILL_SHAPE::CIRCLE;
+                        tertiaryDrill.size = VECTOR2I( 0, 0 );
                         tertiaryDrill.start = UNDEFINED_LAYER;
 
                         if( !m_backdrillFrontSize.IsIndeterminate() && !m_backdrillFrontSize.IsNull() )
@@ -1369,8 +1398,8 @@ bool DIALOG_TRACK_VIA_PROPERTIES::TransferDataFromWindow()
                                                             m_backdrillFrontSize.GetIntValue() );
                         }
 
-                        if( m_backdrillFrontLayer->GetLayerSelection() != UNDEFINED_LAYER )
-                            secondaryDrill.end = ToLAYER_ID( m_backdrillFrontLayer->GetLayerSelection() );
+                        if( !m_backdrillFrontLayer->IsIndeterminate() )
+                            secondaryDrill.end = m_backdrillFrontLayer->GetLayerIDSelection();
 
                         break;
 
@@ -1386,8 +1415,8 @@ bool DIALOG_TRACK_VIA_PROPERTIES::TransferDataFromWindow()
                                                             m_backdrillFrontSize.GetIntValue() );
                         }
 
-                        if( m_backdrillFrontLayer->GetLayerSelection() != UNDEFINED_LAYER )
-                            secondaryDrill.end = ToLAYER_ID( m_backdrillFrontLayer->GetLayerSelection() );
+                        if( !m_backdrillFrontLayer->IsIndeterminate() )
+                            secondaryDrill.end = m_backdrillFrontLayer->GetLayerIDSelection();
 
                         if( !m_backdrillBackSize.IsIndeterminate() && !m_backdrillBackSize.IsNull() )
                         {
@@ -1395,8 +1424,8 @@ bool DIALOG_TRACK_VIA_PROPERTIES::TransferDataFromWindow()
                                                            m_backdrillBackSize.GetIntValue() );
                         }
 
-                        if( m_backdrillBackLayer->GetLayerSelection() != UNDEFINED_LAYER )
-                            tertiaryDrill.end = ToLAYER_ID( m_backdrillBackLayer->GetLayerSelection() );
+                        if( !m_backdrillBackLayer->IsIndeterminate() )
+                            tertiaryDrill.end = m_backdrillBackLayer->GetLayerIDSelection();
 
                         break;
                     }
@@ -1492,8 +1521,8 @@ bool DIALOG_TRACK_VIA_PROPERTIES::TransferDataFromWindow()
                 default:                                          break;
                 }
 
-                PCB_LAYER_ID startLayer = static_cast<PCB_LAYER_ID>( m_ViaStartLayer->GetLayerSelection() );
-                PCB_LAYER_ID endLayer = static_cast<PCB_LAYER_ID>( m_ViaEndLayer->GetLayerSelection() );
+                PCB_LAYER_ID startLayer = m_ViaStartLayer->GetLayerIDSelection();
+                PCB_LAYER_ID endLayer = m_ViaEndLayer->GetLayerIDSelection();
 
                 if( startLayer != UNDEFINED_LAYER )
                 {
@@ -1698,6 +1727,8 @@ void DIALOG_TRACK_VIA_PROPERTIES::onViaSelect( wxCommandEvent& aEvent )
 
     m_viaDiameter.ChangeValue( viaDimension->m_Diameter );
     m_viaDrill.ChangeValue( viaDimension->m_Drill );
+
+    updateViaPreview();
 }
 
 
@@ -1883,6 +1914,21 @@ void DIALOG_TRACK_VIA_PROPERTIES::onViaEdit( wxCommandEvent& aEvent )
         m_annularRingsLabel->Show( getLayerDepth() > 1 );
         m_annularRingsCtrl->Show( getLayerDepth() > 1 );
         m_annularRingsCtrl->Enable( true );
+
+        // Blind and buried are told apart by the layers, so the type follows the selectors
+        const int typeSel = m_ViaTypeChoice->GetSelection();
+
+        if( typeSel == VIA_TYPE_BLIND || typeSel == VIA_TYPE_BURIED )
+        {
+            const VIA_SPAN span = viaSpan();
+
+            if( span.m_ReachesFront != span.m_ReachesBack )
+                m_ViaTypeChoice->SetSelection( VIA_TYPE_BLIND );
+            else if( !span.m_ReachesFront && !span.m_ReachesBack )
+                m_ViaTypeChoice->SetSelection( VIA_TYPE_BURIED );
+        }
+
+        updateViaMachiningControls();
     }
 }
 
@@ -1909,13 +1955,12 @@ void DIALOG_TRACK_VIA_PROPERTIES::onTeardropsUpdateUi( wxUpdateUIEvent& event )
 }
 
 
-void DIALOG_TRACK_VIA_PROPERTIES::onBackdrillChange( wxCommandEvent& aEvent )
+void DIALOG_TRACK_VIA_PROPERTIES::syncBackdrillControls( bool aFromUserEvent )
 {
-    int selection = m_backdrillChoice->GetSelection();
-    // 0: None, 1: Bottom, 2: Top, 3: Both
+    const BACKDRILL_MODE mode = static_cast<BACKDRILL_MODE>( m_backdrillChoice->GetSelection() );
 
-    bool enableTop = ( selection == 2 || selection == 3 );
-    bool enableBottom = ( selection == 1 || selection == 3 );
+    bool enableTop = mode == BACKDRILL_MODE::BACKDRILL_TOP || mode == BACKDRILL_MODE::BACKDRILL_BOTH;
+    bool enableBottom = mode == BACKDRILL_MODE::BACKDRILL_BOTTOM || mode == BACKDRILL_MODE::BACKDRILL_BOTH;
 
     m_backdrillFrontSize.Enable( enableTop );
     m_backdrillFrontLayer->Enable( enableTop );
@@ -1926,12 +1971,15 @@ void DIALOG_TRACK_VIA_PROPERTIES::onBackdrillChange( wxCommandEvent& aEvent )
     m_backdrillBackLayerLabel->Enable( enableBottom ); // Back layer label
 
     // Initialize values if this was a user event that turned on backdrills
-    if( aEvent.GetEventObject() )
+    if( aFromUserEvent )
     {
         if( enableTop )
         {
-            if( m_backdrillFrontLayer->GetLayerSelection() == UNDEFINED_LAYER )
+            if( !m_backdrillFrontLayer->IsIndeterminate()
+                    && m_backdrillFrontLayer->GetLayerSelection() == UNDEFINED_LAYER )
+            {
                 m_backdrillFrontLayer->SetLayerSelection( F_Cu );
+            }
 
             if( m_backdrillFrontSize.GetIntValue() == 0 )
             {
@@ -1942,8 +1990,11 @@ void DIALOG_TRACK_VIA_PROPERTIES::onBackdrillChange( wxCommandEvent& aEvent )
 
         if( enableBottom )
         {
-            if( m_backdrillBackLayer->GetLayerSelection() == UNDEFINED_LAYER )
+            if( !m_backdrillBackLayer->IsIndeterminate()
+                    && m_backdrillBackLayer->GetLayerSelection() == UNDEFINED_LAYER )
+            {
                 m_backdrillBackLayer->SetLayerSelection( B_Cu );
+            }
 
             if( m_backdrillBackSize.GetIntValue() == 0 )
             {
@@ -1955,81 +2006,359 @@ void DIALOG_TRACK_VIA_PROPERTIES::onBackdrillChange( wxCommandEvent& aEvent )
 }
 
 
-void DIALOG_TRACK_VIA_PROPERTIES::onTopPostMachineChange( wxCommandEvent& aEvent )
+void DIALOG_TRACK_VIA_PROPERTIES::onBackdrillChange( wxCommandEvent& aEvent )
 {
-    int selection = m_topPostMachine->GetSelection();
-    // 0: None, 1: Countersink, 2: Counterbore
+    syncBackdrillControls( true );
+    updateViaPreview();
+}
 
-    bool enable = ( selection != 0 );
-    m_topPostMachineSize1.Enable( enable );
-    m_topPostMachineSize2.Enable( enable );
-    m_topPostMachineSize1Label->Enable( enable );
-    m_topPostMachineSize2Label->Enable( enable );
 
-    if( selection == 1 ) // Countersink
+DIALOG_TRACK_VIA_PROPERTIES::POST_MACHINE_CONTROLS DIALOG_TRACK_VIA_PROPERTIES::postMachineControls( bool aFront )
+{
+    if( aFront )
     {
-        m_topPostMachineSize2Label->SetLabel( _( "Angle:" ) );
-        m_topPostMachineSize2Units->SetLabel( _( "deg" ) );
-        m_topPostMachineSize2.SetUnits( EDA_UNITS::DEGREES );
+        return { m_topPostMachine,           m_topPostMachineLabel, m_topPostMachineSize1,
+                 m_topPostMachineSize1Label, m_topPostMachineSize2, m_topPostMachineSize2Label,
+                 m_topPostMachineSize2Units };
     }
-    else if( selection == 2 ) // Counterbore
+
+    return { m_bottomPostMachine,           m_bottomPostMachineLabel, m_bottomPostMachineSize1,
+             m_bottomPostMachineSize1Label, m_bottomPostMachineSize2, m_bottomPostMachineSize2Label,
+             m_bottomPostMachineSize2Units };
+}
+
+
+void DIALOG_TRACK_VIA_PROPERTIES::syncPostMachineControls( bool aFront, bool aFromUserEvent )
+{
+    POST_MACHINE_CONTROLS ctrls = postMachineControls( aFront );
+    const int             selection = ctrls.m_Mode->GetSelection();
+
+    bool enable = selection != POST_MACHINE_NONE;
+    ctrls.m_Size.Enable( enable );
+    ctrls.m_AngleOrDepth.Enable( enable );
+    ctrls.m_SizeLabel->Enable( enable );
+    ctrls.m_AngleOrDepthLabel->Enable( enable );
+
+    // The second field holds an angle for a countersink and a depth for a counterbore, so a
+    // value left over from the other mode is replaced rather than reread in the new units
+    bool wasAngle = ctrls.m_AngleOrDepth.GetUnits() == EDA_UNITS::DEGREES;
+
+    if( selection == POST_MACHINE_COUNTERBORE )
     {
-        m_topPostMachineSize2Label->SetLabel( _( "Depth:" ) );
-        m_topPostMachineSize2Units->SetLabel( EDA_UNIT_UTILS::GetLabel( m_frame->GetUserUnits() ) );
-        m_topPostMachineSize2.SetUnits( m_frame->GetUserUnits() );
+        ctrls.m_AngleOrDepthLabel->SetLabel( _( "Depth:" ) );
+        ctrls.m_AngleOrDepthUnits->SetLabel( EDA_UNIT_UTILS::GetLabel( m_frame->GetUserUnits() ) );
+        ctrls.m_AngleOrDepth.SetUnits( m_frame->GetUserUnits() );
+
+        if( wasAngle )
+            ctrls.m_AngleOrDepth.SetValue( wxEmptyString );
     }
     else
     {
-        m_topPostMachineSize2Label->SetLabel( _( "Angle:" ) );
-        m_topPostMachineSize2Units->SetLabel( _( "deg" ) );
-        m_topPostMachineSize2.SetUnits( EDA_UNITS::DEGREES );
+        ctrls.m_AngleOrDepthLabel->SetLabel( _( "Angle:" ) );
+        ctrls.m_AngleOrDepthUnits->SetLabel( _( "deg" ) );
+        ctrls.m_AngleOrDepth.SetUnits( EDA_UNITS::DEGREES );
     }
 
     // Initialize values if this was a user event that turned on post machining
-    if( aEvent.GetEventObject() )
+    if( aFromUserEvent && selection == POST_MACHINE_COUNTERSINK )
     {
-        if( selection == 1 )
-        {
-            if( m_topPostMachineSize2.IsIndeterminate() || m_topPostMachineSize2.GetDoubleValue() == 0 )
-                m_topPostMachineSize2.SetDoubleValue( 82.0 );
-        }
+        if( !wasAngle || ctrls.m_AngleOrDepth.IsIndeterminate() || ctrls.m_AngleOrDepth.GetDoubleValue() == 0 )
+            ctrls.m_AngleOrDepth.SetDoubleValue( 82.0 );
     }
+}
+
+
+void DIALOG_TRACK_VIA_PROPERTIES::onTopPostMachineChange( wxCommandEvent& aEvent )
+{
+    syncPostMachineControls( true, true );
+    updateViaPreview();
 }
 
 
 void DIALOG_TRACK_VIA_PROPERTIES::onBottomPostMachineChange( wxCommandEvent& aEvent )
 {
-    int selection = m_bottomPostMachine->GetSelection();
-    // 0: None, 1: Countersink, 2: Counterbore
-
-    bool enable = ( selection != 0 );
-    m_bottomPostMachineSize1.Enable( enable );
-    m_bottomPostMachineSize2.Enable( enable );
-    m_bottomPostMachineSize1Label->Enable( enable );
-    m_bottomPostMachineSize2Label->Enable( enable );
-
-    if( selection == 1 ) // Countersink
-    {
-        m_bottomPostMachineSize2Label->SetLabel( _( "Angle:" ) );
-        m_bottomPostMachineSize2Units->SetLabel( _( "deg" ) );
-        m_bottomPostMachineSize2.SetUnits( EDA_UNITS::DEGREES );
-    }
-    else if( selection == 2 ) // Counterbore
-    {
-        m_bottomPostMachineSize2Label->SetLabel( _( "Depth:" ) );
-        m_bottomPostMachineSize2Units->SetLabel( EDA_UNIT_UTILS::GetLabel( m_frame->GetUserUnits() ) );
-        m_bottomPostMachineSize2.SetUnits( m_frame->GetUserUnits() );
-    }
-
-    // Initialize values if this was a user event that turned on post machining
-    if( aEvent.GetEventObject() )
-    {
-        if( selection == 1 )
-        {
-            if( m_bottomPostMachineSize2.IsIndeterminate() || m_bottomPostMachineSize2.GetDoubleValue() == 0 )
-                m_bottomPostMachineSize2.SetDoubleValue( 82.0 );
-        }
-    }
+    syncPostMachineControls( false, true );
+    updateViaPreview();
 }
 
 
+void DIALOG_TRACK_VIA_PROPERTIES::onProtectionFeaturesChange( wxCommandEvent& aEvent )
+{
+    updateViaPreview();
+}
+
+
+void DIALOG_TRACK_VIA_PROPERTIES::onMachiningEdit( wxCommandEvent& aEvent )
+{
+    updateViaPreview();
+}
+
+
+int DIALOG_TRACK_VIA_PROPERTIES::copperOrdinal( PCB_LAYER_ID aLayer ) const
+{
+    if( aLayer == B_Cu )
+        return m_frame->GetBoard()->GetCopperLayerCount() - 1;
+
+    return static_cast<int>( CopperLayerToOrdinal( aLayer ) );
+}
+
+
+PCB_LAYER_ID DIALOG_TRACK_VIA_PROPERTIES::copperLayer( int aOrdinal ) const
+{
+    if( aOrdinal <= 0 )
+        return F_Cu;
+
+    if( aOrdinal >= m_frame->GetBoard()->GetCopperLayerCount() - 1 )
+        return B_Cu;
+
+    return ToLAYER_ID( B_Cu + 2 * aOrdinal );
+}
+
+
+DIALOG_TRACK_VIA_PROPERTIES::VIA_SPAN DIALOG_TRACK_VIA_PROPERTIES::viaSpan() const
+{
+    const int last = m_frame->GetBoard()->GetCopperLayerCount() - 1;
+    const int typeSel = m_ViaTypeChoice->GetSelection();
+
+    VIA_SPAN span{ 0, last, typeSel == VIA_TYPE_THROUGH || typeSel == wxNOT_FOUND, true, true };
+
+    // A through via spans the board, and so does a selection whose layers are mixed
+    if( span.m_Through )
+        return span;
+
+    const int start = m_ViaStartLayer->GetLayerSelection();
+    const int end = m_ViaEndLayer->GetLayerSelection();
+
+    if( start == UNDEFINED_LAYER || end == UNDEFINED_LAYER )
+        return span;
+
+    const int a = copperOrdinal( ToLAYER_ID( start ) );
+    const int b = copperOrdinal( ToLAYER_ID( end ) );
+
+    span.m_Top = std::min( a, b );
+    span.m_Bottom = std::max( a, b );
+    span.m_ReachesFront = span.m_Top == 0;
+    span.m_ReachesBack = span.m_Bottom == last;
+
+    return span;
+}
+
+
+void DIALOG_TRACK_VIA_PROPERTIES::updateViaPreview()
+{
+    if( !m_vias )
+        return;
+
+    const BOARD*                 board = m_frame->GetBoard();
+    const BOARD_DESIGN_SETTINGS& bds = board->GetDesignSettings();
+    const int                    copperLayers = board->GetCopperLayerCount();
+    const VIA_SPAN               span = viaSpan();
+
+    VIA_CROSS_SECTION_PREVIEW::STATE state;
+    state.m_InnerLayers = std::max( 0, copperLayers - 2 );
+    state.m_TopLayer = span.m_Top;
+    state.m_BottomLayer = span.m_Bottom;
+
+    const int boardThickness = VIA_CROSS_SECTION_GEOMETRY::SetLayersFromStackup( state, board->GetStackupOrDefault(),
+                                                                                 copperLayers );
+
+    const int drillSize = m_viaDrill.IsIndeterminate() ? 0 : m_viaDrill.GetIntValue();
+
+    auto ratioToDrill =
+            [&]( UNIT_BINDER& aSize, double& aRatio )
+            {
+                if( drillSize > 0 && !aSize.IsIndeterminate() && !aSize.IsNull() )
+                    aRatio = (double) aSize.GetIntValue() / drillSize;
+            };
+
+    ratioToDrill( m_viaDiameter, state.m_PadRatio );
+
+    // Which layers keep an annular ring. Connection is a board question, so it is only asked
+    // for a single via, and a multi-via selection keeps every ring.
+    const PCB_VIA* via = nullptr;
+
+    if( m_items.CountType( PCB_VIA_T ) == 1 )
+    {
+        for( EDA_ITEM* item : m_items )
+        {
+            if( item->Type() == PCB_VIA_T )
+                via = static_cast<const PCB_VIA*>( item );
+        }
+    }
+
+    const int ringMode = m_annularRingsCtrl->GetSelection();
+
+    if( via && ringMode > ANNULAR_RINGS_ALL && ringMode <= ANNULAR_RINGS_START_END )
+    {
+        std::shared_ptr<CONNECTIVITY_DATA> connectivity = board->GetConnectivity();
+
+        for( int ordinal = 0; ordinal < copperLayers; ordinal++ )
+        {
+            bool startEnd = ordinal == span.m_Top || ordinal == span.m_Bottom;
+            bool connected = connectivity->IsConnectedOnLayer( via, copperLayer( ordinal ),
+                                                               { PCB_TRACE_T, PCB_ARC_T, PCB_VIA_T, PCB_PAD_T } );
+
+            switch( ringMode )
+            {
+            case ANNULAR_RINGS_START_END_CONNECTED: state.m_RingLayers.push_back( startEnd || connected ); break;
+            case ANNULAR_RINGS_CONNECTED:           state.m_RingLayers.push_back( connected );             break;
+            default:                                state.m_RingLayers.push_back( startEnd );              break;
+            }
+        }
+    }
+
+    // The protection features come from the preset, or from a single via's own padstack when
+    // the preset is custom, each resolved against the board default. Several custom vias have
+    // no common padstack, so every feature is left unset there and drawn mixed.
+    std::optional<PADSTACK> stack;
+    const int               preset = m_protectionFeatures->GetSelection();
+
+    if( preset >= 0 && preset < static_cast<int>( IPC4761_PRESET::CUSTOM ) )
+    {
+        stack.emplace( nullptr );
+        setViaConfiguration( *stack, static_cast<IPC4761_PRESET>( preset ) );
+    }
+    else if( m_viaStack && m_items.CountType( PCB_VIA_T ) == 1 )
+    {
+        stack = *m_viaStack;
+    }
+
+    if( stack )
+    {
+        state.m_TentFront = stack->FrontOuterLayers().has_solder_mask.value_or( bds.m_TentViasFront );
+        state.m_TentBack = stack->BackOuterLayers().has_solder_mask.value_or( bds.m_TentViasBack );
+        state.m_CoverFront = stack->FrontOuterLayers().has_covering.value_or( bds.m_CoverViasFront );
+        state.m_CoverBack = stack->BackOuterLayers().has_covering.value_or( bds.m_CoverViasBack );
+        state.m_PlugFront = stack->FrontOuterLayers().has_plugging.value_or( bds.m_PlugViasFront );
+        state.m_PlugBack = stack->BackOuterLayers().has_plugging.value_or( bds.m_PlugViasBack );
+        state.m_Filled = stack->Drill().is_filled.value_or( bds.m_FillVias );
+        state.m_Capped = stack->Drill().is_capped.value_or( bds.m_CapVias );
+    }
+
+    // A backdrill removes every copper layer from its surface down to the layer chosen, so the
+    // count includes the surface layer
+    auto backdrilledLayers =
+            [&]( PCB_LAYER_BOX_SELECTOR* aLayerBox, bool aFromFront ) -> std::optional<int>
+            {
+                if( aLayerBox->GetLayerSelection() == UNDEFINED_LAYER )
+                    return std::nullopt;
+
+                int ordinal = copperOrdinal( aLayerBox->GetLayerIDSelection() );
+
+                return aFromFront ? ordinal + 1 : copperLayers - ordinal;
+            };
+
+    // Backdrilling is a through via operation, the greyed controls of any other type are ignored
+    const int backdrill = span.m_Through ? m_backdrillChoice->GetSelection()
+                                         : static_cast<int>( BACKDRILL_MODE::NO_BACKDRILL );
+
+    if( backdrill == wxNOT_FOUND )
+    {
+        state.m_BackdrillFrontLayers.reset();
+        state.m_BackdrillBackLayers.reset();
+    }
+    else
+    {
+        BACKDRILL_MODE mode = static_cast<BACKDRILL_MODE>( backdrill );
+
+        if( mode == BACKDRILL_MODE::BACKDRILL_TOP || mode == BACKDRILL_MODE::BACKDRILL_BOTH )
+        {
+            state.m_BackdrillFrontLayers = backdrilledLayers( m_backdrillFrontLayer, true );
+            ratioToDrill( m_backdrillFrontSize, state.m_BackdrillFrontWidthRatio );
+        }
+
+        if( mode == BACKDRILL_MODE::BACKDRILL_BOTTOM || mode == BACKDRILL_MODE::BACKDRILL_BOTH )
+        {
+            state.m_BackdrillBackLayers = backdrilledLayers( m_backdrillBackLayer, false );
+            ratioToDrill( m_backdrillBackSize, state.m_BackdrillBackWidthRatio );
+        }
+    }
+
+    auto postMachining = [&]( bool aFront )
+    {
+        POST_MACHINE_CONTROLS                     ctrls = postMachineControls( aFront );
+        VIA_CROSS_SECTION_PREVIEW::POST_MACHINING cut;
+
+        switch( ctrls.m_Mode->GetSelection() )
+        {
+        case POST_MACHINE_NONE:        cut.m_Mode = PAD_DRILL_POST_MACHINING_MODE::NOT_POST_MACHINED; break;
+        case POST_MACHINE_COUNTERSINK: cut.m_Mode = PAD_DRILL_POST_MACHINING_MODE::COUNTERSINK;       break;
+        case POST_MACHINE_COUNTERBORE: cut.m_Mode = PAD_DRILL_POST_MACHINING_MODE::COUNTERBORE;       break;
+        default:                       cut.m_Mode.reset();                                            break;
+        }
+
+        ratioToDrill( ctrls.m_Size, cut.m_WidthRatio );
+
+        if( boardThickness > 0 && !ctrls.m_AngleOrDepth.IsIndeterminate() && !ctrls.m_AngleOrDepth.IsNull() )
+        {
+            double depth = 0;
+
+            if( cut.m_Mode == PAD_DRILL_POST_MACHINING_MODE::COUNTERSINK )
+            {
+                // The cone meets the hole wall where its half angle says it does
+                double angle = std::clamp( ctrls.m_AngleOrDepth.GetDoubleValue(), 20.0, 170.0 );
+                depth = drillSize * ( cut.m_WidthRatio - 1 ) / 2 / std::tan( angle * M_PI / 360.0 );
+            }
+            else
+            {
+                depth = ctrls.m_AngleOrDepth.GetIntValue();
+            }
+
+            cut.m_DepthFraction = depth / boardThickness;
+        }
+
+        return cut;
+    };
+
+    state.m_PostMachiningFront = postMachining( true );
+    state.m_PostMachiningBack = postMachining( false );
+
+    m_viaPreview->SetState( state );
+}
+
+
+void DIALOG_TRACK_VIA_PROPERTIES::updateViaMachiningControls()
+{
+    // Backdrilling needs a through via and a cut needs a surface the via reaches. What cannot
+    // apply is greyed, never changed, so a stored value survives a round trip.
+    const VIA_SPAN span = viaSpan();
+
+    // The choices set their dependent fields first, the span then overrides
+    syncBackdrillControls( false );
+    syncPostMachineControls( true, false );
+    syncPostMachineControls( false, false );
+
+    m_backdrillLabel->Enable( span.m_Through );
+    m_backdrillChoice->Enable( span.m_Through );
+
+    if( !span.m_Through )
+    {
+        m_backdrillFrontSize.Enable( false );
+        m_backdrillBackSize.Enable( false );
+
+        for( wxWindow* ctrl : std::initializer_list<wxWindow*>{ m_backdrillFrontLayer, m_backdrillFrontLayerLabel,
+                                                                m_backdrillBackLayer, m_backdrillBackLayerLabel } )
+        {
+            ctrl->Enable( false );
+        }
+    }
+
+    for( bool front : { true, false } )
+    {
+        const bool            reaches = front ? span.m_ReachesFront : span.m_ReachesBack;
+        POST_MACHINE_CONTROLS ctrls = postMachineControls( front );
+
+        ctrls.m_ModeLabel->Enable( reaches );
+        ctrls.m_Mode->Enable( reaches );
+
+        if( !reaches )
+        {
+            ctrls.m_Size.Enable( false );
+            ctrls.m_AngleOrDepth.Enable( false );
+            ctrls.m_SizeLabel->Enable( false );
+            ctrls.m_AngleOrDepthLabel->Enable( false );
+        }
+    }
+
+    updateViaPreview();
+}

@@ -463,6 +463,12 @@ void FILTER_COMBOPOPUP::onKeyDown( wxKeyEvent& aEvent )
 
     // Everything else goes to the filter textbox
     default:
+        if( aEvent.ControlDown() || aEvent.CmdDown() )
+        {
+            aEvent.Skip();
+            return;
+        }
+
         if( !m_filterCtrl->HasFocus() )
         {
             doSetFocus( m_filterCtrl );
@@ -629,7 +635,10 @@ void FILTER_COMBOBOX::onKeyDown( wxKeyEvent& aEvt )
         Popup();
     }
     // Non-control characters go to filterbox in popup for read-only controls
-    else if( key > WXK_SPACE && key < WXK_START && ( GetWindowStyleFlag() & wxCB_READONLY ) )
+    else if( key > WXK_SPACE
+                && key < WXK_START && ( GetWindowStyleFlag() & wxCB_READONLY )
+                && !aEvt.ControlDown()
+                && !aEvt.CmdDown() )
     {
         Popup();
         m_filterPopup->OnStartingKey( aEvt );

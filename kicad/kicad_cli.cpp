@@ -66,6 +66,7 @@
 #include "cli/command_pcb_export_dxf.h"
 #include "cli/command_pcb_export_gerbers.h"
 #include "cli/command_pcb_export_hpgl.h"
+#include "cli/command_pcb_export_hyperlynx.h"
 #include "cli/command_pcb_export_gencad.h"
 #include "cli/command_pcb_export_specctra.h"
 #include "cli/command_pcb_export_ipc2581.h"
@@ -90,6 +91,7 @@
 #include "cli/command_fp.h"
 #include "cli/command_fp_export.h"
 #include "cli/command_fp_export_svg.h"
+#include "cli/command_fp_downgrade.h"
 #include "cli/command_fp_upgrade.h"
 #include "cli/command_sch.h"
 #include "cli/command_sch_erc.h"
@@ -101,6 +103,7 @@
 #include "cli/command_sym.h"
 #include "cli/command_sym_export.h"
 #include "cli/command_sym_export_svg.h"
+#include "cli/command_sym_downgrade.h"
 #include "cli/command_sym_upgrade.h"
 #include "cli/command_gerber.h"
 #include "cli/command_gerber_convert.h"
@@ -191,6 +194,7 @@ static CLI::PCB_EXPORT_STATS_COMMAND     exportPcbStatsCmd{};
 static CLI::PCB_EXPORT_STACKUP_COMMAND   exportPcbStackupCmd{};
 static CLI::PCB_EXPORT_GERBERS_COMMAND   exportPcbGerbersCmd{};
 static CLI::PCB_EXPORT_HPGL_COMMAND      exportPcbHpglCmd{};
+static CLI::PCB_EXPORT_HYPERLYNX_COMMAND exportPcbHyperlynxCmd{};
 static CLI::PCB_EXPORT_GENCAD_COMMAND    exportPcbGencadCmd{};
 static CLI::PCB_EXPORT_SPECCTRA_COMMAND  exportPcbSpecctraCmd{};
 static CLI::PCB_EXPORT_IPC2581_COMMAND   exportPcbIpc2581Cmd{};
@@ -226,11 +230,13 @@ static CLI::FP_DIFF_COMMAND         fpDiffCmd{};
 static CLI::FP_EXPORT_COMMAND       fpExportCmd{};
 static CLI::FP_EXPORT_SVG_COMMAND   fpExportSvgCmd{};
 static CLI::FP_UPGRADE_COMMAND      fpUpgradeCmd{};
+static CLI::FP_DOWNGRADE_COMMAND         fpDowngradeCmd{};
 static CLI::SYM_COMMAND             symCmd{};
 static CLI::SYM_DIFF_COMMAND        symDiffCmd{};
 static CLI::SYM_EXPORT_COMMAND      symExportCmd{};
 static CLI::SYM_EXPORT_SVG_COMMAND  symExportSvgCmd{};
 static CLI::SYM_UPGRADE_COMMAND     symUpgradeCmd{};
+static CLI::SYM_DOWNGRADE_COMMAND        symDowngradeCmd{};
 static CLI::GERBER_COMMAND          gerberCmd{};
 static CLI::GERBER_CONVERT_COMMAND  gerberConvertCmd{};
 static CLI::GERBER_CONVERT_PNG_COMMAND gerberConvertPngCmd{};
@@ -263,6 +269,9 @@ static std::vector<COMMAND_ENTRY> commandStack = {
             },
             {
                 &fpUpgradeCmd
+            },
+            {
+                &fpDowngradeCmd
             }
         }
     },
@@ -290,6 +299,7 @@ static std::vector<COMMAND_ENTRY> commandStack = {
                     &exportPcbDxfCmd,
                     &exportPcbGerbersCmd,
                     &exportPcbHpglCmd,
+                    &exportPcbHyperlynxCmd,
                     &exportPcbGencadCmd,
                     &exportPcbGlbCmd,
                     &exportPcbIpc2581Cmd,
@@ -378,6 +388,9 @@ static std::vector<COMMAND_ENTRY> commandStack = {
             },
             {
                 &symUpgradeCmd
+            },
+            {
+                &symDowngradeCmd
             }
         }
     },
@@ -685,9 +698,12 @@ int PGM_KICAD::OnPgmRun()
 
 void PGM_KICAD::OnPgmExit()
 {
-    // Abort and wait on any background jobs
-    GetKiCadThreadPool().purge();
-    GetKiCadThreadPool().wait();
+    // Abort and wait on any background jobs, if InitPgm() got far enough to start the pool
+    if( m_singleton.m_ThreadPool )
+    {
+        GetKiCadThreadPool().purge();
+        GetKiCadThreadPool().wait();
+    }
 
     for( KIWAY::FACE_T face : { KIWAY::FACE_SCH, KIWAY::FACE_PCB } )
     {
@@ -781,13 +797,19 @@ struct APP_KICAD_CLI : public wxAppConsole
         }
 #endif
 
-        if( !program.OnPgmInit() )
+        // An escaping exception would skip OnPgmExit() and crash the static teardown
+        try
         {
-            program.OnPgmExit();
-            return false;
+            if( program.OnPgmInit() )
+                return true;
+        }
+        catch( ... )
+        {
+            Pgm().HandleException( std::current_exception() );
         }
 
-        return true;
+        program.OnPgmExit();
+        return false;
     }
 
     int OnExit() override

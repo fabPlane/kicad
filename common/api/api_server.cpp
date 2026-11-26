@@ -29,6 +29,7 @@
 
 #include <advanced_config.h>
 #include <api/api_handler.h>
+#include <api/api_task_scheduler.h>
 #include <api/api_utils.h> // traceApi
 #include <api/api_server.h>
 #include <ki_exception.h>
@@ -111,7 +112,7 @@ private:
 wxString KICAD_API_SERVER::s_logFileName = "api.log";
 
 
-wxDEFINE_EVENT( API_REQUEST_EVENT, wxCommandEvent );
+wxDEFINE_EVENT( API_REQUEST_EVENT, KICAD_API_REQUEST_EVENT );
 
 
 KICAD_API_SERVER::KICAD_API_SERVER( bool aAutoStart ) :
@@ -642,7 +643,7 @@ void KICAD_API_SERVER::onApiRequest( std::string* aRequest )
         return;
     }
 
-    wxCommandEvent* evt = new wxCommandEvent( API_REQUEST_EVENT );
+    KICAD_API_REQUEST_EVENT* evt = new KICAD_API_REQUEST_EVENT( API_REQUEST_EVENT );
 
     // We don't actually need write access to this string, but client data is non-const
     evt->SetClientData( static_cast<void*>( aRequest ) );
@@ -738,6 +739,43 @@ std::string KICAD_API_SERVER::DispatchBytes( const std::string& aRequestBytes )
         return error.SerializeAsString();
     }
 
+    // Only allow-listed API requests can be handled while a task is running; anything else
+    // is assumed to possible mess with state that the task might be depending on not changing.
+    if( request.has_message() && API_TASK_SCHEDULER::Instance().AnyTaskRunning() )
+    {
+        std::string requestType;
+
+        if( google::protobuf::Any::ParseAnyTypeUrl( request.message().type_url(), &requestType ) )
+        {
+            bool typeHandled = false;
+            bool allowedDuringTask = false;
+
+            for( API_HANDLER* handler : m_handlers )
+            {
+                if( handler->CanHandle( requestType ) )
+                {
+                    typeHandled = true;
+                    allowedDuringTask = handler->AllowsDuringTask( requestType );
+                    break;
+                }
+            }
+
+            if( typeHandled && !allowedDuringTask )
+            {
+                ApiResponse error;
+                error.mutable_header()->set_kicad_token( m_token );
+                error.mutable_status()->set_status( ApiStatusCode::AS_BUSY );
+                error.mutable_status()->set_error_message(
+                        "a task is running; only task status and result queries are available until it completes" );
+
+                if( ADVANCED_CFG::GetCfg().m_EnableAPILogging )
+                    log( "Response (ERROR): " + error.Utf8DebugString() );
+
+                return error.SerializeAsString();
+            }
+        }
+    }
+
     API_RESULT result = Dispatch( request );
 
     if( result.has_value() )
@@ -756,8 +794,11 @@ std::string KICAD_API_SERVER::DispatchBytes( const std::string& aRequestBytes )
 
     if( result.error().status() == ApiStatusCode::AS_UNHANDLED )
     {
-        std::string type = "<unparseable Any>";
-        google::protobuf::Any::ParseAnyTypeUrl( request.message().type_url(), &type );
+        std::string type;
+
+        if( !google::protobuf::Any::ParseAnyTypeUrl( request.message().type_url(), &type ) )
+            type = "<unparseable Any>";
+
         std::string msg = fmt::format( "no handler available for request of type {}", type );
         error.mutable_status()->set_error_message( msg );
     }

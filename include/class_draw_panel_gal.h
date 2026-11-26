@@ -40,6 +40,7 @@
 #include <chrono>
 
 #include <gal/cursors.h>
+#include <eda_cursor_broadcaster.h>
 
 class BOARD;
 class EDA_DRAW_FRAME;
@@ -72,7 +73,7 @@ struct VC_SETTINGS;
 }
 
 
-class EDA_DRAW_PANEL_GAL : public wxScrolledCanvas
+class EDA_DRAW_PANEL_GAL : public wxScrolledCanvas, public EDA_CURSOR_OWNER
 {
 public:
     enum GAL_TYPE {
@@ -176,6 +177,20 @@ public:
      * @return The instance of GAL.
      */
     KIGFX::GAL* GetGAL() const { return m_gal; }
+
+    /**
+     * Set whether the mouse cursor is inside the drawing canvas.
+     *
+     * Entering hides the cursor in every other canvas of the process, since the pointer can only
+     * be in one and some window systems never deliver the leave event.
+     *
+     * @param aCursorInCanvas is true if the cursor is inside the canvas.
+     */
+    void SetCursorInCanvas( bool aCursorInCanvas );
+
+    // EDA_CURSOR_OWNER interface, used by #EDA_CURSOR_BROADCASTER.
+    bool IsCursorInCanvas() const override { return m_cursorInCanvas; }
+    void HideCursorInCanvas() override { SetCursorInCanvas( false ); }
 
     /**
      * Return a pointer to the #KIGFX::VIEW instance used in the panel.
@@ -388,6 +403,7 @@ protected:
     void onLostFocus( wxFocusEvent& aEvent );
     void onIdle( wxIdleEvent& aEvent );
     void onRefreshTimer( wxTimerEvent& aEvent );
+    void onIdleAwaitShow( wxIdleEvent& aEvent );
     void onShowEvent( wxShowEvent& aEvent );
 
     bool recoverFromGalError( const std::exception& aErr );
@@ -468,8 +484,17 @@ protected:
     /** The refresh timer was armed by Refresh() for a repaint it postponed */
     bool                     m_refreshDeferred = false;
 
+    /// A hidden canvas whose GAL is not ready yet waits for idle instead of polling
+    bool                     m_awaitingShow = false;
+
     /// Last cursor position sent to GAL for drawing
     VECTOR2D                 m_lastCursorPosition;
+
+    /// True while the mouse cursor is inside the drawing canvas
+    bool m_cursorInCanvas;
+
+    /// The cursor was shown or hidden since the last repaint
+    bool m_cursorVisibilityDirty;
 
     /// Interface for drawing objects on a 2D-surface
     KIGFX::GAL*              m_gal;

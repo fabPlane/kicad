@@ -91,14 +91,13 @@ int ACTION_GROUP::GetUIId() const
 
 void ACTION_GROUP::SetDefaultAction( const TOOL_ACTION& aDefault )
 {
-    bool valid = std::any_of( m_actions.begin(), m_actions.end(),
-                              [&]( const TOOL_ACTION* aAction ) -> bool
-                              {
-                                  // For some reason, we can't compare the actions directly
-                                  return aAction->GetId() == aDefault.GetId();
-                              } );
-
-    wxASSERT_MSG( valid, wxS( "Action must be present in a group to be the default" ) );
+    wxASSERT_MSG( std::any_of( m_actions.begin(), m_actions.end(),
+                               [&]( const TOOL_ACTION* aAction ) -> bool
+                               {
+                                   // For some reason, we can't compare the actions directly
+                                   return aAction->GetId() == aDefault.GetId();
+                               } ),
+                  wxS( "Action must be present in a group to be the default" ) );
 
     m_defaultAction = &aDefault;
 }
@@ -339,7 +338,7 @@ std::list<ACTION_TOOLBAR_CONTROL*> ACTION_TOOLBAR::GetCustomControlList( FRAME_T
 
 void ACTION_TOOLBAR::ApplyConfiguration( const TOOLBAR_CONFIGURATION& aConfig )
 {
-    wxASSERT( GetParent() );
+    wxCHECK2( GetParent(), return );
 
     // Keep each group's selection across the rebuild.
     std::map<std::string, std::string> currentGroupItems = m_groupSelections;
@@ -490,7 +489,7 @@ void ACTION_TOOLBAR::Add( const TOOL_ACTION& aAction )
 
 void ACTION_TOOLBAR::Add( const TOOL_ACTION& aAction, bool aIsToggleEntry, bool aIsCancellable )
 {
-    wxASSERT( GetParent() );
+    wxCHECK2( GetParent(), return );
     wxASSERT_MSG( !( aIsCancellable && !aIsToggleEntry ),
                   wxS( "aIsCancellable requires aIsToggleEntry" ) );
 
@@ -540,7 +539,7 @@ void ACTION_TOOLBAR::AddScaledSeparator( wxWindow* aWindow )
 
 void ACTION_TOOLBAR::Add( wxControl* aControl, const wxString& aLabel )
 {
-    wxASSERT( aControl );
+    wxCHECK2( aControl, return );
     m_controlIDs.push_back( aControl->GetId() );
     AddControl( aControl, aLabel );
 }
@@ -560,8 +559,8 @@ void ACTION_TOOLBAR::AddGroup( std::unique_ptr<ACTION_GROUP> aGroup )
     const TOOL_ACTION* defaultAction = aGroup->GetDefaultAction();
     int                iconSize = Pgm().GetCommonSettings()->m_Appearance.toolbar_icon_size;
 
-    wxASSERT( GetParent() );
-    wxASSERT( defaultAction );
+    wxCHECK2( GetParent(), return );
+    wxCHECK2( defaultAction, return );
 
     // Turn this into a toggle entry if any one of the actions is a toggle entry
     bool isToggleEntry = false;
@@ -622,7 +621,7 @@ void ACTION_TOOLBAR::SelectAction( const TOOL_ACTION& aAction )
 
 void ACTION_TOOLBAR::doSelectAction( ACTION_GROUP* aGroup, const TOOL_ACTION& aAction )
 {
-    wxASSERT( GetParent() );
+    wxCHECK2( GetParent(), return );
 
     int groupId = aGroup->GetUIId();
 
@@ -675,11 +674,11 @@ void ACTION_TOOLBAR::UpdateControlWidths()
 void ACTION_TOOLBAR::UpdateControlWidth( int aID )
 {
     wxAuiToolBarItem* item = FindTool( aID );
-    wxASSERT_MSG( item, wxString::Format( "No toolbar item found for ID %d", aID ) );
+    wxCHECK_RET( item, wxString::Format( "No toolbar item found for ID %d", aID ) );
 
     // The control on the toolbar is stored inside the window field of the item
     wxControl* control = dynamic_cast<wxControl*>( item->GetWindow() );
-    wxASSERT_MSG( control, wxString::Format( "No control located in toolbar item with ID %d", aID ) );
+    wxCHECK_RET( control, wxString::Format( "No control located in toolbar item with ID %d", aID ) );
 
     // Update the size the item has stored using the best size of the control
     control->InvalidateBestSize();
@@ -1166,8 +1165,11 @@ void ACTION_TOOLBAR::OnCustomRender(wxDC& aDc, const wxAuiToolBarItem& aItem, co
 
 bool ACTION_TOOLBAR::KiRealize()
 {
+    // Realize() leaves out a hidden overflow button and nothing adds it back once the tools stop fitting
+    SetOverflowVisible( true );
+
 #if wxCHECK_VERSION( 3, 3, 0 )
-    return Realize();
+    bool retval = Realize();
 #else
     wxClientDC dc( this );
 
@@ -1208,14 +1210,15 @@ bool ACTION_TOOLBAR::KiRealize()
     }
 
     Refresh( false );
-    return retval;
 #endif
+
+    SetOverflowVisible( !GetToolBarFits() );
+    return retval;
 }
 
 
 void ACTION_TOOLBAR::onThemeChanged( wxSysColourChangedEvent &aEvent )
 {
-    GetBitmapStore()->ThemeChanged();
     RefreshBitmaps();
 
     aEvent.Skip();

@@ -131,6 +131,7 @@ void PCB_EDIT_FRAME::doReCreateMenuBar()
     submenuExport->SetIcon( BITMAPS::export_file );
 
     submenuExport->Add( PCB_ACTIONS::exportSpecctraDSN, ACTION_MENU::NORMAL, _( "Specctra DSN..." ) );
+    submenuExport->Add( ACTIONS::exportForOlderVersion, ACTION_MENU::NORMAL, _( "For Older KiCad Version..." ) );
     submenuExport->Add( PCB_ACTIONS::exportGenCAD,      ACTION_MENU::NORMAL, _( "GenCAD..." ) );
     submenuExport->Add( PCB_ACTIONS::exportVRML,        ACTION_MENU::NORMAL, _( "VRML..." ) );
     submenuExport->Add( PCB_ACTIONS::exportIDF,         ACTION_MENU::NORMAL, _( "IDFv3..." ) );
@@ -208,6 +209,7 @@ void PCB_EDIT_FRAME::doReCreateMenuBar()
     editMenu->Add( PCB_ACTIONS::trimGraphic );
     editMenu->Add( PCB_ACTIONS::editTracksAndVias );
     editMenu->Add( PCB_ACTIONS::editTextAndGraphics );
+    editMenu->Add( PCB_ACTIONS::mirrorInteractive );
     editMenu->Add( PCB_ACTIONS::editTeardrops );
     editMenu->Add( PCB_ACTIONS::changeFootprints );
     editMenu->Add( PCB_ACTIONS::swapLayers );
@@ -392,6 +394,7 @@ void PCB_EDIT_FRAME::doReCreateMenuBar()
     routeMenu->AppendSeparator();
     routeMenu->Add( PCB_ACTIONS::routeSingleTrack );
     routeMenu->Add( PCB_ACTIONS::routeDiffPair );
+    routeMenu->Add( PCB_ACTIONS::routerSpreadTracks );
 
     routeMenu->AppendSeparator();
     routeMenu->Add( PCB_ACTIONS::tuneSingleTrack );

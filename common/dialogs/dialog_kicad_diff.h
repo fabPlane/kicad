@@ -32,9 +32,9 @@
 
 
 class WIDGET_DIFF_CANVAS;
-class wxBoxSizer;
 class wxButton;
 class wxChoice;
+class wxWrapSizer;
 
 
 /**
@@ -60,8 +60,6 @@ public:
 
     ~DIALOG_KICAD_DIFF() override = default;
 
-    void                SwitchCanvasToSheet( const KIID_PATH& aSheetPath );
-    const KIID_PATH&    CurrentCanvasSheet() const { return m_currentCanvasSheet; }
     WIDGET_DIFF_CANVAS* DiffCanvas() const { return m_canvas; }
 
     /// Swap in a fresh diff with new schematics. Rebuilds tree and scene,
@@ -77,9 +75,13 @@ public:
     /// no chooser is shown.
     void SetRevisionChooser( const std::vector<wxString>& aLabels, int aSelected, REVISION_HANDLER aOnChange );
 
-    using CHANGE_SELECTED_FN = std::function<void( const KIID_PATH& )>;
+    using LIBRARY_ITEM_DRAWER = std::function<void( WIDGET_DIFF_CANVAS&, const wxString& aName )>;
 
-    void SetChangeSelectedHandler( CHANGE_SELECTED_FN aFn ) { m_changeSelectedFn = std::move( aFn ); }
+    /**
+     * Draw only the library item named by the chosen change, since the outlines of a whole library
+     * pile up in one place. The first change is chosen so the canvas is never empty.
+     */
+    void DrawChosenLibraryItem( LIBRARY_ITEM_DRAWER aDraw );
 
     using UP_HANDLER = std::function<void()>;
 
@@ -94,12 +96,22 @@ protected:
     void OnOK( wxCommandEvent& aEvent ) override;
 
 private:
-    /// Populate the tree from m_diff. Groups by CHANGE_KIND.
-    void buildTree();
+    /// Populate the tree from m_diff, keeping the selected change. Groups by CHANGE_KIND.
+    void buildTree() { buildTree( selectedChangeId() ); }
+
+    /// Populate the tree from m_diff and select \a aSelect when it is still listed. Tree ids do not
+    /// survive the rebuild, so the row is found again by its change id.
+    void buildTree( const std::optional<KIID_PATH>& aSelect );
+
+    /// The selected row's change id. Valid only while m_diff still owns the listed changes.
+    std::optional<KIID_PATH> selectedChangeId() const;
 
     /// Populate the property list for the change associated with the selected
     /// tree node, or clear the list if no change is selected (e.g. group node).
     void showChange( const KICAD_DIFF::ITEM_CHANGE* aChange );
+
+    /// Report the number of changes in the summary label.
+    void showDiffSummary();
 
     /// Select the tree row whose change has the given KIID_PATH. Wired to
     /// the canvas's pick handler so clicking a rectangle on the canvas
@@ -109,6 +121,9 @@ private:
 
     /// Grey out tree rows whose change is in m_hiddenChanges, restore the rest.
     void applyHiddenToTree();
+
+    /// Replace the layer checkboxes with one per layer of aScene's geometry, after the category filters.
+    void buildLayerControls( const KICAD_DIFF::DIFF_SCENE& aScene );
 
     /// Change ids a tree row stands for. A routing net row collapses every
     /// segment of the net, so hiding it must hide them all.
@@ -122,9 +137,13 @@ private:
     REVISION_HANDLER m_revisionHandler;
     wxChoice*        m_revisionChoice = nullptr;
 
-    UP_HANDLER  m_upHandler;
-    wxButton*   m_btnUp = nullptr;
-    wxBoxSizer* m_filterSizer = nullptr;
+    UP_HANDLER   m_upHandler;
+    wxButton*    m_btnUp = nullptr;
+    wxWrapSizer* m_filterSizer = nullptr;
+
+    /// Index in m_filterSizer of the first layer control, which follow the category filters.
+    size_t                 m_layerControlsIndex = 0;
+    std::vector<wxWindow*> m_layerControls;
 
     /// Maps tree item IDs to the underlying change record so selection can
     /// find the data without walking the diff again. Group nodes have no
@@ -147,7 +166,7 @@ private:
     SHEET_SWITCHER m_sheetSwitcher;
     KIID_PATH      m_currentCanvasSheet;
 
-    CHANGE_SELECTED_FN m_changeSelectedFn;
+    LIBRARY_ITEM_DRAWER m_drawLibraryItem;
 };
 
 #endif // DIALOG_KICAD_DIFF_H

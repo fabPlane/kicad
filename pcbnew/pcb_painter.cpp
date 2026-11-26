@@ -695,7 +695,7 @@ COLOR4D PCB_RENDER_SETTINGS::GetColor( const BOARD_ITEM* aItem, int aLayer ) con
     }
 
     // Dim items outside the currently-entered group
-    if( m_groupEditModeActive && m_outsideGroupOpacity < 1.0 && !highlighted && !selected )
+    if( m_groupEditModeActive && m_outsideGroupOpacity < 1.0 && !selected && aItem->Type() != PCB_MARKER_T )
     {
         if( !isInEnteredGroup( aItem ) )
             color.a *= m_outsideGroupOpacity;
@@ -868,6 +868,7 @@ bool PCB_PAINTER::Draw( const VIEW_ITEM* aItem, int aLayer )
         break;
 
     case PCB_TABLE_T:
+    case PCB_STACKUP_TABLE_T:
         draw( static_cast<const PCB_TABLE*>( item ), aLayer );
         break;
 
@@ -1364,6 +1365,50 @@ bool PCB_PAINTER::HasUniformColor( const VIEW_ITEM* aItem, int aLayer ) const
 }
 
 
+bool PCB_PAINTER::VisibleLayersChangeDrawing( const BOARD_ITEM* aItem, const LSET& aBefore, const LSET& aAfter )
+{
+    const BOARD* board = aItem->GetBoard();
+    const LSET   enabled = board ? board->GetEnabledLayers() : LSET::AllLayersMask();
+    const LSET   before = aBefore & enabled & aItem->GetLayerSet();
+    const LSET   after = aAfter & enabled & aItem->GetLayerSet();
+
+    if( before == after )
+        return false;
+
+    switch( aItem->Type() )
+    {
+    case PCB_VIA_T:
+    {
+        const PCB_VIA* via = static_cast<const PCB_VIA*>( aItem );
+        const LSET     copper = LSET::AllCuMask();
+
+        // Without visible copper GetColor() takes the via colour from its other visible layers
+        if( ( before & copper ).none() || ( after & copper ).none() )
+            return true;
+
+        // GetColor() shows the via in an active mask layer's colour
+        if( before.test( F_Mask ) != after.test( F_Mask ) || before.test( B_Mask ) != after.test( B_Mask ) )
+            return true;
+
+        // draw() skips the annular ring once the via flashes on no visible layer
+        return via->FlashLayer( aBefore & enabled ) != via->FlashLayer( aAfter & enabled );
+    }
+
+    case PCB_PAD_T:
+    {
+        // The locked shadow takes the largest expansion among the visible layers
+        const PAD*       pad = static_cast<const PAD*>( aItem );
+        const FOOTPRINT* parent = pad->GetParentFootprint();
+
+        return pad->IsLocked() || ( parent && parent->IsLocked() );
+    }
+
+    default:
+        return true;
+    }
+}
+
+
 bool PCB_PAINTER::zoneOutlineOnly( const ZONE* aZone ) const
 {
     return aZone->GetIsRuleArea()
@@ -1521,8 +1566,7 @@ void PCB_PAINTER::draw( const PCB_VIA* aVia, int aLayer )
 
     if( aLayer == LAYER_VIA_HOLEWALLS )
     {
-        double thickness =
-            m_holePlatingThickness * ADVANCED_CFG::GetCfg().m_HoleWallPaintingMultiplier;
+        double thickness =  m_holePlatingThickness * ADVANCED_CFG::GetCfg().m_HoleWallPaintingMultiplier;
         double drillRadius = getViaDrillSize( aVia ) / 2.0;
         double maxRadius = aVia->GetWidth( layerTop ) / 2.0;
         double radius = drillRadius + thickness;
@@ -1556,16 +1600,10 @@ void PCB_PAINTER::draw( const PCB_VIA* aVia, int aLayer )
             std::optional<int> terDrill = aVia->GetTertiaryDrillSize();
 
             if( secDrill.value_or( 0 ) > 0 )
-            {
-                drawBackdrillIndicator( aVia, center, *secDrill, aVia->GetSecondaryDrillStartLayer(),
-                                        aVia->GetSecondaryDrillEndLayer() );
-            }
+                drawBackdrillIndicator( aVia, center, *secDrill, aVia->GetSecondaryDrillEndLayer(), 0 );
 
             if( terDrill.value_or( 0 ) > 0 )
-            {
-                drawBackdrillIndicator( aVia, center, *terDrill, aVia->GetTertiaryDrillStartLayer(),
-                                        aVia->GetTertiaryDrillEndLayer() );
-            }
+                drawBackdrillIndicator( aVia, center, *terDrill, aVia->GetTertiaryDrillEndLayer(), 1 );
         }
     }
     else if( aLayer == LAYER_VIA_HOLES )
@@ -2185,20 +2223,14 @@ void PCB_PAINTER::draw( const PAD* aPad, int aLayer )
         if( !m_pcbSettings.IsPrinting() && aPad->GetDrillSize().x > 0 )
         {
             const VECTOR2I& holePos = slot->GetSeg().A;
-            const VECTOR2I& secDrill = aPad->GetSecondaryDrillSize();
-            const VECTOR2I& terDrill = aPad->GetTertiaryDrillSize();
+            const VECTOR2I& secondaryDrill = aPad->GetSecondaryDrillSize();
+            const VECTOR2I& tertiaryDrill = aPad->GetTertiaryDrillSize();
 
-            if( secDrill.x > 0 )
-            {
-                drawBackdrillIndicator( aPad, holePos, secDrill.x, aPad->GetSecondaryDrillStartLayer(),
-                                        aPad->GetSecondaryDrillEndLayer() );
-            }
+            if( secondaryDrill.x > 0 )
+                drawBackdrillIndicator( aPad, holePos, secondaryDrill.x, aPad->GetSecondaryDrillEndLayer(), 0 );
 
-            if( terDrill.x > 0 )
-            {
-                drawBackdrillIndicator( aPad, holePos, terDrill.x, aPad->GetTertiaryDrillStartLayer(),
-                                        aPad->GetTertiaryDrillEndLayer() );
-            }
+            if( tertiaryDrill.x > 0 )
+                drawBackdrillIndicator( aPad, holePos, tertiaryDrill.x, aPad->GetTertiaryDrillEndLayer(), 1 );
         }
 
         return;
@@ -4004,11 +4036,10 @@ void PCB_PAINTER::draw( const PCB_DIMENSION_BASE* aDimension, int aLayer )
 
 void PCB_PAINTER::draw( const PCB_GRID_ITEM* aGridItem, int aLayer )
 {
-    // Grid content (lines/dots/crosses) is rendered by the GAL backend through
-    // GRID_SOURCE (see PCB_DRAW_PANEL_GAL::prepareGridSources).  Only selection
-    // decorations - outline and centre marker - live here, on LAYER_GRID_ITEMS.
-    // The item is also registered on m_layer for VIEW::Query (selection); skip
-    // those passes.
+    // Grid content (lines/dots/crosses) is rendered by the GAL backend through GRID_SOURCE (see
+    // PCB_DRAW_PANEL_GAL::prepareGridSources).  Only selection decorations - outline and centre
+    // marker - live here, on LAYER_GRID_ITEMS.  The item is also registered on m_layer for VIEW::Query
+    // (selection); skip those passes.
     const bool shadow = aLayer == LAYER_LOCKED_ITEM_SHADOW; // happens only if locked
 
     if( aLayer != LAYER_SUBGRIDS && !shadow )
@@ -4290,9 +4321,9 @@ void PCB_PAINTER::draw( const PCB_BOARD_OUTLINE* aBoardOutline, int aLayer )
 
 
 void PCB_PAINTER::drawBackdrillIndicator( const BOARD_ITEM* aItem, const VECTOR2D& aCenter,
-                                          int aDrillSize, PCB_LAYER_ID aStartLayer, PCB_LAYER_ID aEndLayer )
+                                          int aBackdrillSize, PCB_LAYER_ID aMustCutLayer, int aOffset )
 {
-    double backdrillRadius = aDrillSize / 2.0;
+    double backdrillRadius = aBackdrillSize / 2.0;
     double lineWidth = std::max( backdrillRadius / 16.0, m_pcbSettings.m_outlineWidth * 2.0 );
 
     // Inset so entire graphic is within backdrill extent
@@ -4308,10 +4339,10 @@ void PCB_PAINTER::drawBackdrillIndicator( const BOARD_ITEM* aItem, const VECTOR2
     constexpr int NUM_DASHES = 12;                             // Number of dashes around the circle
     EDA_ANGLE     dashAngle = ANGLE_360 / ( NUM_DASHES * 2 );  // Dash and gap are equal size
 
-    for( int i = 0; i < NUM_DASHES; ++i )
+    for( int i = aOffset; i < NUM_DASHES; i += 2 )
     {
         EDA_ANGLE startAngle = dashAngle * ( i * 2 );
-        m_gal->SetStrokeColor( m_pcbSettings.GetColor( aItem, i % 2 ? aStartLayer : aEndLayer ) );
+        m_gal->SetStrokeColor( m_pcbSettings.GetColor( aItem, aMustCutLayer ) );
         m_gal->DrawArc( aCenter, backdrillRadius, startAngle, dashAngle );
     }
 }

@@ -23,6 +23,7 @@
 
 #include <kicommon.h>
 #include <widgets/progress_reporter_base.h>
+#include <wx/gdicmn.h>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -38,7 +39,6 @@ class BACKGROUND_JOB_REPORTER;
 class BACKGROUND_JOB_LIST;
 class BACKGROUND_JOBS_MONITOR;
 class wxWindow;
-class wxCloseEvent;
 class wxWindowDestroyEvent;
 
 class KICOMMON_API BACKGROUND_JOB_REPORTER : public PROGRESS_REPORTER_BASE
@@ -65,7 +65,9 @@ private:
     bool updateUI() override;
 
     BACKGROUND_JOBS_MONITOR* m_monitor;
-    std::shared_ptr<BACKGROUND_JOB> m_job;
+
+    // The job owns its reporter so a strong reference here would leak both
+    std::weak_ptr<BACKGROUND_JOB> m_job;
     wxString m_title;
     wxString m_report;
 };
@@ -138,12 +140,7 @@ public:
 
 private:
     /**
-     * Handles removing the shown list window from our list of shown windows
-     */
-    void onListWindowClosed( wxCloseEvent& aEvent );
-
-    /**
-     * Handles a list window that its parent destroys without a close event
+     * Handles removing a destroyed list window from our list of shown windows
      */
     void onListWindowDestroyed( wxWindowDestroyEvent& aEvent );
 

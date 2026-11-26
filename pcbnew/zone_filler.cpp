@@ -2082,6 +2082,7 @@ void ZONE_FILLER::addKnockout( BOARD_ITEM* aItem, PCB_LAYER_ID aLayer, int aGap,
     case PCB_TEXTBOX_T:
     case PCB_TABLE_T:
     case PCB_DRILL_CHART_T:
+    case PCB_STACKUP_TABLE_T:
     case PCB_TARGET_T:
         aItem->TransformShapeToPolygon( aHoles, aLayer, aGap, m_maxError, ERROR_OUTSIDE, aIgnoreLineWidth );
         break;
@@ -3986,7 +3987,7 @@ void ZONE_FILLER::buildThermalSpokes( const ZONE* aZone, PCB_LAYER_ID aLayer,
             // Use pad's thermal spoke angle for both solid and hatch zones.
             // This ensures custom thermal spoke templates are respected.
             if( pad )
-                thermalSpokeAngle = pad->GetThermalSpokeAngle();
+                thermalSpokeAngle = pad->GetThermalSpokeAngle( aLayer );
 
             BOX2I     spokesBox;
             VECTOR2I  position;
@@ -4653,8 +4654,11 @@ bool ZONE_FILLER::refillZoneFromCache( ZONE* aZone, PCB_LAYER_ID aLayer, SHAPE_P
                 if( !otherZone->HigherPriority( aZone ) )
                     return;
 
-                // Same gate as the initial fill so the refill's knockout set matches; same-net
-                // fills are subtracted un-inflated, so a plain bbox test suffices.
+                // Equal-priority zones on the same net share copper, so do not subtract their fills.
+                if( otherZone->SameNet( aZone ) && otherZone->GetAssignedPriority() == aZone->GetAssignedPriority() )
+                    return;
+
+                // Same-net fills are subtracted un-inflated, so a plain bbox test suffices.
                 if( otherZone->SameNet( aZone ) )
                 {
                     if( !otherZone->GetBoundingBox().Intersects( zoneBBox ) )

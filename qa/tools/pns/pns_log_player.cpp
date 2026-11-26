@@ -126,6 +126,7 @@ void PNS_LOG_PLAYER::ReplayLog( PNS_LOG_FILE* aLog, int aStartEventIndex, int aF
         {
             if( routingLayer < ritem->Layers().Start() )
                 routingLayer = ritem->Layers().Start();
+
             if( routingLayer > ritem->Layers().End() )
                 routingLayer = ritem->Layers().End();
         }
@@ -143,6 +144,7 @@ void PNS_LOG_PLAYER::ReplayLog( PNS_LOG_FILE* aLog, int aStartEventIndex, int aF
         case LOGGER::EVT_START_ROUTE:
         {
             wxString msg;
+            PNS::ITEM_SET auxItems;
             PNS::SIZES_SETTINGS sizes( evt.sizes );
             m_board->GetDesignSettings().m_UseConnectedTrackWidth = evt.useConnectedTrackWidth;
             m_iface->SetStartLayerFromPNS( routingLayer );
@@ -152,13 +154,22 @@ void PNS_LOG_PLAYER::ReplayLog( PNS_LOG_FILE* aLog, int aStartEventIndex, int aF
             m_debugDecorator->NewStage( "route-start", 0, PNSLOGINFO );
             m_viewTracker->SetStage( m_debugDecorator->GetStageCount() - 1 );
 
-            PROF_TIMER tmr("route-start");
-            bool status = m_router->StartRouting( evt.p, ritem, routingLayer );
+            for( int i = 1; i < ritems.Size(); i++ )
+                auxItems.Add( ritems[i] );
+
+            PROF_TIMER tmr("route-start");            
+            bool status = m_router->StartRouting( evt.p, ritem, routingLayer, auxItems );
             tmr.Stop();
             double msecs = tmr.msecs();
 
-            msg = wxString::Format( "event [%d/%d]: route-start (%d, %d), layer %d, startitem %p status %d time %.0f ms", eventIdx,
-                                         totalEvents, evt.p.x, evt.p.y, routingLayer, ritem, status ? 1 : 0, msecs);
+            msg = wxString::Format( wxT( "event [%d/%d]: route-start (%d, %d), layer %d, startitem %p status %d time %.0f ms" ),
+                                    eventIdx,
+                                    totalEvents,
+                                    evt.p.x, evt.p.y,
+                                    routingLayer,
+                                    ritem,
+                                    status ? 1 : 0,
+                                    msecs);
 
             m_debugDecorator->Message( msg );
             m_reporter->Report( msg );
@@ -186,8 +197,11 @@ void PNS_LOG_PLAYER::ReplayLog( PNS_LOG_FILE* aLog, int aStartEventIndex, int aF
 
 
 
-            auto msg = wxString::Format( "event [%d/%d]: drag-start (%d, %d) time %.0f ms", eventIdx,
-                totalEvents, evt.p.x, evt.p.y, msecs );
+            wxString msg = wxString::Format( wxT( "event [%d/%d]: drag-start (%d, %d) time %.0f ms" ),
+                                             eventIdx,
+                                             totalEvents,
+                                             evt.p.x, evt.p.y,
+                                             msecs );
 
             m_debugDecorator->Message( msg );
             m_reporter->Report( msg );
@@ -200,8 +214,9 @@ void PNS_LOG_PLAYER::ReplayLog( PNS_LOG_FILE* aLog, int aStartEventIndex, int aF
             m_debugDecorator->NewStage( "fix", 0, PNSLOGINFO );
             m_viewTracker->SetStage( m_debugDecorator->GetStageCount() - 1 );
             bool rv = m_router->FixRoute( evt.p, ritem, false, false );
-            m_debugDecorator->Message( wxString::Format( "fix -> (%d, %d) ret %d",
-                                                        evt.p.x, evt.p.y, rv ? 1 : 0 ) );
+            m_debugDecorator->Message( wxString::Format( wxT( "fix -> (%d, %d) ret %d" ),
+                                                         evt.p.x, evt.p.y,
+                                                         rv ? 1 : 0 ) );
             break;
         }
 
@@ -209,7 +224,7 @@ void PNS_LOG_PLAYER::ReplayLog( PNS_LOG_FILE* aLog, int aStartEventIndex, int aF
         {
             m_debugDecorator->NewStage( "unfix", 0, PNSLOGINFO );
             m_viewTracker->SetStage( m_debugDecorator->GetStageCount() - 1 );
-            m_debugDecorator->Message( wxString::Format( "unfix (%d, %d)", evt.p.x, evt.p.y ) );
+            m_debugDecorator->Message( wxString::Format( wxT( "unfix (%d, %d)" ), evt.p.x, evt.p.y ) );
             m_router->UndoLastSegment();
             break;
         }
@@ -225,7 +240,11 @@ void PNS_LOG_PLAYER::ReplayLog( PNS_LOG_FILE* aLog, int aStartEventIndex, int aF
             tmr.Stop();
             double msecs = tmr.msecs();
 
-            auto msg = wxString::Format( "event [%d/%d]: move (%d, %d) time %.0f ms", eventIdx, totalEvents, evt.p.x, evt.p.y, msecs );
+            wxString msg = wxString::Format( wxT( "event [%d/%d]: move (%d, %d) time %.0f ms" ),
+                                             eventIdx,
+                                             totalEvents,
+                                             evt.p.x, evt.p.y,
+                                             msecs );
 
             m_debugDecorator->Message( msg );
             m_reporter->Report( msg );
@@ -237,7 +256,7 @@ void PNS_LOG_PLAYER::ReplayLog( PNS_LOG_FILE* aLog, int aStartEventIndex, int aF
         {
             m_debugDecorator->NewStage( "toggle-via", 0, PNSLOGINFO );
 
-             auto msg = wxString::Format( "event [%d/%d]: toggle-via", eventIdx, totalEvents );
+             wxString msg = wxString::Format( wxT( "event [%d/%d]: toggle-via" ), eventIdx, totalEvents );
 
             m_debugDecorator->Message( msg );
             m_reporter->Report( msg );

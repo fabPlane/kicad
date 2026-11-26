@@ -1,5 +1,5 @@
 ///////////////////////////////////////////////////////////////////////////
-// C++ code generated with wxFormBuilder (version 4.2.1-0-g80c4cb6a-dirty)
+// C++ code generated with wxFormBuilder (version 4.2.1-0-g80c4cb6)
 // http://www.wxformbuilder.org/
 //
 // PLEASE DO *NOT* EDIT THIS FILE!
@@ -90,13 +90,18 @@ DIALOG_PLOT_BASE::DIALOG_PLOT_BASE( wxWindow* parent, wxWindowID id, const wxStr
 
 	bmiddleSizer = new wxBoxSizer( wxHORIZONTAL );
 
-	m_LayersSizer = new wxStaticBoxSizer( new wxStaticBox( this, wxID_ANY, _("Include Layers") ), wxHORIZONTAL );
+	m_LayersSizer = new wxStaticBoxSizer( new wxStaticBox( this, wxID_ANY, _("Include Layers") ), wxVERTICAL );
 
 	wxArrayString m_layerCheckListBoxChoices;
 	m_layerCheckListBox = new wxCheckListBox( m_LayersSizer->GetStaticBox(), wxID_ANY, wxDefaultPosition, wxDefaultSize, m_layerCheckListBoxChoices, 0 );
 	m_layerCheckListBox->SetMinSize( wxSize( 150,-1 ) );
 
 	m_LayersSizer->Add( m_layerCheckListBox, 1, wxALL|wxEXPAND|wxFIXED_MINSIZE, 3 );
+
+	m_allCopperLayers = new wxCheckBox( m_LayersSizer->GetStaticBox(), wxID_ANY, _("All copper layers"), wxDefaultPosition, wxDefaultSize, 0 );
+	m_allCopperLayers->SetToolTip( _("Plot every copper layer of the board the job runs on, whatever its layer count") );
+
+	m_LayersSizer->Add( m_allCopperLayers, 0, wxALL, 3 );
 
 
 	bmiddleSizer->Add( m_LayersSizer, 1, wxALL|wxEXPAND, 5 );
@@ -146,6 +151,18 @@ DIALOG_PLOT_BASE::DIALOG_PLOT_BASE( wxWindow* parent, wxWindowID id, const wxStr
 	m_zoneFillCheck->SetValue(true);
 	gbSizer1->Add( m_zoneFillCheck, wxGBPosition( 6, 1 ), wxGBSpan( 1, 2 ), wxALIGN_CENTER_VERTICAL|wxLEFT, 30 );
 
+	m_plotFootprintValues = new wxCheckBox( sbOptionsSizer->GetStaticBox(), wxID_ANY, _("Plot footprint values"), wxDefaultPosition, wxDefaultSize, 0 );
+	m_plotFootprintValues->SetValue(true);
+	m_plotFootprintValues->SetToolTip( _("Plot footprint values on silkscreen and fabrication layers") );
+
+	gbSizer1->Add( m_plotFootprintValues, wxGBPosition( 7, 0 ), wxGBSpan( 1, 2 ), wxALIGN_CENTER_VERTICAL|wxLEFT, 5 );
+
+	m_plotRefDes = new wxCheckBox( sbOptionsSizer->GetStaticBox(), wxID_ANY, _("Plot reference designators"), wxDefaultPosition, wxDefaultSize, 0 );
+	m_plotRefDes->SetValue(true);
+	m_plotRefDes->SetToolTip( _("Plot reference designators on silkscreen and fabrication layers") );
+
+	gbSizer1->Add( m_plotRefDes, wxGBPosition( 8, 0 ), wxGBSpan( 1, 2 ), wxALIGN_CENTER_VERTICAL|wxLEFT, 5 );
+
 	drillMarksLabel = new wxStaticText( sbOptionsSizer->GetStaticBox(), wxID_ANY, _("Drill marks:"), wxDefaultPosition, wxDefaultSize, 0 );
 	drillMarksLabel->Wrap( -1 );
 	gbSizer1->Add( drillMarksLabel, wxGBPosition( 0, 1 ), wxGBSpan( 1, 1 ), wxALIGN_CENTER_VERTICAL|wxLEFT, 30 );
@@ -166,16 +183,27 @@ DIALOG_PLOT_BASE::DIALOG_PLOT_BASE( wxWindow* parent, wxWindowID id, const wxStr
 	m_scaleOpt->SetSelection( 1 );
 	gbSizer1->Add( m_scaleOpt, wxGBPosition( 1, 2 ), wxGBSpan( 1, 1 ), wxEXPAND|wxLEFT, 5 );
 
+	m_colorThemeLabel = new wxStaticText( sbOptionsSizer->GetStaticBox(), wxID_ANY, _("Color theme:"), wxDefaultPosition, wxDefaultSize, 0 );
+	m_colorThemeLabel->Wrap( -1 );
+	gbSizer1->Add( m_colorThemeLabel, wxGBPosition( 2, 1 ), wxGBSpan( 1, 1 ), wxALIGN_CENTER_VERTICAL|wxLEFT, 30 );
+
+	wxArrayString m_colorThemeChoices;
+	m_colorTheme = new wxChoice( sbOptionsSizer->GetStaticBox(), wxID_ANY, wxDefaultPosition, wxDefaultSize, m_colorThemeChoices, 0 );
+	m_colorTheme->SetSelection( 0 );
+	m_colorTheme->SetToolTip( _("Select the color theme to use for plotting") );
+
+	gbSizer1->Add( m_colorTheme, wxGBPosition( 2, 2 ), wxGBSpan( 1, 1 ), wxEXPAND|wxLEFT, 5 );
+
 	m_useAuxOriginCheckBox = new wxCheckBox( sbOptionsSizer->GetStaticBox(), wxID_ANY, _("Use drill/place file origin"), wxDefaultPosition, wxDefaultSize, 0 );
 	m_useAuxOriginCheckBox->SetToolTip( _("Use the drill/place file origin as the coordinate origin for plotted files") );
 
-	gbSizer1->Add( m_useAuxOriginCheckBox, wxGBPosition( 2, 1 ), wxGBSpan( 1, 2 ), wxALIGN_CENTER_VERTICAL|wxLEFT, 30 );
+	gbSizer1->Add( m_useAuxOriginCheckBox, wxGBPosition( 3, 1 ), wxGBSpan( 1, 2 ), wxALIGN_CENTER_VERTICAL|wxLEFT, 30 );
 
 	m_plotMirrorOpt = new wxCheckBox( sbOptionsSizer->GetStaticBox(), ID_MIROR_OPT, _("Mirrored plot"), wxDefaultPosition, wxDefaultSize, 0 );
-	gbSizer1->Add( m_plotMirrorOpt, wxGBPosition( 3, 1 ), wxGBSpan( 1, 2 ), wxALIGN_CENTER_VERTICAL|wxLEFT, 30 );
+	gbSizer1->Add( m_plotMirrorOpt, wxGBPosition( 4, 1 ), wxGBSpan( 1, 2 ), wxALIGN_CENTER_VERTICAL|wxLEFT, 30 );
 
 	m_plotPSNegativeOpt = new wxCheckBox( sbOptionsSizer->GetStaticBox(), wxID_ANY, _("Negative plot"), wxDefaultPosition, wxDefaultSize, 0 );
-	gbSizer1->Add( m_plotPSNegativeOpt, wxGBPosition( 4, 1 ), wxGBSpan( 1, 2 ), wxALIGN_CENTER_VERTICAL|wxLEFT, 30 );
+	gbSizer1->Add( m_plotPSNegativeOpt, wxGBPosition( 5, 1 ), wxGBSpan( 1, 2 ), wxALIGN_CENTER_VERTICAL|wxLEFT, 30 );
 
 
 	sbOptionsSizer->Add( gbSizer1, 1, wxEXPAND|wxBOTTOM|wxRIGHT|wxLEFT, 5 );
@@ -524,11 +552,14 @@ DIALOG_PLOT_BASE::DIALOG_PLOT_BASE( wxWindow* parent, wxWindowID id, const wxStr
 	m_plotFormatOpt->Connect( wxEVT_COMMAND_CHOICE_SELECTED, wxCommandEventHandler( DIALOG_PLOT_BASE::SetPlotFormat ), NULL, this );
 	m_browseButton->Connect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_PLOT_BASE::onOutputDirectoryBrowseClicked ), NULL, this );
 	m_openDirButton->Connect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_PLOT_BASE::onOpenOutputDirectory ), NULL, this );
+	m_layerCheckListBox->Connect( wxEVT_COMMAND_CHECKLISTBOX_TOGGLED, wxCommandEventHandler( DIALOG_PLOT_BASE::onLayerToggled ), NULL, this );
+	m_allCopperLayers->Connect( wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler( DIALOG_PLOT_BASE::onAllCopperLayers ), NULL, this );
 	m_plotDNP->Connect( wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler( DIALOG_PLOT_BASE::onDNPCheckbox ), NULL, this );
 	m_sketchPadsOnFabLayers->Connect( wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler( DIALOG_PLOT_BASE::onSketchPads ), NULL, this );
 	m_boardSetup->Connect( wxEVT_COMMAND_HYPERLINK, wxHyperlinkEventHandler( DIALOG_PLOT_BASE::onBoardSetup ), NULL, this );
 	m_useGerberX2Format->Connect( wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler( DIALOG_PLOT_BASE::OnGerberX2Checked ), NULL, this );
 	m_DXF_plotModeOpt->Connect( wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler( DIALOG_PLOT_BASE::OnChangeDXFPlotMode ), NULL, this );
+	m_SVGColorChoice->Connect( wxEVT_COMMAND_CHOICE_SELECTED, wxCommandEventHandler( DIALOG_PLOT_BASE::onSVGColorChoice ), NULL, this );
 	m_PDFColorChoice->Connect( wxEVT_COMMAND_CHOICE_SELECTED, wxCommandEventHandler( DIALOG_PLOT_BASE::onPDFColorChoice ), NULL, this );
 	m_buttonDRC->Connect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_PLOT_BASE::onRunDRC ), NULL, this );
 	m_sdbSizer1Apply->Connect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_PLOT_BASE::CreateDrillFile ), NULL, this );
@@ -542,11 +573,14 @@ DIALOG_PLOT_BASE::~DIALOG_PLOT_BASE()
 	m_plotFormatOpt->Disconnect( wxEVT_COMMAND_CHOICE_SELECTED, wxCommandEventHandler( DIALOG_PLOT_BASE::SetPlotFormat ), NULL, this );
 	m_browseButton->Disconnect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_PLOT_BASE::onOutputDirectoryBrowseClicked ), NULL, this );
 	m_openDirButton->Disconnect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_PLOT_BASE::onOpenOutputDirectory ), NULL, this );
+	m_layerCheckListBox->Disconnect( wxEVT_COMMAND_CHECKLISTBOX_TOGGLED, wxCommandEventHandler( DIALOG_PLOT_BASE::onLayerToggled ), NULL, this );
+	m_allCopperLayers->Disconnect( wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler( DIALOG_PLOT_BASE::onAllCopperLayers ), NULL, this );
 	m_plotDNP->Disconnect( wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler( DIALOG_PLOT_BASE::onDNPCheckbox ), NULL, this );
 	m_sketchPadsOnFabLayers->Disconnect( wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler( DIALOG_PLOT_BASE::onSketchPads ), NULL, this );
 	m_boardSetup->Disconnect( wxEVT_COMMAND_HYPERLINK, wxHyperlinkEventHandler( DIALOG_PLOT_BASE::onBoardSetup ), NULL, this );
 	m_useGerberX2Format->Disconnect( wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler( DIALOG_PLOT_BASE::OnGerberX2Checked ), NULL, this );
 	m_DXF_plotModeOpt->Disconnect( wxEVT_COMMAND_CHECKBOX_CLICKED, wxCommandEventHandler( DIALOG_PLOT_BASE::OnChangeDXFPlotMode ), NULL, this );
+	m_SVGColorChoice->Disconnect( wxEVT_COMMAND_CHOICE_SELECTED, wxCommandEventHandler( DIALOG_PLOT_BASE::onSVGColorChoice ), NULL, this );
 	m_PDFColorChoice->Disconnect( wxEVT_COMMAND_CHOICE_SELECTED, wxCommandEventHandler( DIALOG_PLOT_BASE::onPDFColorChoice ), NULL, this );
 	m_buttonDRC->Disconnect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_PLOT_BASE::onRunDRC ), NULL, this );
 	m_sdbSizer1Apply->Disconnect( wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( DIALOG_PLOT_BASE::CreateDrillFile ), NULL, this );

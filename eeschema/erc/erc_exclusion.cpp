@@ -44,6 +44,15 @@ static void canonicalizeExclusion( kiapi::schematic::ErcExclusion& aMessage )
     // Display names can change without changing an exclusion's sheet identity.
     auto& marker = *aMessage.mutable_marker();
 
+    // Clear additional fields not part of the exclusion
+    marker.clear_description();
+    marker.clear_severity();
+    marker.clear_excluded();
+
+    // Also report-only: the marker id changes on every run, and the comment lives on the exclusion
+    marker.clear_id();
+    marker.clear_exclusion_comment();
+
     if( marker.has_sheet_specific_path() )
         marker.mutable_sheet_specific_path()->clear_path_human_readable();
 
@@ -85,7 +94,10 @@ ERC_EXCLUSION ERC_EXCLUSION::FromMarker( const SCH_MARKER& aMarker )
     google::protobuf::Any container;
 
     aMarker.Serialize( container );
-    container.UnpackTo( ex.m_impl->message.mutable_marker() );
+
+    if( !container.UnpackTo( ex.m_impl->message.mutable_marker() ) )
+        wxFAIL_MSG( wxT( "Failed to unpack ERC_EXCLUSION from internal serialization" ) );
+
     canonicalizeExclusion( ex.m_impl->message );
     ex.SetComment( aMarker.GetComment() );
 

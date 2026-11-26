@@ -312,7 +312,7 @@ void PL_EDITOR_FRAME::setupUIConditions()
     ACTION_MANAGER*   mgr = m_toolManager->GetActionManager();
     EDITOR_CONDITIONS cond( this );
 
-    wxASSERT( mgr );
+    wxCHECK2( mgr, return );
 
 #define ENABLE( x ) ACTION_CONDITIONS().Enable( x )
 #define CHECK( x )  ACTION_CONDITIONS().Check( x )
@@ -419,12 +419,8 @@ void PL_EDITOR_FRAME::OnExit( wxCommandEvent& aEvent )
 bool PL_EDITOR_FRAME::canCloseWindow( wxCloseEvent& aEvent )
 {
     // Shutdown blocks must be determined and vetoed as early as possible
-    if( KIPLATFORM::APP::SupportsShutdownBlockReason()
-            && aEvent.GetId() == wxEVT_QUERY_END_SESSION
-            && IsContentModified() )
-    {
+    if( isBlockableSessionEnd() && IsContentModified() )
         return false;
-    }
 
     if( IsContentModified() )
     {
@@ -899,7 +895,7 @@ DS_DATA_ITEM* PL_EDITOR_FRAME::CreateDrawingSheetItem( int aType )
 
 void PL_EDITOR_FRAME::SyncDataItem( DS_DATA_ITEM* aItem )
 {
-    DS_DRAW_ITEM_LIST dummy( drawSheetIUScale );
+    DS_DRAW_ITEM_LIST dummy( drawSheetIUScale, FOR_CANVAS );
     dummy.SetPaperFormat( GetPageSettings().GetTypeAsString() );
     dummy.SetTitleBlock( &GetTitleBlock() );
     dummy.SetProject( &Prj() );

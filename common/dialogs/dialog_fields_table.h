@@ -124,12 +124,18 @@ protected:
     static void loadJobBomFmtPreset( const JOB_EXPORT_BOM& aJob, BOM_FMT_PRESET& aPreset );
     void        saveJobSettings( JOB_EXPORT_BOM& aJob );
 
+    /// Remember the presets as loaded, which may differ from the stored ones after normalization
+    void rememberLoadedPresets();
+
+    /// Store what changed since rememberLoadedPresets(); true if anything did
     bool savePresets( bool aSaveCurrentSettings );
 
 
     void RestorePanelLayout();
     void SavePanelLayout();
     void SaveColumnWidths();
+
+    int getStoredColumnWidth( const std::string& aFieldName ) const;
 
     void SetupColumnProperties( int aCol );
     void SetupAllColumnProperties();
@@ -219,4 +225,5 @@ protected:
     BOM_FMT_PRESET*                    m_lastSelectedBomFmtPreset = nullptr;
     wxArrayString                      m_bomFmtPresetMRU;
 
+    FIELDS_TABLE_BOM_SETTINGS          m_loadedSettings;   // As rememberLoadedPresets() found them
 };

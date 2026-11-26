@@ -291,9 +291,12 @@ bool downgradeProtoExclusion( const nlohmann::json& aEntry, bool aPreTen, nlohma
 
     if( type.is_string() )
     {
+        // DRCET_LINE_WIDTH is a later alias of the frozen DRCET_TEXT_THICKNESS value
+        const std::string name = type == "DRCET_LINE_WIDTH" ? "DRCET_TEXT_THICKNESS" : type.get<std::string>();
+
         for( const LEGACY_DRC_ERROR& candidate : legacyDrcErrors )
         {
-            if( type == candidate.m_protoName )
+            if( name == candidate.m_protoName )
                 error = &candidate;
         }
     }
@@ -958,6 +961,24 @@ void downgradeBoardSettings( nlohmann::json& aDoc, bool aPreTen, COMPATIBILITY_R
         }
     }
 
+    // Schema 4 renamed the text thickness keys to line width
+    auto restoreKey = [&settings]( const char* aParent, const char* aCurrent, const char* aLegacy )
+    {
+        if( !settings.contains( aParent ) || !settings[aParent].is_object() )
+            return;
+
+        nlohmann::json& parent = settings[aParent];
+
+        if( !parent.contains( aCurrent ) )
+            return;
+
+        parent[aLegacy] = parent[aCurrent];
+        parent.erase( aCurrent );
+    };
+
+    restoreKey( "rule_severities", "line_width", "text_thickness" );
+    restoreKey( "rules", "min_silk_line_width", "min_text_thickness" );
+
     if( settings.contains( "meta" ) && settings["meta"].is_object() )
         settings["meta"]["version"] = 2;
 }
@@ -966,6 +987,8 @@ void downgradeBoardSettings( nlohmann::json& aDoc, bool aPreTen, COMPATIBILITY_R
 
 void DowngradeProjectFileJson( nlohmann::json& aDoc, const DOWNGRADE_TARGET& aTarget, COMPATIBILITY_REPORT& aReport )
 {
+    const PROJECT_SCHEMAS_REVIEWED reviewed;
+
     auto knownSchema = [&]( const nlohmann::json& aSettings, int aMaximum, const wxString& aName )
     {
         if( aSettings.is_object() && aSettings.contains( "meta" ) && aSettings["meta"].is_object()
@@ -980,22 +1003,24 @@ void DowngradeProjectFileJson( nlohmann::json& aDoc, const DOWNGRADE_TARGET& aTa
         return true;
     };
 
-    bool known = knownSchema( aDoc, 4, _( "project" ) );
+    bool known = knownSchema( aDoc, reviewed.m_Project, _( "project" ) );
 
     if( aDoc.contains( "net_settings" ) )
-        known &= knownSchema( aDoc["net_settings"], 5, _( "net settings" ) );
+        known &= knownSchema( aDoc["net_settings"], reviewed.m_NetSettings, _( "net settings" ) );
 
     if( aDoc.contains( "tuning_profiles" ) )
-        known &= knownSchema( aDoc["tuning_profiles"], 2, _( "tuning profiles" ) );
+        known &= knownSchema( aDoc["tuning_profiles"], reviewed.m_TuningProfiles, _( "tuning profiles" ) );
 
     if( aDoc.contains( "component_class_settings" ) )
-        known &= knownSchema( aDoc["component_class_settings"], 0, _( "component class settings" ) );
+        known &= knownSchema( aDoc["component_class_settings"], reviewed.m_ComponentClasses,
+                              _( "component class settings" ) );
 
     if( aDoc.contains( "erc" ) )
-        known &= knownSchema( aDoc["erc"], 1, _( "ERC settings" ) );
+        known &= knownSchema( aDoc["erc"], reviewed.m_Erc, _( "ERC settings" ) );
 
     if( aDoc.contains( "board" ) && aDoc["board"].is_object() && aDoc["board"].contains( "design_settings" ) )
-        known &= knownSchema( aDoc["board"]["design_settings"], 3, _( "board design settings" ) );
+        known &= knownSchema( aDoc["board"]["design_settings"], reviewed.m_BoardDesignSettings,
+                              _( "board design settings" ) );
 
     if( !known )
         return;

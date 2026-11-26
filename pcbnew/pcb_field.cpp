@@ -61,6 +61,9 @@ PCB_FIELD::PCB_FIELD( const PCB_FIELD& aField ):
         PCB_TEXT( aField.GetParent(), PCB_FIELD_T )
 {
     *this = aField;
+
+    // Assignment keeps the new KIID, and a copy must not churn the uuid written to the file
+    SetUuidDirect( aField.m_Uuid );
 }
 
 
@@ -79,7 +82,9 @@ void PCB_FIELD::Serialize( google::protobuf::Any &aContainer ) const
 {
     kiapi::board::types::Field field;
     Serialize( field );
-    aContainer.PackFrom( field );
+
+    if( !aContainer.PackFrom( field ) )
+        wxFAIL_MSG( wxT( "Failed to pack PCB_FIELD" ) );
 }
 
 
@@ -361,10 +366,11 @@ double PCB_FIELD::Similarity( const BOARD_ITEM& aOther ) const
             return 0.0;
     }
 
-    if( m_name == other.m_name )
-        return 1.0;
+    // Fields are identified by name, so differing names never pair
+    if( m_name != other.m_name )
+        return 0.0;
 
-    return EDA_TEXT::Similarity( other );
+    return 1.0;
 }
 
 static struct PCB_FIELD_DESC

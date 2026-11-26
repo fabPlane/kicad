@@ -228,6 +228,12 @@ void BRDITEMS_PLOTTER::PlotPad( const PAD* aPad, PCB_LAYER_ID aLayer, const COLO
                 metadata.SetApertureAttrib( GBR_APERTURE_METADATA::GBR_APERTURE_ATTRIB_CONNECTORPAD );
             break;
 
+        case PAD_ATTRIB::NON_COMPONENT: // Non-component only pads on any layer
+            // For now, keep the existing "Conductor" logic above, but this can be changed later if needed.
+            // For example:
+            // metadata.SetApertureAttrib( "internal" );
+            break;
+
         case PAD_ATTRIB::SMD:        // SMD pads (on external copper layer only)
                                      // with solder paste and mask
             if( plotOnExternalCopperLayer )
@@ -520,6 +526,7 @@ void BRDITEMS_PLOTTER::PlotBoardGraphicItem( const BOARD_ITEM* item ) const
 
     case PCB_TABLE_T:
     case PCB_DRILL_CHART_T:
+    case PCB_STACKUP_TABLE_T:
     {
         const PCB_TABLE* table = static_cast<const PCB_TABLE*>( item );
 
@@ -721,6 +728,7 @@ void BRDITEMS_PLOTTER::PlotFootprintGraphicItems( const FOOTPRINT* aFootprint ) 
 
         case PCB_TABLE_T:
         case PCB_DRILL_CHART_T:
+        case PCB_STACKUP_TABLE_T:
         {
             const PCB_TABLE* table = static_cast<const PCB_TABLE*>( item );
 
@@ -1175,8 +1183,13 @@ void BRDITEMS_PLOTTER::PlotShape( const PCB_SHAPE* aShape ) const
 
                     // Fracture before plotting the fill to avoid invalid gerber regions generated from
                     // self-intersecting or overlapping outlines.
+                    // Note that we can't do this in the DXF case because we weren't able to separately
+                    // stroke the outline to preserve degenerate near-zero-width spikes.  See above
+                    // comments.
                     SHAPE_POLY_SET tmpPoly = origPoly.CloneDropTriangulation();
-                    tmpPoly.Fracture();
+
+                    if( m_plotter->GetPlotterType() != PLOT_FORMAT::DXF )
+                        tmpPoly.Fracture();
 
                     if( margin < 0 )
                         tmpPoly.Inflate( margin / 2, CORNER_STRATEGY::ROUND_ALL_CORNERS, aShape->GetMaxError() );

@@ -482,7 +482,9 @@ void LIB_SYMBOL::Serialize( google::protobuf::Any& aContainer ) const
 {
     kiapi::schematic::types::SchematicSymbol def;
     Serialize( def );
-    aContainer.PackFrom( def );
+
+    if( !aContainer.PackFrom( def ) )
+        wxFAIL_MSG( wxT( "Failed to pack LIB_SYMBOL" ) );
 }
 
 
@@ -501,7 +503,7 @@ bool LIB_SYMBOL::Deserialize( const kiapi::schematic::types::SchematicSymbol& aI
     {
     case SchematicSymbolType::SST_GLOBAL_POWER: SetGlobalPower(); break;
     case SchematicSymbolType::SST_LOCAL_POWER:  SetLocalPower();  break;
-    default: break;
+    default:                                                      break;
     }
 
     if( def.has_attributes() )
@@ -594,7 +596,9 @@ bool LIB_SYMBOL::Deserialize( const kiapi::schematic::types::SchematicSymbol& aI
 
     SetShowPinNumbers( def.show_pin_numbers() );
     SetShowPinNames( def.show_pin_names() );
-    SetPinNameOffset( UnpackDistance( def.pin_name_offset(), schIUScale ) );
+
+    if( def.has_pin_name_offset() )
+        SetPinNameOffset( UnpackDistance( def.pin_name_offset(), schIUScale ) );
 
     if( def.has_extends() )
         SetParentName( wxString::FromUTF8( def.extends().entry_name() ) );
@@ -1358,7 +1362,7 @@ bool LIB_SYMBOL::ResolveTextVar( wxString* token, int aDepth ) const
 void LIB_SYMBOL::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS& aPlotOpts, int aUnit, int aBodyStyle,
                        const VECTOR2I& aOffset, bool aDimmed )
 {
-    wxASSERT( aPlotter != nullptr );
+    wxCHECK2( aPlotter != nullptr, return );
 
     SCH_RENDER_SETTINGS* renderSettings = getRenderSettings( aPlotter );
     COLOR4D              color = renderSettings->GetLayerColor( LAYER_DEVICE );
@@ -1403,7 +1407,7 @@ void LIB_SYMBOL::Plot( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS&
 void LIB_SYMBOL::PlotFields( PLOTTER* aPlotter, bool aBackground, const SCH_PLOT_OPTS& aPlotOpts, int aUnit,
                              int aBodyStyle, const VECTOR2I& aOffset, bool aDimmed )
 {
-    wxASSERT( aPlotter != nullptr );
+    wxCHECK2( aPlotter != nullptr, return );
 
     SCH_RENDER_SETTINGS* renderSettings = getRenderSettings( aPlotter );
     COLOR4D              color = renderSettings->GetLayerColor( LAYER_FIELDS );
@@ -1483,7 +1487,7 @@ void LIB_SYMBOL::FixupDrawItems()
 
 void LIB_SYMBOL::RemoveDrawItem( SCH_ITEM* aItem )
 {
-    wxASSERT( aItem != nullptr );
+    wxCHECK2( aItem != nullptr, return );
 
     // none of the MANDATORY_FIELDS may be removed in RAM, but they may be
     // omitted when saving to disk.
@@ -1703,12 +1707,12 @@ bool LIB_SYMBOL::PinsConflictWith( const LIB_SYMBOL& aOtherPart, bool aTestNums,
 {
     for( const SCH_PIN* pin : GetGraphicalPins() )
     {
-        wxASSERT( pin );
+        wxCHECK2( pin, continue );
         bool foundMatch = false;
 
         for( const SCH_PIN* otherPin : aOtherPart.GetGraphicalPins() )
         {
-            wxASSERT( otherPin );
+            wxCHECK2( otherPin, continue );
 
             // Same unit?
             if( pin->GetUnit() != otherPin->GetUnit() )
@@ -3204,6 +3208,8 @@ void LIB_SYMBOL::AppendParentEmbeddedFiles( std::vector<EMBEDDED_FILES*>& aStack
     std::set<const LIB_SYMBOL*> visited;
     visited.insert( this );
 
+    std::vector<EMBEDDED_FILES*> ancestralEmbeddedFiles;
+
     std::shared_ptr<LIB_SYMBOL> parent = m_parent.lock();
 
     while( parent )
@@ -3212,16 +3218,19 @@ void LIB_SYMBOL::AppendParentEmbeddedFiles( std::vector<EMBEDDED_FILES*>& aStack
         if( visited.count( parent.get() ) )
         {
             wxLogTrace( traceSymbolInheritance,
-                        wxT( "AppendParentEmbeddedFiles: Circular inheritance detected in "
-                             "symbol '%s' (lib: %s)" ),
+                        wxT( "AppendParentEmbeddedFiles: Circular inheritance detected in symbol '%s' (lib: %s)" ),
                         m_name, m_libId.GetLibNickname().wx_str() );
             break;
         }
 
         visited.insert( parent.get() );
-        aStack.push_back( parent->GetEmbeddedFiles() );
+        ancestralEmbeddedFiles.push_back( parent->GetEmbeddedFiles() );
         parent = parent->GetParent().lock();
     }
+
+    // Embedded files stack goes from most-global to most-local
+    for( EMBEDDED_FILES* files : std::ranges::reverse_view( ancestralEmbeddedFiles ) )
+        aStack.push_back( files );
 }
 
 

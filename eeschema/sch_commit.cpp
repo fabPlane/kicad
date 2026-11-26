@@ -206,6 +206,7 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
     bool                dirtyConnectivity = false;
     bool                refreshConnectivity = false;
     bool                refreshHierarchy = false;
+    bool                refSuffixChanged = false;
     SCH_CLEANUP_FLAGS   connectivityCleanUp = NO_CLEANUP;
 
     if( Empty() )
@@ -268,8 +269,8 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
             };
 
     // We don't know that anything will be added to the entered group, but it does no harm to
-    // add it to the commit anyway.
-    if( enteredGroup && frame )
+    // add it to the commit anyway (well, as long as we're not trying to remove it).
+    if( enteredGroup && GetStatus( enteredGroup ) == 0 )
         Modify( enteredGroup, frame->GetScreen() );
 
 
@@ -421,6 +422,11 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
                 if( selTool )
                     selTool->RemoveItemFromSel( schItem, true /* quiet mode */ );
 
+                // In an undo we're going to re-create from the item, not the image.  That seems wrong, but
+                // it would be a big risky change to make it use the image, so let's just reset the selection
+                // flag for now (so that on undo it comes back selected).
+                schItem->SetFlags( SELECTED );
+
                 itemsDeselected = true;
             }
 
@@ -472,6 +478,12 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
                 const bool       hierarchyChanged = originalSheet->HasHierarchyChanges( *modifiedSheet );
 
                 refreshHierarchy |= hierarchyChanged;
+
+                if( hierarchyChanged && originalSheet->HasRefSuffixChanges( *modifiedSheet ) )
+                {
+                    static_cast<SCH_SHEET*>( schItem )->SetDescendantsModified();
+                    refSuffixChanged = true;
+                }
 
                 // Stable ports are invalidated through their containing screen, including shared instances
                 fullSheetUpdate = !ADVANCED_CFG::GetCfg().m_ConnectivityEngine
@@ -594,6 +606,10 @@ void SCH_COMMIT::pushSchEdit( const wxString& aMessage, int aCommitFlags )
 
     if( refreshHierarchy && frame )
         frame->UpdateHierarchyNavigator();
+
+    // An API edit can change a suffix while one of its child sheets is on screen
+    if( refSuffixChanged && frame )
+        frame->RefreshComposedReferences();
 
     m_toolMgr->PostEvent( { TC_MESSAGE, TA_MODEL_CHANGE, AS_GLOBAL } );
 

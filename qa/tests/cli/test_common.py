@@ -20,6 +20,7 @@
 
 import pytest
 import utils
+import json
 import re
 import shutil
 from pathlib import Path
@@ -79,6 +80,31 @@ def test_jobset_run_relative_project_path(tmp_path):
     # A crash would manifest as a non-zero/negative exit code; the archive must also be produced.
     assert exitcode == 0
     assert (work_dir / "output" / "issue24474-gerber.zip").exists()
+
+
+def test_jobset_drc_uses_selected_variant(tmp_path):
+    source_dir = Path(__file__).resolve().parent.parent.parent / "data" / "pcbnew" / "issue24900"
+    work_dir = tmp_path / "issue24900"
+    shutil.copytree(source_dir, work_dir)
+
+    command = [
+        utils.kicad_cli(),
+        "jobset", "run",
+        "--file", "TestProject.kicad_jobset",
+        "--output", "f4454cb0-b93f-4f0c-bcdd-e3cd0a2dfc4a",
+        "TestProject.kicad_pro",
+    ]
+
+    stdout, stderr, exitcode = utils.run_and_capture(command, cwd=work_dir)
+
+    assert exitcode == 0, stdout + stderr
+
+    with (work_dir / "output" / "TestProject-Variant1-drc.json").open(encoding="utf-8") as report_file:
+        descriptions = [v["description"] for v in json.load(report_file)["schematic_parity"]]
+
+    # R1 is DNP and R2 is excluded from BOM only in Variant1
+    assert any("Do not populate" in d for d in descriptions)
+    assert any("bill of materials" in d for d in descriptions)
 
 
 def test_jobset_run_unknown_job_type(tmp_path):

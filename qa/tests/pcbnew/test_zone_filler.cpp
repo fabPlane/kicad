@@ -1059,7 +1059,7 @@ BOOST_FIXTURE_TEST_CASE( RegressionThermalReliefAnnularRing45, ZONE_FILL_TEST_FI
                                                           "is inside the zone but not flashing on %s",
                                                           pad->GetNumber(),
                                                           pcbIUScale.IUTomm( pad->GetDrillSize().x ),
-                                                          pad->GetThermalSpokeAngle().AsDegrees(),
+                                                          pad->GetThermalSpokeAngle( PADSTACK::ALL_LAYERS ).AsDegrees(),
                                                           pad->GetNetname(),
                                                           m_board->GetLayerName( layer ) ) );
                     padsWithMissingFlashing++;
@@ -3254,6 +3254,60 @@ BOOST_FIXTURE_TEST_CASE( CopperThievingZone_HatchSurvivesTrackBisection, ZONE_FI
 
 
 /**
+ * Equal-priority zones on the same net must keep their shared copper during iterative refill.
+ */
+BOOST_FIXTURE_TEST_CASE( EqualPrioritySameNetRefillKeepsOverlap, ZONE_FILL_TEST_FIXTURE )
+{
+    ADVANCED_CFG& cfg = const_cast<ADVANCED_CFG&>( ADVANCED_CFG::GetCfg() );
+    bool          originalIterativeRefill = cfg.m_ZoneFillIterativeRefill;
+
+    struct ScopeGuard
+    {
+        bool& ref;
+        bool  orig;
+        ~ScopeGuard() { ref = orig; }
+    } guard{ cfg.m_ZoneFillIterativeRefill, originalIterativeRefill };
+
+    for( bool iterative : { false, true } )
+    {
+        cfg.m_ZoneFillIterativeRefill = iterative;
+        KI_TEST::LoadBoard( m_settingsManager, "zone_refill_equal_priority", m_board );
+
+        std::map<wxString, ZONE*> zones;
+
+        for( ZONE* zone : m_board->Zones() )
+            zones[zone->GetZoneName()] = zone;
+
+        BOOST_REQUIRE_EQUAL( zones.size(), 3 );
+        BOOST_REQUIRE( zones.contains( wxS( "Equal A" ) ) );
+        BOOST_REQUIRE( zones.contains( wxS( "Equal B" ) ) );
+        BOOST_REQUIRE( zones.contains( wxS( "Refill trigger" ) ) );
+
+        ZONE* a = zones.at( wxS( "Equal A" ) );
+        ZONE* b = zones.at( wxS( "Equal B" ) );
+        ZONE* trigger = zones.at( wxS( "Refill trigger" ) );
+
+        BOOST_REQUIRE( a->SameNet( b ) );
+        BOOST_REQUIRE( a->SameNet( trigger ) );
+        BOOST_REQUIRE_EQUAL( a->GetAssignedPriority(), b->GetAssignedPriority() );
+        BOOST_REQUIRE_GT( trigger->GetAssignedPriority(), a->GetAssignedPriority() );
+
+        KI_TEST::FillZones( m_board.get() );
+
+        const VECTOR2I sharedPoint( pcbIUScale.mmToIU( 68 ), pcbIUScale.mmToIU( 55 ) );
+
+        for( ZONE* zone : { a, b } )
+        {
+            BOOST_REQUIRE( zone->HasFilledPolysForLayer( F_Cu ) );
+            BOOST_CHECK_MESSAGE( zone->GetFilledPolysList( F_Cu )->Contains( sharedPoint ),
+                                 wxString::Format( "%s lost shared copper with iterative refill %s",
+                                                   zone->GetZoneName(), iterative ? wxS( "on" ) : wxS( "off" ) ) );
+        }
+    }
+}
+
+
+/**
  * Test that iterative zone refill terminates and warns when it cannot converge.
  *
  * The board has overlapping zones arranged so that island removal in one zone
@@ -4033,7 +4087,14 @@ BOOST_FIXTURE_TEST_CASE( RegressionSameNetZoneFillScheduler, ZONE_FILL_TEST_FIXT
 
     const PCB_LAYER_ID layer = F_Cu;
 
-    for( int pass = 0; pass < 64; ++pass )
+    // The race is only reported reliably under a sanitizer, so other builds just smoke test the fill
+#if defined( KICAD_SANITIZE_THREADS ) || defined( KICAD_SANITIZE_ADDRESS )
+    const int passes = 64;
+#else
+    const int passes = 8;
+#endif
+
+    for( int pass = 0; pass < passes; ++pass )
     {
         BOOST_REQUIRE_NO_THROW( KI_TEST::FillZones( m_board.get() ) );
 
@@ -4507,7 +4568,7 @@ BOOST_FIXTURE_TEST_CASE( ThermalOverrideOnSolidZoneKeepsSpokes, ZONE_FILL_TEST_F
 
     BOOST_REQUIRE_MESSAGE( overriddenPad, "No same-net pad sits inside a zone on this board." );
 
-    overriddenPad->SetLocalZoneConnection( ZONE_CONNECTION::THERMAL );
+    overriddenPad->SetLocalZoneConnection( PADSTACK::ALL_LAYERS, ZONE_CONNECTION::THERMAL );
 
     KI_TEST::FillZones( m_board.get() );
 
