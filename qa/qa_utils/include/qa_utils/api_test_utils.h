@@ -93,9 +93,6 @@ void testEnums( bool aPartiallyMapped = false, std::optional<KiCadEnum> aNullMap
                 try
                 {
                     result = ToProtoEnum<KiCadEnum, ProtoEnum>( value );
-
-                    // wx builds with asserts compiled out return unknown instead of throwing
-                    unmapped = result == static_cast<ProtoEnum>( 0 ) && !( aNullMapping && *aNullMapping == value );
                 }
                 catch( KI_TEST::WX_ASSERT_ERROR )
                 {
@@ -105,7 +102,7 @@ void testEnums( bool aPartiallyMapped = false, std::optional<KiCadEnum> aNullMap
                 // The mapping functions report an unmapped value through wxCHECK, which a wx
                 // built with wxDEBUG_LEVEL=0 compiles out; there the "unknown" zero comes back
                 // instead of the exception, and it means the same thing
-                if( result == static_cast<ProtoEnum>( 0 ) )
+                if( result == static_cast<ProtoEnum>( 0 ) && !( aNullMapping && *aNullMapping == value ) )
                     mapped = false;
 
                 if( !mapped )
